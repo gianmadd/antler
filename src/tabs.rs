@@ -23,6 +23,7 @@ use crate::{Antler, CloseTab, Quit, Save, menu_item};
 actions!(antler, [TogglePreview]);
 actions!(antler, [ToggleLineComment, ToggleBlockComment, MoveLineUp, MoveLineDown, CopyLineUp, CopyLineDown, DeleteLine]);
 actions!(antler, [InsertLineBelow, InsertLineAbove, Unfold, ToggleWordWrap, ZoomIn, ZoomOut, ZoomReset]);
+actions!(antler, [AddNextMatch, SelectAllMatches, CursorsAtLineEnds]);
 actions!(antler, [CloseOtherTabs, CloseTabsToTheRight, CloseSavedTabs, CloseAllTabs, CopyTabPath, CopyRelativeTabPath, RevealTabInFinder]);
 actions!(antler, [NextChange, PreviousChange, StageSelectedRanges, UnstageSelectedRanges, RevertSelectedRanges]);
 actions!(antler, [RevealTabInExplorer, KeepTabOpen, ReopenClosedTab, NextRecentTab, PreviousRecentTab, NextTab, PreviousTab]);
@@ -60,6 +61,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-enter", InsertLineAbove, ed),
         KeyBinding::new("cmd-alt-]", Unfold, ed),
         KeyBinding::new("alt-z", ToggleWordWrap, ed),
+        KeyBinding::new("cmd-d", AddNextMatch, ed),
+        KeyBinding::new("cmd-shift-l", SelectAllMatches, ed),
+        KeyBinding::new("cmd-f2", SelectAllMatches, ed),
+        KeyBinding::new("shift-alt-i", CursorsAtLineEnds, ed),
         KeyBinding::new("cmd-=", ZoomIn, ed),
         KeyBinding::new("cmd-+", ZoomIn, ed), // layouts with a + key of its own (Italian): VS Code binds both
         KeyBinding::new("cmd--", ZoomOut, ed),
@@ -183,6 +188,31 @@ impl Antler {
         });
     }
 
+    /// Cmd+D, Cmd+Shift+L, Shift+Alt+I: extra cursors through `add_selection` (the editor has no getter for them all,
+    /// so `self.cursors` remembers what Cmd+D added). `f` gets the text, the session so far and the editor's
+    /// selection, and returns the selections to set (`true`: the first one replaces all) or to add.
+    fn multi_cursor(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&str, &[std::ops::Range<usize>], std::ops::Range<usize>) -> (bool, Vec<std::ops::Range<usize>>)) {
+        let Some((editor, _)) = self.active_editor() else { return };
+        let cursors = std::mem::take(&mut self.cursors);
+        self.cursors = editor.update(cx, |e, cx| {
+            let sel = e.selected_range();
+            let session = if cursors.contains(&sel) { cursors } else { vec![] };
+            let (replace, new) = f(&e.value(), &session, sel);
+            let mut all = if replace { vec![] } else { session };
+            for r in new {
+                if all.is_empty() {
+                    e.set_selected_range(r.clone(), cx);
+                } else if !all.contains(&r) {
+                    e.add_selection(r.clone(), cx);
+                } else {
+                    continue;
+                }
+                all.push(r);
+            }
+            all
+        });
+    }
+
     /// Cmd+= / Cmd+- / Cmd+0: the editors' font size, one pixel a step; not saved.
     fn zoom(&mut self, step: Option<f32>, cx: &mut Context<Self>) {
         let size = self.font_size.unwrap_or(cx.theme().mono_font_size).as_f32();
@@ -212,6 +242,18 @@ impl Antler {
                 for (editor, _) in this.editors.values() {
                     editor.update(cx, |e, cx| e.set_soft_wrap(this.wrap, window, cx));
                 }
+            }))
+            .on_action(cx.listener(|this, _: &AddNextMatch, _, cx| {
+                this.multi_cursor(cx, |t, session, sel| match session.last() {
+                    Some(last) => (false, editing::next_occurrence(t, last.clone(), last.end).into_iter().collect()),
+                    // first press: an empty selection becomes its word; a selection stays and gets the next match
+                    None if sel.is_empty() => (true, editing::next_occurrence(t, sel.clone(), 0).into_iter().collect()),
+                    None => (true, std::iter::once(sel.clone()).chain(editing::next_occurrence(t, sel.clone(), sel.end)).collect()),
+                })
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllMatches, _, cx| this.multi_cursor(cx, |t, _, sel| (true, editing::all_occurrences(t, sel)))))
+            .on_action(cx.listener(|this, _: &CursorsAtLineEnds, _, cx| {
+                this.multi_cursor(cx, |t, _, sel| (true, editing::line_end_cursors(t, sel).into_iter().map(|o| o..o).collect()))
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-1.), cx)))
