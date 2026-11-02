@@ -589,7 +589,7 @@ Host first
         let fake = tmp.path().join("fake-ssh");
         let log = tmp.path().join("calls");
         // skips ssh's options and the destination, runs the rest like the login shell would
-        let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\nwhile [ $# -gt 0 ]; do case \"$1\" in -o|-F|-p) shift 2;; -T) shift;; --) shift; break;; *) break;; esac; done\nshift\nHOME='{}' exec /bin/sh -c \"$*\"\n", log.display(), home.display());
+        let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\nwhile [ $# -gt 0 ]; do case \"$1\" in -o|-F|-p) shift 2;; -T) shift;; --) shift; break;; *) break;; esac; done\nshift\nANTLER_SERVER_GRACE_SECS=2 HOME='{}' exec /bin/sh -c \"$*\"\n", log.display(), home.display());
         std::fs::write(&fake, script).unwrap();
                 std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 

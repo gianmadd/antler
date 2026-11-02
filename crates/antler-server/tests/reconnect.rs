@@ -20,6 +20,7 @@ fn a_dropped_connection_comes_back_with_its_watches() {
             let mut c = Command::new(env!("CARGO_BIN_EXE_antler-server"))
                 .arg("proxy")
                 .env("ANTLER_SERVER_DIR", &dir)
+                .env("ANTLER_SERVER_GRACE_SECS", "2")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()
