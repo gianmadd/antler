@@ -1,13 +1,18 @@
 //! The client side of the protocol: a [`Host`] that forwards each call to `antler-server` and waits for the answer.
 //! Calls are blocking and may run concurrently from several threads (each waits for its own id).
+//!
+//! A `Remote` made by [`Remote::open`] / [`Remote::lazy`] knows how to make its connection again (a [`Connector`]):
+//! once [`supervised`](Remote::supervise), a lost connection is retried on VS Code's schedule (`reconnect`), the
+//! active watches are sent again on the new one, and [`Status`] changes are reported. Calls made meanwhile fail
+//! with `ConnectionAborted`.
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::discovery::Repo;
 use crate::host::{Envs, Host, Meta, WatchGuard};
@@ -16,41 +21,77 @@ use crate::search::{Query, Results};
 
 type Answer = (Res, Vec<u8>);
 
+/// What the server's stdout and stdin are, and the process behind them (killed when replaced or dropped).
+pub type Transport = (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<Child>);
+/// Makes a new connection; it applies its own timeout (VS Code: 30 s per attempt).
+pub type Connector = dyn Fn() -> Result<Transport, String> + Send + Sync;
+
+/// What a supervised `Remote` reports.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Status {
+    Connected,
+    /// Attempt number (from 1) to get the connection back.
+    Reconnecting { attempt: u32 },
+    /// The grace time is over; the text is the last error.
+    GaveUp(String),
+}
+
+type Watches = Arc<Mutex<HashMap<u64, (PathBuf, Box<dyn Fn(PathBuf) + Send>)>>>;
+
 /// Who is waiting for what; shared with the reader thread, which is the only one reading the server's output.
 #[derive(Default)]
 struct Shared {
     /// `closed` once the connection is gone: every waiter is released with an error, and new calls fail at once.
     pending: Mutex<(bool, HashMap<u64, Sender<Answer>>)>,
-    watches: Mutex<HashMap<u64, Box<dyn Fn(PathBuf) + Send>>>,
 }
 
+/// One connection.
 struct Inner {
     writer: Mutex<Box<dyn Write + Send>>,
     shared: Arc<Shared>,
-    next: AtomicU64,
+    next: Arc<AtomicU64>,
+}
+
+/// What lives across connections: the ids, the watches, the way to reconnect.
+struct Core {
+    conn: Mutex<Arc<Inner>>,
+    next: Arc<AtomicU64>,
+    watches: Watches,
+    connector: Option<Arc<Connector>>,
+    status: Mutex<Option<Arc<dyn Fn(Status) + Send + Sync>>>,
+    /// The process behind the current connection.
+    child: Mutex<Option<Child>>,
+    closed: AtomicBool,
+    supervised: AtomicBool,
+    reconnecting: AtomicBool,
+    /// Counts connections, so the end of an old one is not taken for the end of the current one.
+    generation: AtomicU64,
 }
 
 /// What the server said about itself in its `Hello`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ServerInfo {
     pub os: String,
     pub arch: String,
 }
 
 pub struct Remote {
-    inner: Arc<Inner>,
+    core: Arc<Core>,
+    /// The first connection's server (empty for a `lazy` one that has not connected).
     pub server: ServerInfo,
-    /// The server process when this `Remote` started it; killed on drop.
-    child: Mutex<Option<Child>>,
 }
 
 fn lost() -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionAborted, "the connection to the host was lost")
 }
 
-impl Remote {
-    /// Talks to a server on `input`/`output` (its stdout / its stdin). Reads the `Hello` first.
-    pub fn connect(mut input: impl Read + Send + 'static, output: impl Write + Send + 'static) -> Result<Remote, String> {
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl Inner {
+    /// Reads the `Hello` and starts the reader thread; `on_end` runs when the connection ends.
+    fn start(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>, next: Arc<AtomicU64>, watches: Watches, on_end: impl FnOnce() + Send + 'static) -> Result<(Arc<Inner>, ServerInfo), String> {
         let hello = read_frame::<_, ResFrame>(&mut input).map_err(|e| format!("no answer from the server: {e}"))?;
         let server = match hello {
             Some((ResFrame { res: Res::Hello { protocol, os, arch }, .. }, _)) if protocol == VERSION => ServerInfo { os, arch },
@@ -62,31 +103,191 @@ impl Remote {
         std::thread::spawn(move || {
             while let Ok(Some((ResFrame { id, res }, body))) = read_frame(&mut input) {
                 if let Res::Event { path } = res {
-                    reader.watches.lock().unwrap_or_else(|e| e.into_inner()).get(&id).map(|f| f(native_wire(&path)));
-                } else if let Some(tx) = reader.pending.lock().unwrap_or_else(|e| e.into_inner()).1.remove(&id) {
+                    lock(&watches).get(&id).map(|(_, f)| f(native_wire(&path)));
+                } else if let Some(tx) = lock(&reader.pending).1.remove(&id) {
                     tx.send((res, body)).ok();
                 }
             }
-            let mut pending = reader.pending.lock().unwrap_or_else(|e| e.into_inner());
-            *pending = (true, HashMap::new()); // dropping the senders wakes every waiter
+            *lock(&reader.pending) = (true, HashMap::new()); // dropping the senders wakes every waiter
+            on_end();
         });
-        let inner = Inner { writer: Mutex::new(Box::new(output)), shared, next: AtomicU64::new(1) };
-        Ok(Remote { inner: Arc::new(inner), server, child: Mutex::new(None) })
+        Ok((Arc::new(Inner { writer: Mutex::new(output), shared, next }), server))
     }
 
-    /// Starts `command` (a local `antler-server`; stage 3: `ssh host antler-server`) and talks to it.
+    /// A connection that is already lost: what a `lazy` Remote has before it connects.
+    fn dead(next: Arc<AtomicU64>) -> Arc<Inner> {
+        let shared = Arc::new(Shared::default());
+        lock(&shared.pending).0 = true;
+        Arc::new(Inner { writer: Mutex::new(Box::new(io::sink())), shared, next })
+    }
+
+    fn is_lost(&self) -> bool {
+        lock(&self.shared.pending).0
+    }
+}
+
+impl Core {
+    fn new(connector: Option<Arc<Connector>>) -> Arc<Core> {
+        let next = Arc::new(AtomicU64::new(1));
+        Arc::new(Core {
+            conn: Mutex::new(Inner::dead(next.clone())),
+            next,
+            watches: Default::default(),
+            connector,
+            status: Mutex::new(None),
+            child: Mutex::new(None),
+            closed: AtomicBool::new(false),
+            supervised: AtomicBool::new(false),
+            reconnecting: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+        })
+    }
+
+    fn notify(&self, s: Status) {
+        let cb = lock(&self.status).clone();
+        if let Some(cb) = cb {
+            cb(s);
+        }
+    }
+
+    /// Makes `transport` the current connection and sends the active watches again on it.
+    fn install(core: &Arc<Core>, (input, output, mut child): Transport) -> Result<ServerInfo, String> {
+        let generation = core.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let weak: Weak<Core> = Arc::downgrade(core);
+        let on_end = move || {
+            if let Some(core) = weak.upgrade() {
+                Core::lost(&core, generation);
+            }
+        };
+        let result = Inner::start(input, output, core.next.clone(), core.watches.clone(), on_end).and_then(|(inner, info)| {
+            let watches: Vec<(u64, PathBuf)> = lock(&core.watches).iter().map(|(id, (root, _))| (*id, root.clone())).collect();
+            for (id, root) in watches {
+                let rx = inner.register(id).map_err(text)?;
+                inner.send(id, Req::Watch { root: wire_path(&root) }, &[]).map_err(text)?;
+                match rx.recv() {
+                    Ok((Res::Ok, _)) => {}
+                    Ok(_) => drop(lock(&core.watches).remove(&id)), // its folder is gone: the watch ends
+                    Err(_) => return Err(lost().to_string()),
+                }
+            }
+            Ok((inner, info))
+        });
+        match result {
+            Ok((inner, info)) => {
+                *lock(&core.conn) = inner;
+                if let Some(mut old) = std::mem::replace(&mut *lock(&core.child), child.take()) {
+                    drop(old.kill());
+                    drop(old.wait());
+                }
+                Ok(info)
+            }
+            Err(e) => {
+                if let Some(c) = child.as_mut() {
+                    drop(c.kill());
+                    drop(c.wait());
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// The reader of connection `generation` ended.
+    fn lost(core: &Arc<Core>, generation: u64) {
+        if core.supervised.load(Ordering::SeqCst) && core.generation.load(Ordering::SeqCst) == generation {
+            Core::start_reconnecting(core);
+        }
+    }
+
+    fn start_reconnecting(core: &Arc<Core>) {
+        if core.closed.load(Ordering::SeqCst) || core.connector.is_none() || core.reconnecting.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let core = core.clone();
+        std::thread::spawn(move || {
+            let (lost_at, connector) = (Instant::now(), core.connector.clone().unwrap());
+            let mut n = 0;
+            loop {
+                core.notify(Status::Reconnecting { attempt: n + 1 });
+                let until = Instant::now() + crate::reconnect::wait(n);
+                while Instant::now() < until && !core.closed.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(100).min(until.saturating_duration_since(Instant::now())));
+                }
+                if core.closed.load(Ordering::SeqCst) {
+                    return;
+                }
+                match connector().and_then(|t| Core::install(&core, t)) {
+                    Ok(_) if !lock(&core.conn).is_lost() => {
+                        core.reconnecting.store(false, Ordering::SeqCst);
+                        core.notify(Status::Connected);
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(e) if crate::reconnect::expired(lost_at.elapsed()) => {
+                        core.reconnecting.store(false, Ordering::SeqCst);
+                        core.notify(Status::GaveUp(e));
+                        return;
+                    }
+                    Err(_) => {}
+                }
+                n += 1;
+            }
+        });
+    }
+}
+
+impl Remote {
+    /// Talks to a server on `input`/`output` (its stdout / its stdin). Reads the `Hello` first. Never reconnects.
+    pub fn connect(input: impl Read + Send + 'static, output: impl Write + Send + 'static) -> Result<Remote, String> {
+        let core = Core::new(None);
+        let server = Core::install(&core, (Box::new(input), Box::new(output), None))?;
+        Ok(Remote { core, server })
+    }
+
+    /// Starts `command` (a local `antler-server`) and talks to it.
     pub fn spawn(mut command: Command) -> Result<Remote, String> {
         let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().map_err(|e| format!("cannot start the server: {e}"))?;
         let (stdin, stdout) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
-        let remote = Remote::connect(stdout, stdin).inspect_err(|_| drop(child.kill()))?;
-        *remote.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
-        Ok(remote)
+        let core = Core::new(None);
+        let server = Core::install(&core, (Box::new(stdout), Box::new(stdin), Some(child)))?;
+        Ok(Remote { core, server })
+    }
+
+    /// Connects once with `connector` (an error is returned, not retried); [`supervise`](Self::supervise) it to
+    /// have later losses retried.
+    pub fn open(connector: Arc<Connector>) -> Result<Remote, String> {
+        let core = Core::new(Some(connector.clone()));
+        let server = Core::install(&core, connector()?)?;
+        Ok(Remote { core, server })
+    }
+
+    /// Not connected yet: [`supervise`](Self::supervise) makes the first connection with the retry schedule.
+    pub fn lazy(connector: Arc<Connector>) -> Remote {
+        Remote { core: Core::new(Some(connector)), server: ServerInfo::default() }
+    }
+
+    /// From now on a lost (or not yet made) connection is retried until the grace time ends, and `on_status` hears of it.
+    pub fn supervise(&self, on_status: impl Fn(Status) + Send + Sync + 'static) {
+        *lock(&self.core.status) = Some(Arc::new(on_status));
+        self.core.supervised.store(true, Ordering::SeqCst);
+        if self.inner().is_lost() {
+            Core::start_reconnecting(&self.core);
+        }
+    }
+
+    /// Whether there is a live connection now.
+    pub fn is_connected(&self) -> bool {
+        !self.inner().is_lost()
+    }
+
+    fn inner(&self) -> Arc<Inner> {
+        lock(&self.core.conn).clone()
     }
 }
 
 impl Drop for Remote {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        self.core.closed.store(true, Ordering::SeqCst);
+        if let Some(mut child) = lock(&self.core.child).take() {
             // closing its stdin makes the server finish; kill is for one that does not
             drop(child.kill());
             drop(child.wait());
@@ -159,67 +360,67 @@ fn unexpected<T>(what: &str) -> io::Result<T> {
 
 impl Host for Remote {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        match self.inner.call(Req::Read { path: wire_path(path) }, &[], None)? {
+        match self.inner().call(Req::Read { path: wire_path(path) }, &[], None)? {
             (Res::Bytes, body) => Ok(body),
             _ => unexpected("read"),
         }
     }
 
     fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.inner.call(Req::Write { path: wire_path(path) }, bytes, None).map(drop)
+        self.inner().call(Req::Write { path: wire_path(path) }, bytes, None).map(drop)
     }
 
     fn create(&self, path: &Path, folder: bool) -> io::Result<PathBuf> {
-        match self.inner.call(Req::Create { path: wire_path(path), folder }, &[], None)? {
+        match self.inner().call(Req::Create { path: wire_path(path), folder }, &[], None)? {
             (Res::Path { path }, _) => Ok(PathBuf::from(path)),
             _ => unexpected("create"),
         }
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.inner.ok(Req::Rename { from: wire_path(from), to: wire_path(to) })
+        self.inner().ok(Req::Rename { from: wire_path(from), to: wire_path(to) })
     }
 
     fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.inner.ok(Req::Copy { from: wire_path(from), to: wire_path(to) })
+        self.inner().ok(Req::Copy { from: wire_path(from), to: wire_path(to) })
     }
 
     /// There is no Trash on the host: deleted for good, so there is nothing to undo.
     fn trash(&self, path: &Path) -> Result<Option<PathBuf>, String> {
-        self.inner.ok(Req::Trash { path: wire_path(path) }).map(|()| None).map_err(text)
+        self.inner().ok(Req::Trash { path: wire_path(path) }).map(|()| None).map_err(text)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
-        self.inner.ok(Req::RemoveFile { path: wire_path(path) })
+        self.inner().ok(Req::RemoveFile { path: wire_path(path) })
     }
 
     fn metadata(&self, path: &Path) -> io::Result<Meta> {
-        match self.inner.call(Req::Metadata { path: wire_path(path) }, &[], None)? {
+        match self.inner().call(Req::Metadata { path: wire_path(path) }, &[], None)? {
             (Res::Meta(m), _) => Ok(Meta { is_dir: m.is_dir, is_file: m.is_file, size: m.size, mtime: m.mtime.map(|(s, n)| UNIX_EPOCH + Duration::new(s, n)) }),
             _ => unexpected("metadata"),
         }
     }
 
     fn exists(&self, path: &Path) -> bool {
-        matches!(self.inner.call(Req::Exists { path: wire_path(path) }, &[], None), Ok((Res::Bool { value: true }, _)))
+        matches!(self.inner().call(Req::Exists { path: wire_path(path) }, &[], None), Ok((Res::Bool { value: true }, _)))
     }
 
     fn list_dir(&self, dir: &Path) -> Vec<(PathBuf, bool)> {
-        match self.inner.call(Req::ListDir { dir: wire_path(dir), exclude: exclude() }, &[], None) {
+        match self.inner().call(Req::ListDir { dir: wire_path(dir), exclude: exclude() }, &[], None) {
             Ok((Res::Entries { entries }, _)) => entries.into_iter().map(|(p, d)| (PathBuf::from(p), d)).collect(),
             _ => Vec::new(),
         }
     }
 
     fn discover(&self, root: &Path, max_depth: usize) -> Vec<Repo> {
-        match self.inner.call(Req::Discover { root: wire_path(root), max_depth }, &[], None) {
+        match self.inner().call(Req::Discover { root: wire_path(root), max_depth }, &[], None) {
             Ok((Res::Repos { repos }, _)) => repos.into_iter().map(|r| Repo { path: PathBuf::from(r.path), worktree_of: r.worktree_of.map(PathBuf::from) }).collect(),
             _ => Vec::new(),
         }
     }
 
     fn files(&self, root: &Path, repos: &[PathBuf]) -> Vec<PathBuf> {
-        match self.inner.call(Req::Files { root: wire_path(root), repos: strings(repos), exclude: exclude() }, &[], None) {
+        match self.inner().call(Req::Files { root: wire_path(root), repos: strings(repos), exclude: exclude() }, &[], None) {
             Ok((Res::Files { files }, _)) => files.into_iter().map(PathBuf::from).collect(),
             _ => Vec::new(),
         }
@@ -230,7 +431,7 @@ impl Host for Remote {
             return Results::default(); // like the walk that stops before its first file
         }
         let req = Req::Search { root: wire_path(root), repos: strings(repos), query: query.clone(), limit, exclude: exclude() };
-        match self.inner.call(req, &[], Some(cancel)) {
+        match self.inner().call(req, &[], Some(cancel)) {
             Ok((Res::Results(r), _)) => r.into(),
             Ok(_) => Results { error: Some("unexpected answer to search".into()), ..Default::default() },
             Err(e) => Results { error: Some(e.to_string()), ..Default::default() },
@@ -238,12 +439,13 @@ impl Host for Remote {
     }
 
     fn watch(&self, root: &Path, on_change: Box<dyn Fn(PathBuf) + Send>) -> Result<WatchGuard, String> {
-        let id = self.inner.next.fetch_add(1, Ordering::Relaxed);
-        // before the request: events may follow its answer immediately
-        self.inner.shared.watches.lock().unwrap_or_else(|e| e.into_inner()).insert(id, on_change);
-        let guard = WatchStop { inner: self.inner.clone(), id };
-        let rx = self.inner.register(id).map_err(text)?;
-        self.inner.send(id, Req::Watch { root: wire_path(root) }, &[]).map_err(text)?;
+        let inner = self.inner();
+        let id = self.core.next.fetch_add(1, Ordering::Relaxed);
+        // before the request: events may follow its answer immediately; kept (with the root) to send it again after a reconnect
+        lock(&self.core.watches).insert(id, (root.to_path_buf(), on_change));
+        let guard = WatchStop { core: self.core.clone(), id };
+        let rx = inner.register(id).map_err(text)?;
+        inner.send(id, Req::Watch { root: wire_path(root) }, &[]).map_err(text)?;
         match rx.recv() {
             Ok((Res::Ok, _)) => Ok(Box::new(guard)),
             Ok((Res::Err { msg, .. }, _)) => Err(msg),
@@ -258,7 +460,7 @@ impl Host for Remote {
             stdin: stdin.map(str::to_string),
             envs: envs.iter().map(|(k, v)| (k.to_string(), v.to_string_lossy().into_owned())).collect(),
         };
-        match self.inner.call(req, &[], None) {
+        match self.inner().call(req, &[], None) {
             Ok((Res::Text { text }, _)) => Ok(text),
             Ok(_) => Err("unexpected answer to git".into()),
             Err(e) => Err(e.to_string()),
@@ -268,14 +470,15 @@ impl Host for Remote {
 
 /// Dropping it stops the watch on the server and the callback here.
 struct WatchStop {
-    inner: Arc<Inner>,
+    core: Arc<Core>,
     id: u64,
 }
 
 impl Drop for WatchStop {
     fn drop(&mut self) {
-        self.inner.shared.watches.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
-        let cancel = self.inner.next.fetch_add(1, Ordering::Relaxed);
-        self.inner.send(cancel, Req::Cancel { target: self.id }, &[]).ok();
+        lock(&self.core.watches).remove(&self.id);
+        let cancel = self.core.next.fetch_add(1, Ordering::Relaxed);
+        let inner = lock(&self.core.conn).clone();
+        inner.send(cancel, Req::Cancel { target: self.id }, &[]).ok();
     }
 }
