@@ -19,25 +19,7 @@ use crate::style::{self, FG, FG_FAINT, RAISE, ROW, SEL, badge, badge_color, c};
 use crate::workspace;
 use crate::{Antler, menu_item, tip};
 
-actions!(explorer, [RenameEntry, DeleteEntry, CancelName, UndoFileOp, RedoFileOp, ClearFilter, FindNext, FindPrev, CopyEntries, CutEntries, PasteEntries]);
-
-/// Enter renames and Cmd+Backspace deletes the selected row, Cmd+Z and Cmd+Shift+Z undo and redo file ops,
-/// Esc clears the typed text, Up and Down (and Enter) move between its matches, Cmd+C / Cmd+X / Cmd+V copy, cut and paste; inside the name field the Input's own keys win.
-pub(crate) fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("enter", RenameEntry, Some("Explorer")),
-        KeyBinding::new("cmd-backspace", DeleteEntry, Some("Explorer")),
-        KeyBinding::new("cmd-z", UndoFileOp, Some("Explorer")),
-        KeyBinding::new("cmd-shift-z", RedoFileOp, Some("Explorer")),
-        KeyBinding::new("escape", ClearFilter, Some("Explorer")),
-        KeyBinding::new("down", FindNext, Some("Explorer")),
-        KeyBinding::new("up", FindPrev, Some("Explorer")),
-        KeyBinding::new("cmd-c", CopyEntries, Some("Explorer")),
-        KeyBinding::new("cmd-x", CutEntries, Some("Explorer")),
-        KeyBinding::new("cmd-v", PasteEntries, Some("Explorer")),
-        KeyBinding::new("escape", CancelName, Some("ExplorerName > Input")),
-    ]);
-}
+actions!(explorer, [RenameEntry, DeleteEntry, CancelName, UndoFileOp, RedoFileOp, ClearFilter, FindNext, FindPrev, CopyEntries, CutEntries, PasteEntries, CopyEntryPath, CopyEntryRelativePath]);
 
 /// What an Explorer row drags: the selection, if the row is in it, is read at the drop.
 #[derive(Clone)]
@@ -257,6 +239,14 @@ impl Antler {
         if let Some((path, _)) = self.selected_entry() {
             self.ws.copy(self.ws.selection_for(&path));
             cx.notify();
+        }
+    }
+
+    /// Alt+Cmd+C / Alt+Shift+Cmd+C: the selected row's path.
+    fn copy_entry_path(&mut self, relative: bool, cx: &mut Context<Self>) {
+        if let Some((path, _)) = self.selected_entry() {
+            let path = if relative { path.strip_prefix(&self.ws.root).unwrap_or(&path) } else { &path };
+            cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
         }
     }
 
@@ -528,6 +518,8 @@ impl Antler {
             .on_action(cx.listener(Self::copy_selected))
             .on_action(cx.listener(Self::cut_selected))
             .on_action(cx.listener(Self::paste_selected))
+            .on_action(cx.listener(|this, _: &CopyEntryPath, _, cx| this.copy_entry_path(false, cx)))
+            .on_action(cx.listener(|this, _: &CopyEntryRelativePath, _, cx| this.copy_entry_path(true, cx)))
             // a drop below the rows lands in the Root
             .on_drop(cx.listener(|this, d: &DraggedEntry, window, cx| {
                 let paths = this.ws.selection_for(&d.path);

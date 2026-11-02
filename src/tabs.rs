@@ -18,12 +18,12 @@ use gpui_kit::*;
 use crate::editing::{self, Edit};
 use crate::style::{self, ACCENT, FG, FG_DIM, FG_FAINT, HOVER, LINE, LINE_SOFT, MAIN, RAISE, SEL, SIDE, c};
 use crate::workspace::{self, CloseScope, TabKind};
-use crate::{Antler, CloseTab, Quit, Save, menu_item};
+use crate::{Antler, CloseTab, Quit, Save, SaveAll, menu_item};
 
 actions!(antler, [TogglePreview]);
 actions!(antler, [ToggleLineComment, ToggleBlockComment, MoveLineUp, MoveLineDown, CopyLineUp, CopyLineDown, DeleteLine]);
 actions!(antler, [InsertLineBelow, InsertLineAbove, Unfold, ToggleWordWrap, ZoomIn, ZoomOut, ZoomReset]);
-actions!(antler, [AddNextMatch, SelectAllMatches, CursorsAtLineEnds]);
+actions!(antler, [AddNextMatch, SelectAllMatches, CursorsAtLineEnds, UnfoldAll, FindNextMatch, FindPreviousMatch]);
 actions!(antler, [CloseOtherTabs, CloseTabsToTheRight, CloseSavedTabs, CloseAllTabs, CopyTabPath, CopyRelativeTabPath, RevealTabInFinder]);
 actions!(antler, [NextChange, PreviousChange, StageSelectedRanges, UnstageSelectedRanges, RevertSelectedRanges]);
 actions!(antler, [RevealTabInExplorer, KeepTabOpen, ReopenClosedTab, NextRecentTab, PreviousRecentTab, NextTab, PreviousTab]);
@@ -42,53 +42,6 @@ pub(crate) fn editor_menu(editor: Editor) -> Editor {
             .menu("Stage Selected Ranges", Box::new(StageSelectedRanges))
             .menu("Revert Selected Ranges", Box::new(RevertSelectedRanges))
     })
-}
-
-/// VS Code's macOS keys for the editor commands. Only in the code editor (not the commit box or search field), and
-/// bound after gpui_kit::init so they win over the editor's own cmd-enter and shift-alt-up/down (extra cursors,
-/// still on cmd-alt-up/down). Cmd+] / Cmd+[ (indent) and Cmd+Z come with the editor.
-pub(crate) fn bind_keys(cx: &mut App) {
-    let ed = Some("Input && mode == editor");
-    cx.bind_keys([
-        KeyBinding::new("cmd-/", ToggleLineComment, ed),
-        KeyBinding::new("alt-shift-a", ToggleBlockComment, ed),
-        KeyBinding::new("alt-up", MoveLineUp, ed),
-        KeyBinding::new("alt-down", MoveLineDown, ed),
-        KeyBinding::new("shift-alt-up", CopyLineUp, ed),
-        KeyBinding::new("shift-alt-down", CopyLineDown, ed),
-        KeyBinding::new("cmd-shift-k", DeleteLine, ed),
-        KeyBinding::new("cmd-enter", InsertLineBelow, ed),
-        KeyBinding::new("cmd-shift-enter", InsertLineAbove, ed),
-        KeyBinding::new("cmd-alt-]", Unfold, ed),
-        KeyBinding::new("alt-z", ToggleWordWrap, ed),
-        KeyBinding::new("cmd-d", AddNextMatch, ed),
-        KeyBinding::new("cmd-shift-l", SelectAllMatches, ed),
-        KeyBinding::new("cmd-f2", SelectAllMatches, ed),
-        KeyBinding::new("shift-alt-i", CursorsAtLineEnds, ed),
-        KeyBinding::new("cmd-=", ZoomIn, ed),
-        KeyBinding::new("cmd-+", ZoomIn, ed), // layouts with a + key of its own (Italian): VS Code binds both
-        KeyBinding::new("cmd--", ZoomOut, ed),
-        KeyBinding::new("cmd-0", ZoomReset, ed),
-    ]);
-    // the tab commands, VS Code's macOS defaults; for Copy Path and Reveal in Finder, VS Code's "active file" cmd-k
-    // chords, which work anywhere. Close to the Right and Reveal in Explorer View have no default key.
-    cx.bind_keys([
-        KeyBinding::new("alt-cmd-t", CloseOtherTabs, None),
-        KeyBinding::new("cmd-k u", CloseSavedTabs, None),
-        KeyBinding::new("alt-cmd-w", CloseAllTabs, None),
-        KeyBinding::new("cmd-k cmd-w", CloseAllTabs, None),
-        KeyBinding::new("cmd-k alt-cmd-c", CopyTabPath, None),
-        KeyBinding::new("cmd-k shift-alt-cmd-c", CopyRelativeTabPath, None),
-        KeyBinding::new("cmd-k r", RevealTabInFinder, None),
-        KeyBinding::new("cmd-k enter", KeepTabOpen, None),
-        KeyBinding::new("shift-cmd-t", ReopenClosedTab, None),
-        KeyBinding::new("ctrl-tab", NextRecentTab, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousRecentTab, None),
-        KeyBinding::new("alt-cmd-right", NextTab, None),
-        KeyBinding::new("alt-cmd-left", PreviousTab, None),
-        KeyBinding::new("alt-f5", NextChange, None),
-        KeyBinding::new("shift-alt-f5", PreviousChange, None),
-    ]);
 }
 
 /// A tab being dragged to a new place in the strip: its index, and what follows the pointer.
@@ -231,6 +184,17 @@ impl Antler {
         cx.notify();
     }
 
+    /// Cmd+G / Shift+Cmd+G: the editor's find panel moves to the next or previous match and selects it.
+    fn step_find(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if let Some((editor, _)) = self.active_editor() {
+            editor.update(cx, |e, cx| {
+                if let Some(range) = if forward { e.next_search_match(cx) } else { e.previous_search_match(cx) } {
+                    e.set_selected_range(range, cx);
+                }
+            });
+        }
+    }
+
     /// The editor commands on the element around the editor; the keys are in `bind_keys`.
     fn editor_actions(el: Div, cx: &mut Context<Self>) -> Div {
         el.on_action(cx.listener(|this, _: &ToggleLineComment, w, cx| this.edit_lines(w, cx, editing::toggle_comment)))
@@ -248,6 +212,18 @@ impl Antler {
                     editor.update(cx, |e, cx| e.unfold_at(Position::new(e.cursor_position().line + 1, 0), cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &UnfoldAll, _, cx| {
+                if let Some((editor, _)) = this.active_editor() {
+                    editor.update(cx, |e, cx| {
+                        let starts: Vec<u32> = e.display_map().folded_ranges().iter().map(|f| f.start_line as u32).collect();
+                        for line in starts {
+                            e.unfold_at(Position::new(line + 1, 0), cx);
+                        }
+                    });
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FindNextMatch, _, cx| this.step_find(true, cx)))
+            .on_action(cx.listener(|this, _: &FindPreviousMatch, _, cx| this.step_find(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleWordWrap, window, cx| {
                 this.wrap = !this.wrap;
                 for (editor, _) in this.editors.values() {
@@ -319,6 +295,12 @@ impl Antler {
         {
             cx.notify();
         }
+    }
+
+    /// Alt+Cmd+S: writes every file tab with unsaved changes.
+    pub(crate) fn save_all(&mut self, _: &SaveAll, window: &mut Window, cx: &mut Context<Self>) {
+        let jobs = self.ws.dirty_tabs().into_iter().filter_map(|ix| self.ws.save(ix)).collect();
+        self.write(jobs, window, cx, |_, _, _| {});
     }
 
     /// Cmd+S: writes the active file tab, then rescans so the Git view and open diffs follow.
@@ -647,18 +629,19 @@ impl Antler {
     pub(crate) fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let mark = img(crate::icons::MARK).size(px(128.)).opacity(0.25);
         let below = if self.ws.has_folder() {
-            let hints = [("Explorer", "⇧⌘E"), ("Git", "⇧⌘G"), ("Search", "⇧⌘F"), ("Go to File", "⌘P"), ("Open Folder", "⌘O"), ("Close Folder", "⌘K F")];
-            let cell = |text: &'static str| div().h(px(16.)).flex().items_center().child(text);
+            let ids = [("Explorer", "workbench.view.explorer"), ("Git", "workbench.view.scm"), ("Search", "workbench.view.search"), ("Go to File", "workbench.action.quickOpen"), ("Open Folder", "workbench.action.files.openFolder"), ("Close Folder", "workbench.action.closeFolder")];
+            let hints = ids.map(|(label, id)| (label.to_string(), crate::keys::hint(cx, id).unwrap_or_default()));
+            let cell = |text: String| div().h(px(16.)).flex().items_center().child(text);
             h_flex()
                 .gap(px(32.))
                 .text_color(c(FG_DIM))
                 // two left-aligned columns: labels, then keys; the block itself stays centred under the mark
-                .child(v_flex().gap(px(8.)).items_start().text_size(px(13.)).children(hints.map(|(label, _)| cell(label))))
-                .child(v_flex().gap(px(8.)).items_start().font_family(cx.theme().mono_font_family.clone()).text_size(px(12.)).children(hints.map(|(_, key)| cell(key))))
+                .child(v_flex().gap(px(8.)).items_start().text_size(px(13.)).children(hints.iter().map(|(label, _)| cell(label.clone()))))
+                .child(v_flex().gap(px(8.)).items_start().font_family(cx.theme().mono_font_family.clone()).text_size(px(12.)).children(hints.iter().map(|(_, key)| cell(key.clone()))))
                 .into_any_element()
         } else {
             Button::new("open-folder")
-                .label("Open Folder…   ⌘O")
+                .label(format!("Open Folder…   {}", crate::keys::hint(cx, "workbench.action.files.openFolder").unwrap_or_default()))
                 .on_click(cx.listener(|this, _, window, cx| this.open_folder(&crate::OpenFolder, window, cx)))
                 .into_any_element()
         };
@@ -913,7 +896,7 @@ impl Antler {
                 .icon(IconName::Eye)
                 .label("Preview")
                 .selected(f.rendered)
-                .tooltip("Toggle Preview (⇧⌘V)")
+                .tooltip(crate::keys::label(cx, "Toggle Preview", "markdown.showPreview"))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_preview(&TogglePreview, window, cx)))
         });
         let path = path.split('/').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ›  ");
@@ -925,14 +908,14 @@ impl Antler {
                     this.sync_diff(cx);
                 }))
             };
-            let step = |id: &'static str, icon, tip_text: &'static str, forward: bool| {
+            let step = |id: &'static str, icon, tip_text: String, forward: bool| {
                 Button::new(id).ghost().xsmall().icon(icon).tooltip(tip_text).on_click(cx.listener(move |this, _, w, cx| this.step_change(forward, w, cx)))
             };
             h_flex()
                 .flex_none()
                 .gap(px(8.))
-                .child(step("previous-change", IconName::ArrowUp, "Previous Change (⇧⌥F5)", false))
-                .child(step("next-change", IconName::ArrowDown, "Next Change (⌥F5)", true))
+                .child(step("previous-change", IconName::ArrowUp, crate::keys::label(cx, "Previous Change", "workbench.action.editor.previousChange"), false))
+                .child(step("next-change", IconName::ArrowDown, crate::keys::label(cx, "Next Change", "workbench.action.editor.nextChange"), true))
                 .child(
                     Button::new("open-file")
                         .ghost()

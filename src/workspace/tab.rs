@@ -78,7 +78,7 @@ pub enum Reopen {
     Diff(DiffSource),
 }
 
-/// Which tabs a tab's menu (or ⌥⌘T, ⌘K U, ⌥⌘W) closes, from the tab it was opened on.
+/// Which tabs a tab's menu (or ⌥⌘T, ⌘K U, ⌘K ⌘W) closes, from the tab it was opened on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CloseScope {
     Others,

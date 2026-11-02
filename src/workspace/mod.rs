@@ -68,6 +68,8 @@ pub struct Workspace {
     pub confirm_drag_and_drop: bool,
     /// The view the Activity bar shows in the side panel; `None` = panel closed.
     pub view: Option<View>,
+    /// The view the side panel showed when it was last closed: Toggle Sidebar opens it again.
+    shown: View,
     /// Explorer view: the content of the Root and of each expanded folder, as (path, is folder), sorted.
     /// Collapsing a folder keeps its expanded subfolders, like VS Code.
     tree: HashMap<PathBuf, Vec<(PathBuf, bool)>>,
@@ -140,6 +142,7 @@ impl Workspace {
             state_file: None,
             confirm_drag_and_drop: true,
             view: Some(View::Explorer),
+            shown: View::Explorer,
             tree: HashMap::new(),
             rows: Vec::new(),
             badges: HashMap::new(),
@@ -226,6 +229,7 @@ impl Workspace {
             state_file: self.state_file.take(),
             confirm_drag_and_drop: self.confirm_drag_and_drop,
             view: self.view,
+            shown: self.shown,
             graph: self.graph.fresh(),
             last_error: self.last_error.take(), // a settings error in a window opened without a folder: shown after this first scan
             ..Workspace::new(root)
@@ -401,7 +405,22 @@ impl Workspace {
 impl Workspace {
     /// A click on a Activity bar icon (or its shortcut): shows `view`, or closes the panel if it is already shown.
     pub fn show_view(&mut self, view: View) {
-        self.view = if self.view == Some(view) { None } else { Some(view) };
+        if self.view == Some(view) {
+            self.toggle_sidebar();
+        } else {
+            self.view = Some(view);
+        }
+    }
+
+    /// Cmd+B: closes the side panel, or opens the view it showed last.
+    pub fn toggle_sidebar(&mut self) {
+        self.view = match self.view {
+            Some(v) => {
+                self.shown = v;
+                None
+            }
+            None => Some(self.shown),
+        };
     }
 
     /// Changed files across every Section: the count on the Git icon.
@@ -573,6 +592,12 @@ mod tests {
         assert_eq!(ws.view, None, "the active icon closes the panel");
         ws.show_view(View::Explorer);
         assert_eq!(ws.view, Some(View::Explorer), "and opens it again");
+        ws.show_view(View::Git);
+        ws.toggle_sidebar();
+        assert_eq!(ws.view, None);
+        ws.toggle_sidebar();
+        assert_eq!(ws.view, Some(View::Git), "Toggle Sidebar brings back the view it closed");
+        ws.show_view(View::Explorer);
 
         ws.set_root(tmp.path().join("one"));
         assert_eq!(ws.view, Some(View::Explorer), "the view survives Open Folder");

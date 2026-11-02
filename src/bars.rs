@@ -12,7 +12,8 @@ impl Antler {
     /// the Git view icon carries the count of changed files.
     pub(crate) fn activity_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let count = self.ws.changed_count();
-        let item = |view: View, icon: Icon, label: &'static str, badge: usize| {
+        let item = |view: View, icon: Icon, label: &'static str, id: &str, badge: usize| {
+            let text = crate::keys::label(cx, label, id);
             let on = self.ws.view == Some(view);
             div()
                 .id(label)
@@ -24,7 +25,7 @@ impl Antler {
                 .justify_center()
                 .text_color(c(if on { FG } else { FG_FAINT }))
                 .when(!on, |el| el.hover(|st| st.text_color(c(FG_DIM))))
-                .tooltip(tip(label))
+                .tooltip(tip(text))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.ws.show_view(view);
                     cx.notify();
@@ -61,9 +62,9 @@ impl Antler {
             .bg(c(ACT))
             .border_r_1()
             .border_color(c(LINE_SOFT))
-            .child(item(View::Explorer, style::files_icon(), "Explorer (⇧⌘E)", 0))
-            .child(item(View::Git, style::git_icon(), "Git (⇧⌘G)", count))
-            .child(item(View::Search, Icon::new(IconName::Search), "Search (⇧⌘F)", 0))
+            .child(item(View::Explorer, style::files_icon(), "Explorer", "workbench.view.explorer", 0))
+            .child(item(View::Git, style::git_icon(), "Git", "workbench.view.scm", count))
+            .child(item(View::Search, Icon::new(IconName::Search), "Search", "workbench.view.search", 0))
     }
 
     /// The status bar: branch of the active tab's repo; the editor's line, column and language, or the diff's facts.

@@ -16,11 +16,6 @@ use crate::{Antler, menu_item};
 
 actions!(antler, [CloseStash]);
 
-pub(crate) fn init(cx: &mut App) {
-    // after the palette's own escape, which first clears the query: Esc cancels right away, like VS Code
-    cx.bind_keys([KeyBinding::new("escape", CloseStash, Some("Stash > Command"))]);
-}
-
 /// What a Stash command does once it has the stash list.
 #[derive(Clone, Copy)]
 pub(crate) enum Pick {

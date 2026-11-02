@@ -12,6 +12,7 @@ mod goto_view;
 mod graph;
 mod graph_view;
 mod icons;
+mod keys;
 mod minimap;
 mod minimap_view;
 mod quick_diff;
@@ -39,7 +40,7 @@ use notify::Watcher as _;
 use gpui_kit::component::{
     TitleBar, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex,
     diff::DiffState,
-    input::{EditorState, InputEvent, InputState, Replace, TextareaState},
+    input::{EditorState, InputEvent, InputState, TextareaState},
     button::{Button, ButtonVariants as _},
     menu::PopupMenuItem,
     notification::Notification,
@@ -49,10 +50,9 @@ use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use style::{ACT, FG, FG_DIM, LINE_SOFT, MAIN, SIDE, c};
 use workspace::{GitRow, Op, View, Workspace};
-use tabs::TogglePreview;
 
 actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch]);
-actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates]);
+actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar]);
 
 /// File → Open Recent → a folder.
 #[derive(Clone, PartialEq, Action)]
@@ -64,30 +64,24 @@ fn set_menus(cx: &mut App) {
     let home = std::env::home_dir();
     let recent = recent::list(&recent::default_path()).into_iter().map(|p| MenuItem::action(recent::display(&p, home.as_deref()), OpenRecent(p)));
     let open_recent = Menu::new("Open Recent").items(recent.chain([MenuItem::separator(), MenuItem::action("Clear Recently Opened", ClearRecent)]));
-    // the first menu is the macOS app menu
-    cx.set_menus([
-        Menu::new("Antler").items(
-            (cx.global::<update::Enabled>().0.then(|| [MenuItem::action("Check for Updates…", CheckForUpdates), MenuItem::separator()]).into_iter().flatten())
-                .chain([MenuItem::action("Quit Antler", Quit)]),
-        ),
-        Menu::new("File").items([MenuItem::action("Save", Save), MenuItem::action("Open Folder…", OpenFolder), MenuItem::submenu(open_recent), MenuItem::action("Close Folder", CloseFolder)]),
-        Menu::new("View").items([MenuItem::submenu(Menu::new("Minimap").items([
-            MenuItem::Action {
-                name: "Show Minimap".into(),
-                action: Box::new(minimap_view::ToggleMinimap),
-                os_action: None,
-                checked: cx.global::<minimap_view::Enabled>().0,
-                disabled: false,
-            },
-            MenuItem::Action {
-                name: "Render Characters".into(),
-                action: Box::new(minimap_view::ToggleRenderCharacters),
-                os_action: None,
-                checked: cx.global::<minimap_view::RenderCharacters>().0,
-                disabled: false,
-            },
-        ]))]),
+    let minimap = Menu::new("Minimap").items([
+        keys::checked_item("antler.toggleMinimap", cx.global::<minimap_view::Enabled>().0),
+        keys::checked_item("antler.toggleMinimapCharacters", cx.global::<minimap_view::RenderCharacters>().0),
     ]);
+    let (mut recent, mut minimap) = (Some(open_recent), Some(minimap));
+    // the first menu is the macOS app menu
+    let app = Menu::new("Antler").items(
+        (cx.global::<update::Enabled>().0.then(|| [keys::item("antler.checkForUpdates"), MenuItem::separator()]).into_iter().flatten()).chain([keys::item("workbench.action.quit")]),
+    );
+    let menus = keys::MENUS.iter().map(|(name, ids)| {
+        Menu::new(*name).items(ids.iter().filter_map(|id| match *id {
+            "-" => Some(MenuItem::separator()),
+            "@recent" => recent.take().map(MenuItem::submenu),
+            "@minimap" => minimap.take().map(MenuItem::submenu),
+            id => Some(keys::item(id)),
+        }))
+    });
+    cx.set_menus(std::iter::once(app).chain(menus).collect::<Vec<_>>());
 }
 
 /// `path`'s file name and its folder (empty at the top), as the lists show them.
@@ -160,6 +154,9 @@ struct Antler {
     /// The last file write: the next one waits for it, so writes reach the disk in order.
     writing: Option<Task<()>>,
     explorer: explorer::ExplorerState,
+    /// The Git view's keyboard focus, and the file row last clicked there: (selection key, full path, path from the Root).
+    git_focus: FocusHandle,
+    git_picked: Option<(String, PathBuf, String)>,
     /// The Cmd+P popup while it is open.
     goto: Option<goto_view::GoToPopup>,
     /// The stash message box or picker while it is open.
@@ -229,6 +226,8 @@ impl Antler {
             writing: None,
             watcher: None,
             explorer: explorer::ExplorerState::new(cx),
+            git_focus: cx.focus_handle(),
+            git_picked: None,
             goto: None,
             stash: None,
             switcher: None,
@@ -485,6 +484,11 @@ impl Antler {
         cx.notify();
     }
 
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.ws.toggle_sidebar();
+        cx.notify();
+    }
+
     fn show_git(&mut self, _: &ShowGit, _: &mut Window, cx: &mut Context<Self>) {
         self.ws.view = Some(View::Git);
         cx.notify();
@@ -536,6 +540,8 @@ impl Render for Antler {
             .when(self.ws.has_folder(), |el| el.on_action(cx.listener(Self::close_folder)))
             .on_action(cx.listener(Self::show_explorer))
             .on_action(cx.listener(Self::show_git))
+            .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::show_search))
             .on_action(cx.listener(Self::go_to_file))
             .on_action(cx.listener(Self::toggle_minimap))
@@ -592,28 +598,12 @@ fn main() {
     gpui_kit::application().with_assets(icons::Assets).run(move |cx| {
         gpui_kit::init(cx);
         style::apply(cx);
-        goto_view::init(cx);
-        stash_view::init(cx);
-        branch_view::init(cx);
-        // Bound after gpui_kit::init and on a deeper context, so it beats the Textarea's own cmd-enter (newline).
-        cx.bind_keys([
-            KeyBinding::new("cmd-w", CloseTab, None),
-            KeyBinding::new("cmd-shift-v", TogglePreview, None),
-            KeyBinding::new("cmd-o", OpenFolder, None),
-            KeyBinding::new("cmd-k f", CloseFolder, None),
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-enter", Commit, Some("CommitBox > Input")),
-            KeyBinding::new("cmd-s", Save, None),
-            KeyBinding::new("cmd-shift-e", ShowExplorer, None),
-            KeyBinding::new("cmd-shift-g", ShowGit, None),
-            KeyBinding::new("cmd-shift-f", ShowSearch, None),
-            // the editor's own Replace key is cmd-shift-f: project search takes it (bound later, same context, wins)
-            // and in-file replace moves to Cmd+Alt+F as the spec wants
-            KeyBinding::new("cmd-shift-f", ShowSearch, Some("Input")),
-            KeyBinding::new("cmd-alt-f", Replace, Some("Input")),
-        ]);
-        explorer::bind_keys(cx);
-        tabs::bind_keys(cx);
+        // after gpui_kit::init, so they win over the editor's own keys at the same depth
+        let keybindings = keys::default_path();
+        let warnings = keys::load(cx, keybindings.as_deref());
+        if let Some(file) = keybindings {
+            keys::watch(cx, file);
+        }
         // fallback when nothing in the window has focus; the view's own Quit asks about unsaved tabs first
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &ClearRecent, cx| {
@@ -641,6 +631,7 @@ fn main() {
             })
         })
             .expect("failed to open window");
+        keys::notify(cx, warnings);
         cx.activate(true);
     });
 }

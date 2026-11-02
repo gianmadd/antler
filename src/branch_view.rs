@@ -19,11 +19,6 @@ use crate::{Antler, menu_item};
 
 actions!(antler, [CloseBranch]);
 
-pub(crate) fn init(cx: &mut App) {
-    // after the palette's own escape, which first clears the query: Esc cancels right away, like VS Code
-    cx.bind_keys([KeyBinding::new("escape", CloseBranch, Some("Branch > Command"))]);
-}
-
 /// What the open picker is for.
 #[derive(Clone)]
 enum Purpose {
