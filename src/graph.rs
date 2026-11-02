@@ -317,7 +317,7 @@ impl Workspace {
         let file = match &self.tabs[self.active?].kind {
             TabKind::Diff(d) => &d.source.repo,
             TabKind::File(FileTab { path, .. }) | TabKind::Image(ImageTab { path, .. }) => path,
-            TabKind::Settings => return None,
+            TabKind::Settings | TabKind::Keybindings => return None,
         };
         self.sections.iter().filter(|s| file.starts_with(&s.repo.path)).max_by_key(|s| s.repo.path.as_os_str().len())
     }

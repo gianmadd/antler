@@ -77,6 +77,7 @@ pub enum Reopen {
     Path(PathBuf),
     Diff(DiffSource),
     Settings,
+    Keybindings,
 }
 
 /// Which tabs a tab's menu (or ⌥⌘T, ⌘K U, ⌘K ⌘W) closes, from the tab it was opened on.
@@ -94,6 +95,8 @@ pub enum TabKind {
     Image(ImageTab),
     /// The Settings editor; its content lives in the view.
     Settings,
+    /// The Keyboard Shortcuts editor; its content lives in the view.
+    Keybindings,
 }
 
 impl TabKind {
@@ -112,6 +115,7 @@ impl Tab {
         match (&self.kind, self.path()) {
             (TabKind::Diff(d), _) => Reopen::Diff(d.source.clone()),
             (TabKind::Settings, _) => Reopen::Settings,
+            (TabKind::Keybindings, _) => Reopen::Keybindings,
             (_, path) => Reopen::Path(path.unwrap_or(Path::new("")).to_path_buf()),
         }
     }
@@ -131,6 +135,7 @@ impl Tab {
             }
             TabKind::File(FileTab { path, .. }) | TabKind::Image(ImageTab { path, .. }) => file_name(path),
             TabKind::Settings => "Settings".into(),
+            TabKind::Keybindings => "Keyboard Shortcuts".into(),
         }
     }
 
@@ -138,7 +143,7 @@ impl Tab {
     pub fn path(&self) -> Option<&Path> {
         match &self.kind {
             TabKind::File(FileTab { path, .. }) | TabKind::Image(ImageTab { path, .. }) => Some(path),
-            TabKind::Diff(_) | TabKind::Settings => None,
+            TabKind::Diff(_) | TabKind::Settings | TabKind::Keybindings => None,
         }
     }
 
@@ -431,6 +436,12 @@ impl Workspace {
         self.show_tab(existing, || TabKind::Settings, true);
     }
 
+    /// Cmd+K Cmd+S : the Keyboard Shortcuts tab (the existing one if open), pinned.
+    pub fn open_keybindings(&mut self) {
+        let existing = self.tabs.iter().position(|t| matches!(t.kind, TabKind::Keybindings));
+        self.show_tab(existing, || TabKind::Keybindings, true);
+    }
+
     /// Compare Changes on a conflict block of file `path` (absolute): a preview tab of `current` against `incoming`.
     /// Load the returned source.
     pub fn open_compare(&mut self, path: &Path, current: String, incoming: String) -> DiffSource {
@@ -509,6 +520,7 @@ impl Workspace {
                 Reopen::Path(path) => TabKind::loading(&path),
                 Reopen::Diff(source) => TabKind::Diff(DiffTab::new(source)),
                 Reopen::Settings => TabKind::Settings,
+                Reopen::Keybindings => TabKind::Keybindings,
             };
             let ix = ix.min(self.tabs.len());
             self.tabs.insert(ix, Tab { preview: false, kind, used: 0 });

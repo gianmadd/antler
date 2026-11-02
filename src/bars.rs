@@ -75,18 +75,22 @@ impl Antler {
         let updates = cx.global::<crate::update::Enabled>().0;
         let palette = crate::keys::label(cx, "Command Palette", "workbench.action.showCommands");
         let (settings, check) = (crate::keys::label(cx, "Settings", "workbench.action.openSettings"), "Check for Updates…");
+        let shortcuts = crate::keys::label(cx, "Keyboard Shortcuts", "workbench.action.openGlobalKeybindings");
         div().w(px(48.)).h(px(44.)).flex().items_center().justify_center().child(
             Button::new("manage")
                 .ghost()
                 .icon(IconName::Settings)
                 .tooltip("Manage")
                 .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                    let (a, b, p) = (this.clone(), this.clone(), this.clone());
+                    let (a, b, p, k) = (this.clone(), this.clone(), this.clone(), this.clone());
                     let menu = menu.item(PopupMenuItem::new(palette.clone()).on_click(move |_, window, cx| {
                         p.update(cx, |t, cx| t.command_palette(&crate::goto_view::CommandPalette, window, cx)).ok();
                     }));
                     let menu = menu.item(PopupMenuItem::new(settings.clone()).on_click(move |_, window, cx| {
                         a.update(cx, |t, cx| t.open_settings(&crate::OpenSettings, window, cx)).ok();
+                    }));
+                    let menu = menu.item(PopupMenuItem::new(shortcuts.clone()).on_click(move |_, window, cx| {
+                        k.update(cx, |t, cx| t.open_keyboard_shortcuts(&crate::OpenKeyboardShortcuts, window, cx)).ok();
                     }));
                     menu.when(updates, |menu| {
                         menu.item(PopupMenuItem::new(check).on_click(move |_, window, cx| {
@@ -122,7 +126,7 @@ impl Antler {
                 Some(info) => info.size.map(|(w, h)| format!("{w} × {h}")).into_iter().chain([bytes(info.bytes)]).collect(),
                 None => Vec::new(),
             },
-            Some(TabKind::Settings) | None => Vec::new(),
+            Some(TabKind::Settings | TabKind::Keybindings) | None => Vec::new(),
         };
         let section = self.ws.active_section();
         h_flex()

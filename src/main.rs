@@ -13,6 +13,7 @@ mod palette;
 mod graph;
 mod graph_view;
 mod icons;
+mod keybindings_view;
 mod keys;
 mod minimap;
 mod minimap_view;
@@ -54,7 +55,7 @@ use style::{ACT, FG, FG_DIM, LINE_SOFT, MAIN, SIDE, c};
 use workspace::{GitRow, Op, View, Workspace};
 
 actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch]);
-actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings]);
+actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts]);
 
 /// File → Open Recent → a folder.
 #[derive(Clone, PartialEq, Action)]
@@ -74,7 +75,7 @@ fn set_menus(cx: &mut App) {
     // the first menu is the macOS app menu
     let app = Menu::new("Antler").items(
         (cx.global::<update::Enabled>().0.then(|| keys::item("antler.checkForUpdates")).into_iter())
-            .chain([keys::item("workbench.action.openSettings"), MenuItem::separator(), keys::item("workbench.action.quit")]),
+            .chain([keys::item("workbench.action.openSettings"), keys::item("workbench.action.openGlobalKeybindings"), MenuItem::separator(), keys::item("workbench.action.quit")]),
     );
     let menus = keys::MENUS.iter().map(|(name, ids)| {
         Menu::new(*name).items(ids.iter().filter_map(|id| match *id {
@@ -184,6 +185,8 @@ struct Antler {
     update_notified: std::collections::HashSet<String>,
     /// The settings last applied (`apply_settings` compares the new ones with them), and the subscription to changes.
     applied: settings::Settings,
+    /// The Keyboard Shortcuts tab: its search field, the chosen row and the key capture.
+    shortcuts: keybindings_view::State,
     _settings_sub: Subscription,
 }
 
@@ -250,6 +253,7 @@ impl Antler {
             side: Default::default(),
             update_notified: Default::default(),
             applied: initial,
+            shortcuts: keybindings_view::State::new(window, cx),
             _settings_sub: cx.observe_global_in::<settings::Current>(window, |this, window, cx| this.apply_settings(window, cx)),
         };
         // hot exit: the Untitled files and their text go into the state file on quit and come back at the next start
@@ -548,6 +552,13 @@ impl Antler {
         cx.notify();
     }
 
+    /// Cmd+K Cmd+S / the gear: the Keyboard Shortcuts tab.
+    pub(crate) fn open_keyboard_shortcuts(&mut self, _: &OpenKeyboardShortcuts, _: &mut Window, cx: &mut Context<Self>) {
+        self.ws.open_keybindings();
+        self.sync_diff(cx);
+        cx.notify();
+    }
+
     fn show_explorer(&mut self, _: &ShowExplorer, _: &mut Window, cx: &mut Context<Self>) {
         self.ws.view = Some(View::Explorer);
         cx.notify();
@@ -604,6 +615,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| this.check_for_updates(true, window, cx)))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::open_keyboard_shortcuts))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_recent))
             // only with a folder open: File → Close Folder is greyed out otherwise (the menu asks if the action is available)

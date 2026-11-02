@@ -330,3 +330,12 @@ window.open_alert_dialog(cx, move |alert, _, _| {
 - A Button's popup (the Activity bar gear): `Button::new(..).dropdown_menu_with_anchor(Anchor::BottomLeft, |menu, window, cx| ..)` needs `menu::DropdownMenu as _` in scope.
 - Editors: `EditorState::tab_size(TabSize { tab_size, hard_tabs })` (builder) and `set_tab_size(tab, cx)`; `TabSize` is `gpui_kit::component::input::TabSize`.
 - The theme's `font_size` is the UI font size: `Root` copies it to the window's rem size each frame, so `Theme::update(cx, |t| t.font_size = ..)` resizes everything that does not set its own `text_size`.
+
+
+## Keyboard Shortcuts tab (`src/keybindings_view.rs`)
+
+- Rows, search, conflicts and the edits of keybindings.json are pure functions in `keys.rs` (`rows_of`, `filter`, `conflicts`, `change_key`, `remove_key`, `reset_command`), tested there. `keys::update_file(cx, edit)` rewrites the file and reloads at once (the 1 s watcher then reloads a second time, harmless).
+- Capturing a key: bindings run BEFORE `on_key_down` listeners, so a normal handler never sees Cmd+S. `cx.intercept_keystrokes(..)` fires before everything and `cx.stop_propagation()` inside it stops the action dispatch; the returned `Subscription` is the capture's lifetime (drop it to stop). It also reports a lone modifier release as a keystroke with key "shift"/"control"/"alt"/"platform": ignore those. Focus a handle with no input handler meanwhile, or the typed text lands in a focused field.
+- `Keystroke::unparse(OperatingSystem::Mac)` of the captured keystroke is the canonical spelling; `keys::to_vscode` turns it into "ctrl+shift+alt+cmd+k".
+- `flex_grow(w)` takes the factor; for table columns use `.w_0().flex_basis(px(0.)).flex_grow(w)`. There is no pencil icon in the bundled Lucide subset (see `default-icons.txt` of gpui-kit-assets): the row button is the text "Edit".
+- A rule can only name the contexts `Ctx::from_when` knows; rows of the pickers and the Explorer's name field are read-only in the tab (`Ctx::editable`).

@@ -15,7 +15,7 @@ use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
-use crate::{CheckForUpdates, CloseFolder, CloseTab, Commit, OpenFolder, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleSidebar, set_menus};
+use crate::{CheckForUpdates, CloseFolder, CloseTab, Commit, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleSidebar, set_menus};
 
 /// Where a binding applies: a GPUI key context, and the name `when` uses in keybindings.json.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,6 +50,29 @@ impl Ctx {
             Ctx::Stash => "Stash > Command",
             Ctx::ExplorerName => "ExplorerName > Input",
         })
+    }
+
+    /// The `when` of keybindings.json for this context; `None` for Global and for the contexts it does not accept.
+    fn when_name(self) -> Option<&'static str> {
+        Some(match self {
+            Ctx::Input => "input",
+            Ctx::Editor => "editor",
+            Ctx::Explorer => "explorer",
+            Ctx::Git => "git",
+            Ctx::Search => "search",
+            Ctx::Commit => "commit",
+            _ => return None,
+        })
+    }
+
+    /// Whether a keybindings.json rule can bind a key here.
+    pub fn editable(self) -> bool {
+        self == Ctx::Global || self.when_name().is_some()
+    }
+
+    /// The When column: empty for Global.
+    pub fn label(self) -> &'static str {
+        self.when_name().or(self.predicate()).unwrap_or("")
     }
 
     /// The contexts keybindings.json's `when` accepts.
@@ -118,8 +141,8 @@ cmds![
     ("workbench.action.keepEditor", "Keep Open", "cmd-k enter", Global, KeepTabOpen),
     ("workbench.action.quit", "Quit Antler", "cmd-q", Global, Quit),
     ("antler.checkForUpdates", "Check for Updates…", "", Global, CheckForUpdates),
-    // shortcut: workbench.action.openGlobalKeybindings (Keyboard Shortcuts, cmd-k cmd-s) joins the Manage menu in bars.rs once its row exists
     ("workbench.action.openSettings", "Settings…", "cmd-,", Global, OpenSettings),
+    ("workbench.action.openGlobalKeybindings", "Keyboard Shortcuts", "cmd-k cmd-s", Global, OpenKeyboardShortcuts),
     // Edit (the first five belong to the focused text field)
     ("undo", "Undo", "", Input, Undo),
     ("redo", "Redo", "", Input, Redo),
@@ -208,6 +231,8 @@ pub(crate) struct Binding {
     /// GPUI's spelling, canonical: modifiers in GPUI's order.
     key: String,
     ctx: Ctx,
+    /// From the user's keybindings.json, not the table.
+    user: bool,
 }
 
 /// The bindings in force: what the tooltips read.
@@ -250,7 +275,7 @@ fn from_vscode(key: &str) -> Option<String> {
 }
 
 fn default_bindings() -> Vec<Binding> {
-    COMMANDS.iter().filter(|c| !c.key.is_empty()).filter_map(|cmd| Some(Binding { cmd, key: from_gpui(cmd.key)?, ctx: cmd.ctx })).collect()
+    COMMANDS.iter().filter(|c| !c.key.is_empty()).filter_map(|cmd| Some(Binding { cmd, key: from_gpui(cmd.key)?, ctx: cmd.ctx, user: false })).collect()
 }
 
 /// A chord sequence ("cmd-k cmd-w") in canonical spelling.
@@ -303,7 +328,7 @@ fn resolve(user: Option<&str>) -> (Vec<Binding>, Vec<String>) {
         if removing {
             bindings.retain(|b| !(b.cmd.id == id && b.key == key && ctx.is_none_or(|c| c == b.ctx)));
         } else {
-            bindings.push(Binding { cmd, key, ctx: ctx.unwrap_or(Ctx::Global) });
+            bindings.push(Binding { cmd, key, ctx: ctx.unwrap_or(Ctx::Global), user: true });
         }
     }
     (bindings, warnings)
@@ -376,7 +401,12 @@ pub(crate) fn checked_item(id: &str, checked: bool) -> MenuItem {
 /// "⌃⇧G" for the first binding of command `id`, in the user's current keys.
 pub(crate) fn hint(cx: &App, id: &str) -> Option<String> {
     let key = cx.try_global::<Active>()?.0.iter().find(|b| b.cmd.id == id)?.key.clone();
-    Some(key.split(' ').filter_map(parse).map(|k| pretty(&k)).collect::<Vec<_>>().join(" "))
+    Some(pretty_key(&key))
+}
+
+/// "⌘K ⌘S" for "cmd-k cmd-s".
+pub(crate) fn pretty_key(key: &str) -> String {
+    key.split(' ').filter_map(parse).map(|k| pretty(&k)).collect::<Vec<_>>().join(" ")
 }
 
 /// "Commit (⌘↵)": the tooltip of command `id`; `text` alone if it has no key.
@@ -401,6 +431,151 @@ fn pretty(k: &Keystroke) -> String {
         k => k.to_uppercase(),
     };
     format!("{}{}{}{}{key}", if m.control { "⌃" } else { "" }, if m.alt { "⌥" } else { "" }, if m.shift { "⇧" } else { "" }, if m.platform { "⌘" } else { "" })
+}
+
+// ---- the Keyboard Shortcuts editor: rows, search, conflicts and the edits of keybindings.json ----
+
+/// One line of the Keyboard Shortcuts table: a key of a command, or a command with no key (`key` empty).
+#[derive(Clone)]
+pub(crate) struct Row {
+    pub cmd: &'static Cmd,
+    /// GPUI's spelling, canonical; empty without a key.
+    pub key: String,
+    pub ctx: Ctx,
+    pub user: bool,
+}
+
+impl Row {
+    pub fn source(&self) -> &'static str {
+        if self.user { "User" } else { "Default" }
+    }
+}
+
+/// Every command of the table once in table order, one row per key it has, or one without a key.
+fn rows_of(bindings: &[Binding]) -> Vec<Row> {
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for cmd in COMMANDS.iter().filter(|c| seen.insert(c.id)) {
+        let own: Vec<_> = bindings.iter().filter(|b| b.cmd.id == cmd.id).collect();
+        if own.is_empty() {
+            rows.push(Row { cmd, key: String::new(), ctx: cmd.ctx, user: false });
+        }
+        rows.extend(own.into_iter().map(|b| Row { cmd, key: b.key.clone(), ctx: b.ctx, user: b.user }));
+    }
+    rows
+}
+
+/// The rows for the keys in force now.
+pub(crate) fn rows(cx: &App) -> Vec<Row> {
+    rows_of(&cx.try_global::<Active>().map(|a| a.0.clone()).unwrap_or_default())
+}
+
+/// The rows whose title, command id or key (as GPUI, VS Code or the Mac spells it) contain `query`.
+pub(crate) fn filter(rows: &[Row], query: &str) -> Vec<Row> {
+    let q = query.trim().to_lowercase();
+    let hit = |r: &Row| [r.cmd.title.to_string(), r.cmd.id.to_string(), r.key.clone(), to_vscode(&r.key), pretty_key(&r.key)].iter().any(|t| t.to_lowercase().contains(&q));
+    rows.iter().filter(|r| hit(r)).cloned().collect()
+}
+
+/// Titles of the other commands that already have `key` in context `ctx`.
+pub(crate) fn conflicts(rows: &[Row], id: &str, key: &str, ctx: Ctx) -> Vec<&'static str> {
+    rows.iter().filter(|r| r.key == key && r.ctx == ctx && r.cmd.id != id).map(|r| r.cmd.title).collect()
+}
+
+/// GPUI's "cmd-shift-f ctrl-k" as VS Code's "ctrl+shift+cmd+f ctrl+k".
+fn to_vscode(key: &str) -> String {
+    let chord = |k: Keystroke| {
+        let m = &k.modifiers;
+        let mods = [(m.control, "ctrl"), (m.shift, "shift"), (m.alt, "alt"), (m.platform, "cmd")];
+        mods.iter().filter(|(on, _)| *on).map(|(_, n)| *n).chain([k.key.as_str()]).collect::<Vec<_>>().join("+")
+    };
+    key.split_whitespace().filter_map(parse).map(chord).collect::<Vec<_>>().join(" ")
+}
+
+fn entries(text: &str) -> Result<Vec<serde_json::Value>, String> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(text).map_err(|e| format!("keybindings.json is not a list of rules: {e}"))
+}
+
+fn rule(id: &str, key: &str, ctx: Ctx) -> serde_json::Value {
+    let mut r = serde_json::json!({ "key": to_vscode(key), "command": id });
+    if let Some(w) = ctx.when_name() {
+        r["when"] = w.into();
+    }
+    r
+}
+
+fn render(entries: Vec<serde_json::Value>) -> Result<String, String> {
+    serde_json::to_string_pretty(&entries).map(|t| t + "\n").map_err(|e| e.to_string())
+}
+
+/// Takes the key of `row` away: its own rule goes, or a default one gets a `-command` rule.
+fn drop_key(entries: &mut Vec<serde_json::Value>, row: &Row) {
+    if row.key.is_empty() {
+        return;
+    }
+    if row.user {
+        entries.retain(|e| {
+            let get = |n| e.get(n).and_then(|v| v.as_str());
+            let ctx = get("when").and_then(Ctx::from_when).unwrap_or(Ctx::Global);
+            !(get("command") == Some(row.cmd.id) && ctx == row.ctx && get("key").and_then(from_vscode).as_deref() == Some(&row.key))
+        });
+    } else {
+        entries.push(rule(&format!("-{}", row.cmd.id), &row.key, row.ctx));
+    }
+}
+
+/// keybindings.json `text` with `row`'s key changed to `new` (GPUI's spelling): the old key out, the new one in.
+pub(crate) fn change_key(text: &str, row: &Row, new: &str) -> Result<String, String> {
+    let mut e = entries(text)?;
+    if new != row.key {
+        drop_key(&mut e, row);
+        e.push(rule(row.cmd.id, new, row.ctx));
+    }
+    render(e)
+}
+
+/// keybindings.json `text` without `row`'s key.
+pub(crate) fn remove_key(text: &str, row: &Row) -> Result<String, String> {
+    let mut e = entries(text)?;
+    drop_key(&mut e, row);
+    render(e)
+}
+
+/// keybindings.json `text` without any rule of command `id`: its default keys are back.
+pub(crate) fn reset_command(text: &str, id: &str) -> Result<String, String> {
+    let mut e = entries(text)?;
+    e.retain(|r| r.get("command").and_then(|c| c.as_str()).is_none_or(|c| c.strip_prefix('-').unwrap_or(c) != id));
+    render(e)
+}
+
+/// Rewrites the user's keybindings.json with `edit(old text)` and applies it at once (the menus and tooltips too).
+pub(crate) fn update_file(cx: &mut App, edit: impl FnOnce(&str) -> Result<String, String>) {
+    let Some(file) = default_path() else { return };
+    let result = edit(&std::fs::read_to_string(&file).unwrap_or_default()).and_then(|text| {
+        std::fs::create_dir_all(file.parent().unwrap_or(&file)).map_err(|e| e.to_string())?;
+        std::fs::write(&file, text).map_err(|e| e.to_string())
+    });
+    match result {
+        Ok(()) => {
+            let warnings = load(cx, Some(&file));
+            set_menus(cx);
+            notify(cx, warnings);
+        }
+        Err(e) => notify(cx, vec![e]),
+    }
+}
+
+/// The keybindings.json path, created as `[]` if missing.
+pub(crate) fn ensure_file() -> Option<PathBuf> {
+    let file = default_path()?;
+    if !file.exists() {
+        std::fs::create_dir_all(file.parent()?).ok()?;
+        std::fs::write(&file, "[]\n").ok()?;
+    }
+    Some(file)
 }
 
 /// The menu bar, VS Code's menus with the commands Antler has: ids, "-" for a separator, "@…" for a submenu `set_menus` builds.
@@ -577,6 +752,70 @@ mod tests {
         assert_eq!(b.len(), default_bindings().len());
         let (b, warnings) = resolve(Some("not json"));
         assert_eq!((b.len(), warnings.len()), (default_bindings().len(), 1));
+    }
+
+    fn row(id: &str, key: &str) -> Row {
+        rows_of(&default_bindings()).into_iter().find(|r| r.cmd.id == id && r.key == key).unwrap()
+    }
+
+    #[test]
+    fn changing_a_default_key_removes_the_old_one_and_adds_the_new() {
+        let text = change_key("", &row("workbench.action.toggleSidebarVisibility", "cmd-b"), "cmd-j").unwrap();
+        let (b, w) = resolve(Some(&text));
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(keys_of(&b, "workbench.action.toggleSidebarVisibility"), [("cmd-j", Ctx::Global)]);
+        assert!(text.contains("\"-workbench.action.toggleSidebarVisibility\"") && text.contains("cmd+j"));
+    }
+
+    #[test]
+    fn changing_a_user_key_replaces_its_rule_and_keeps_the_when() {
+        let one = change_key("", &row("editor.action.deleteLines", "cmd-shift-k"), "ctrl-d").unwrap();
+        let rows = rows_of(&resolve(Some(&one)).0);
+        let mine = rows.iter().find(|r| r.cmd.id == "editor.action.deleteLines").unwrap();
+        assert!(mine.user && mine.ctx == Ctx::Editor && mine.key == "ctrl-d");
+        let two = change_key(&one, mine, "ctrl-e").unwrap();
+        let (b, _) = resolve(Some(&two));
+        assert_eq!(keys_of(&b, "editor.action.deleteLines"), [("ctrl-e", Ctx::Editor)]);
+        assert_eq!(entries(&two).unwrap().len(), 2); // the -command and the new rule, no leftover ctrl-d
+    }
+
+    #[test]
+    fn remove_and_reset() {
+        let text = remove_key("", &row("workbench.action.files.save", "cmd-s")).unwrap();
+        assert!(keys_of(&resolve(Some(&text)).0, "workbench.action.files.save").is_empty());
+        let rows = rows_of(&resolve(Some(&text)).0);
+        assert!(rows.iter().any(|r| r.cmd.id == "workbench.action.files.save" && r.key.is_empty())); // the command stays listed
+        let text = change_key(&text, rows.iter().find(|r| r.cmd.id == "workbench.action.files.save").unwrap(), "cmd-k cmd-s").unwrap();
+        assert_eq!(keys_of(&resolve(Some(&text)).0, "workbench.action.files.save"), [("cmd-k cmd-s", Ctx::Global)]);
+        let text = reset_command(&text, "workbench.action.files.save").unwrap();
+        assert_eq!(keys_of(&resolve(Some(&text)).0, "workbench.action.files.save"), [("cmd-s", Ctx::Global)]);
+        assert!(change_key("not json", &row("workbench.action.files.save", "cmd-s"), "cmd-j").is_err());
+    }
+
+    #[test]
+    fn a_key_in_use_is_reported_in_the_same_context_only() {
+        let rows = rows_of(&default_bindings());
+        assert_eq!(conflicts(&rows, "workbench.action.files.saveAll", "cmd-s", Ctx::Global), ["Save"]);
+        assert!(conflicts(&rows, "workbench.action.files.save", "cmd-s", Ctx::Global).is_empty());
+        assert!(conflicts(&rows, "workbench.action.files.saveAll", "cmd-s", Ctx::Editor).is_empty());
+    }
+
+    #[test]
+    fn search_matches_title_id_and_key() {
+        let rows = rows_of(&default_bindings());
+        let ids = |q| filter(&rows, q).iter().map(|r| r.cmd.id).collect::<Vec<_>>();
+        assert!(ids("toggle sidebar").contains(&"workbench.action.toggleSidebarVisibility"));
+        assert!(ids("openGlobalKey").contains(&"workbench.action.openGlobalKeybindings"));
+        assert!(ids("cmd+b").contains(&"workbench.action.toggleSidebarVisibility"));
+        assert!(ids("⌘B").contains(&"workbench.action.toggleSidebarVisibility"));
+        assert_eq!(filter(&rows, "").len(), rows.len());
+    }
+
+    #[test]
+    fn keys_round_trip_through_vscode_spelling() {
+        for k in ["cmd-shift-f", "cmd-k cmd-s", "cmd--", "ctrl-shift-tab", "cmd-+"] {
+            assert_eq!(from_vscode(&to_vscode(k)).as_deref(), Some(k), "{k}");
+        }
     }
 
     #[test]

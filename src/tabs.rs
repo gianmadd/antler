@@ -650,6 +650,7 @@ impl Antler {
             },
             TabKind::Image(i) => image_view(i),
             TabKind::Settings => self.settings_view(cx),
+            TabKind::Keybindings => self.keybindings_view(cx),
         };
         v_flex().size_full().child(bar).child(crumbs).child(content).into_any_element()
     }
