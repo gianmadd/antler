@@ -124,7 +124,7 @@ impl Antler {
     pub(crate) fn toggle_minimap(&mut self, _: &ToggleMinimap, window: &mut Window, cx: &mut Context<Self>) {
         let on = !cx.global::<Enabled>().0;
         cx.set_global(Enabled(on));
-        self.save_minimap_setting("editor_minimap_enabled", on, window, cx);
+        self.save_minimap_setting("editor.minimap.enabled", on, window, cx);
     }
 
     /// View → Minimap → Render Characters: characters or blocks; every minimap is rebuilt in the new mode.
@@ -134,7 +134,7 @@ impl Antler {
         for m in self.minimaps.values_mut() {
             m.version += 1;
         }
-        self.save_minimap_setting("editor_minimap_render_characters", on, window, cx);
+        self.save_minimap_setting("editor.minimap.renderCharacters", on, window, cx);
     }
 
     fn save_minimap_setting(&self, key: &str, on: bool, window: &mut Window, cx: &mut Context<Self>) {

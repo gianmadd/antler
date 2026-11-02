@@ -15,7 +15,7 @@ use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
-use crate::{CheckForUpdates, CloseFolder, CloseTab, Commit, OpenFolder, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleSidebar, set_menus};
+use crate::{CheckForUpdates, CloseFolder, CloseTab, Commit, OpenFolder, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleSidebar, set_menus};
 
 /// Where a binding applies: a GPUI key context, and the name `when` uses in keybindings.json.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -118,6 +118,8 @@ cmds![
     ("workbench.action.keepEditor", "Keep Open", "cmd-k enter", Global, KeepTabOpen),
     ("workbench.action.quit", "Quit Antler", "cmd-q", Global, Quit),
     ("antler.checkForUpdates", "Check for Updates…", "", Global, CheckForUpdates),
+    // shortcut: workbench.action.openGlobalKeybindings (Keyboard Shortcuts, cmd-k cmd-s) joins the Manage menu in bars.rs once its row exists
+    ("workbench.action.openSettings", "Settings…", "cmd-,", Global, OpenSettings),
     // Edit (the first five belong to the focused text field)
     ("undo", "Undo", "", Input, Undo),
     ("redo", "Redo", "", Input, Redo),

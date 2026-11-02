@@ -74,7 +74,8 @@ impl Antler {
 
     /// Runs `op`, after a confirmation dialog when the model asks for one; red OK only for destructive ops.
     pub(crate) fn confirm_and_run(&mut self, op: Op, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ask) = op.confirmation() else { return self.run(op, window, cx) };
+        let discards = matches!(op, Op::Revert { .. } | Op::DiscardAll { .. } | Op::RevertLines { .. });
+        let Some(ask) = op.confirmation().filter(|_| self.ws.confirm_discard || !discards) else { return self.run(op, window, cx) };
         if ask.smart_commit {
             return self.ask_smart_commit(op, ask, window, cx);
         }

@@ -74,6 +74,7 @@ impl Antler {
     pub(crate) fn sync_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let open: Vec<PathBuf> = self.ws.tabs.iter().filter_map(|t| t.file()).map(|f| f.path.clone()).collect();
         self.editors.retain(|p, _| open.contains(p));
+        let tab_size = self.tab_size();
         for tab in &mut self.ws.tabs {
             let Some(f) = tab.file_mut() else { continue };
             if f.loading {
@@ -81,7 +82,7 @@ impl Antler {
             }
             let (editor, _) = self.editors.entry(f.path.clone()).or_insert_with(|| {
                 let editor = cx.new(|cx| {
-                    EditorState::new(window, cx).language(f.language()).soft_wrap(self.wrap).default_value(f.text.clone())
+                    EditorState::new(window, cx).language(f.language()).soft_wrap(self.wrap).tab_size(tab_size).default_value(f.text.clone())
                 });
                 let brackets = editor.update(cx, |e, cx| e.create_range_decorations_collection(vec![], cx));
                 let path = f.path.clone();
@@ -633,7 +634,7 @@ impl Antler {
                                 .flex_1()
                                 .min_h_0()
                                 .child(
-                                    editor_menu(Editor::new(editor).bordered(false).size_full().when_some(self.font_size, |e, s| e.text_size(s))),
+                                    editor_menu(Editor::new(editor).bordered(false).size_full().when_some(self.font_size, |e, s| e.text_size(s)).when(!self.applied.editor_font_family.is_empty(), |e| e.font_family(self.applied.editor_font_family.clone()))),
                                 )
                                 .children(self.minimap(&f.path, editor, cx)),
                         ),
@@ -648,6 +649,7 @@ impl Antler {
                 }
             },
             TabKind::Image(i) => image_view(i),
+            TabKind::Settings => self.settings_view(cx),
         };
         v_flex().size_full().child(bar).child(crumbs).child(content).into_any_element()
     }

@@ -158,6 +158,9 @@ impl Workspace {
             let expanded = *is_dir && self.tree.contains_key(path);
             let ignored = path.ancestors().take_while(|a| a.starts_with(&self.root)).any(|a| self.ignored.contains(a));
             let badge = self.badges.get(path).copied();
+            if self.hide_ignored && ignored {
+                continue;
+            }
             let naming = self.naming.as_ref() == Some(&Naming::Rename(path.clone()));
             // with a filter, a row stays if it matches or something below it does (VS Code's tree find)
             let matches = naming || !self.filter_only || name.to_lowercase().contains(&self.filter.to_lowercase());
@@ -328,7 +331,7 @@ impl Workspace {
     /// "Do not ask me again" under that question: saved in the settings.
     pub fn dont_confirm_drag_and_drop(&mut self) {
         self.confirm_drag_and_drop = false;
-        self.save_setting("explorer_confirm_drag_and_drop", false);
+        self.save_setting("explorer.confirmDragAndDrop", false);
     }
 
     /// A drop of `paths` on folder `dir` (or a paste into it): moves them there, or copies them with `copy` (Alt held,
@@ -517,6 +520,11 @@ mod tests {
         for name in ["app", "src", "main.rs", "new.rs", ".gitignore"] {
             assert!(!row(name).ignored, "{name} is not ignored");
         }
+
+        ws.hide_ignored = true; // explorer.excludeGitIgnore
+        ws.rebuild_rows();
+        let names: Vec<_> = ws.tree_rows().iter().map(|r| r.name.as_str()).collect();
+        assert!(!names.contains(&"debug.log") && !names.contains(&"node_modules") && names.contains(&"main.rs"), "{names:?}");
     }
 
     #[test]

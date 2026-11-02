@@ -92,14 +92,39 @@ impl ScanJob {
     }
 }
 
-/// Names the Explorer and the search never show, ignored by git or not (VS Code's default `files.exclude`).
-const EXCLUDED: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
+/// `files.exclude` as set from the settings (patterns); `None` until then: VS Code's defaults.
+static EXCLUDE: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLock::new(None);
 
-pub fn excluded(name: &std::ffi::OsStr) -> bool {
-    EXCLUDED.iter().any(|x| name == *x)
+const DEFAULT_EXCLUDE: &[&str] = &["**/.git", "**/.svn", "**/.hg", "**/CVS", "**/.DS_Store", "**/Thumbs.db"];
+
+pub fn set_excluded(patterns: Vec<String>) {
+    *EXCLUDE.write().unwrap_or_else(|e| e.into_inner()) = Some(patterns);
 }
 
-/// The entries of folder `dir` as (path, is folder), folders first then by name; `EXCLUDED` names are left out. Blocking.
+/// Whether a `files.exclude` pattern matches a file name: its last path segment, with `*` for any run of characters.
+// shortcut: names only, no path patterns ("src/**/gen"); upgrade to `ignore`'s globs if someone needs them.
+fn name_matches(pattern: &str, name: &str) -> bool {
+    fn glob(p: &[char], n: &[char]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some(('*', rest)) => (0..=n.len()).any(|i| glob(rest, &n[i..])),
+            Some((c, rest)) => n.first() == Some(c) && glob(rest, &n[1..]),
+        }
+    }
+    let last = pattern.rsplit('/').next().unwrap_or(pattern);
+    glob(&last.chars().collect::<Vec<_>>(), &name.chars().collect::<Vec<_>>())
+}
+
+/// Names the Explorer and the search never show, ignored by git or not (`files.exclude`).
+pub fn excluded(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    match &*EXCLUDE.read().unwrap_or_else(|e| e.into_inner()) {
+        Some(patterns) => patterns.iter().any(|p| name_matches(p, &name)),
+        None => DEFAULT_EXCLUDE.iter().any(|p| name_matches(p, &name)),
+    }
+}
+
+/// The entries of folder `dir` as (path, is folder), folders first then by name; `files.exclude` names are left out. Blocking.
 pub fn read_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
     let mut entries: Vec<(PathBuf, bool)> = std::fs::read_dir(dir)
         .into_iter()
@@ -174,6 +199,13 @@ fn badge(porcelain: char) -> char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exclude_patterns_match_names_with_stars() {
+        assert!(name_matches("**/.git", ".git") && name_matches("**/*.pyc", "a.pyc") && name_matches("node_modules", "node_modules"));
+        assert!(!name_matches("**/*.pyc", "a.py") && !name_matches("**/.git", ".github"));
+        assert!(excluded(std::ffi::OsStr::new(".DS_Store")) && !excluded(std::ffi::OsStr::new("src")), "defaults");
+    }
+
     use super::*;
     use crate::workspace::tests_common::*;
     use std::fs;
