@@ -19,14 +19,6 @@ pub(crate) struct GoToPopup {
     matches: Vec<Match>,
 }
 
-pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-p", GoToFile, None),
-        // bound after the palette's own escape (which first clears the query): Esc closes right away, like VS Code
-        KeyBinding::new("escape", CloseGoToFile, Some("GoToFile > Command")),
-    ]);
-}
-
 impl Antler {
     /// Cmd+P: opens the popup with an empty query and lists the files again off the UI thread.
     pub(crate) fn go_to_file(&mut self, _: &GoToFile, window: &mut Window, cx: &mut Context<Self>) {

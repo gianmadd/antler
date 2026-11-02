@@ -15,6 +15,7 @@ use gpui_kit::*;
 
 use crate::style::{self, FG, FG_DIM, FG_FAINT, HOVER, LINE_SOFT, ROW, badge, badge_color, c};
 use crate::workspace::{GitRow, Op, Section};
+use crate::explorer::{CopyEntryPath, CopyEntryRelativePath};
 use crate::{Antler, Commit, OpenFolder, copy_item, menu_item, split_path, tip};
 
 /// Extra left padding per tree level in the Git view's tree mode.
@@ -240,6 +241,16 @@ impl Antler {
             })
     }
 
+    /// Alt+Cmd+C / Alt+Shift+Cmd+C: the selected file's path.
+    fn copy_git_path(&mut self, relative: bool, cx: &mut Context<Self>) {
+        if let Some((key, full, rel)) = &self.git_picked
+            && self.ws.is_selected(key)
+        {
+            let path = if relative { rel.clone() } else { full.display().to_string() };
+            cx.write_to_clipboard(ClipboardItem::new_string(path));
+        }
+    }
+
     /// File `ix` of a group: badge-colored name, folder, hover actions; selected when its diff is the active tab.
     pub(crate) fn file_row(&self, section: usize, s: &Section, staged: bool, ix: usize, depth: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (title, files) = if staged { ("Staged Changes", &s.staged) } else { ("Changes", &s.changes) };
@@ -272,6 +283,8 @@ impl Antler {
         // right click, like VS Code's Source Control
         let this = cx.entity().downgrade();
         let rel = full.strip_prefix(&self.ws.root).unwrap_or(&full).display().to_string();
+        let key = format!("git:{}:{staged}:{}", repo.display(), f.path);
+        let picked = (key.clone(), full.clone(), rel.clone());
         let ignore = Op::Ignore { repo: repo.clone(), path: path.clone() };
         let (menu_path, menu_full, untracked) = (path.clone(), full.clone(), f.is_untracked());
         let menu = move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
@@ -296,7 +309,6 @@ impl Antler {
                 .item(copy_item("Copy Path", menu_full.display().to_string()))
                 .item(copy_item("Copy Relative Path", rel.clone()))
         };
-        let key = format!("git:{}:{staged}:{}", repo.display(), f.path);
         h_flex()
             .id(("file", ix))
             .group(hover_group.clone())
@@ -311,6 +323,8 @@ impl Antler {
                 let repo = repo.clone();
                 move |this, ev: &ClickEvent, window, cx| {
                     this.ws.select(key.clone());
+                    this.git_picked = Some(picked.clone());
+                    this.git_focus.focus(window, cx); // so Alt+Cmd+C reaches the Git view
                     // a double click fires twice (count 1 then 2): preview, then pin
                     this.open_file(section, staged, &path, ev.click_count() >= 2, window, cx);
                     let page = this.ws.section_clicked(&repo);
@@ -350,7 +364,7 @@ impl Antler {
                 crate::stash_view::stash_submenu(menu, &this, &repo, window, cx)
             }
         });
-        let commit = Button::new("commit").ghost().xsmall().icon(IconName::Check).tooltip("Commit").on_click(cx.listener({
+        let commit = Button::new("commit").ghost().xsmall().icon(IconName::Check).tooltip(crate::keys::label(cx, "Commit", "git.commit")).on_click(cx.listener({
             let repo = repo.clone();
             move |this, _, window, cx| {
                 cx.stop_propagation();
@@ -481,6 +495,14 @@ impl Antler {
                     .loading(self.loading)
                     .on_click(cx.listener(|this, _, window, cx| this.refresh_all(window, cx))),
             );
-        v_flex().size_full().child(style::panel_header("GIT", None, actions)).child(body).into_any_element()
+        v_flex()
+            .size_full()
+            .key_context("Git")
+            .track_focus(&self.git_focus)
+            .on_action(cx.listener(|this, _: &CopyEntryPath, _, cx| this.copy_git_path(false, cx)))
+            .on_action(cx.listener(|this, _: &CopyEntryRelativePath, _, cx| this.copy_git_path(true, cx)))
+            .child(style::panel_header("GIT", None, actions))
+            .child(body)
+            .into_any_element()
     }
 }

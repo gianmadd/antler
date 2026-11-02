@@ -312,6 +312,7 @@ impl Antler {
         };
         v_flex()
             .size_full()
+            .key_context("Search")
             .child(style::panel_header("SEARCH", None, div()))
             .child(header)
             .when(!summary.is_empty(), |el| {

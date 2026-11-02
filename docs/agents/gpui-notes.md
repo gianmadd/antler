@@ -304,3 +304,14 @@ window.open_alert_dialog(cx, move |alert, _, _| {
 ## Untitled file (#11)
 - An Untitled file is a `FileTab` with `untitled: true` and `path` = just its name ("Untitled-1"), so tabs, editors (keyed by path) and dirty (`text != disk`, disk empty) work unchanged; the scan, `save` and the closed-tabs list skip it. Save As: `cx.prompt_for_new_path(&root, Some(name))` (oneshot like `prompt_for_paths`), then `ws.save_untitled_as(ix, &path)` turns the tab into a normal file tab and returns the write.
 - Hot exit: `cx.on_app_quit(|this, cx| { ...; async {} }).detach()` in `Antler::new` writes `untitled` (name, text) into `state.json`; `main` restores it with `ws.restore_untitled`. Quit asks only about `ws.quit_dirty_tabs()` (no Untitled). Not verified by hand: the native Save As dialog and that `on_app_quit` runs when the last window is closed.
+
+## Keys: the command table (`src/keys.rs`)
+
+- Every binding, menu item and key tooltip comes from `COMMANDS` (id, title, key, context). Add a command: an `actions!` type with its handler, one row, and an id in `MENUS` if it has a menu item. `cargo test` fails if a key is bound twice in one context.
+- Precedence (gpui-pre `keymap.rs`): the binding whose context matches at the deepest element wins; at the same depth the one added later wins. So Antler's bindings (added after `gpui_kit::init`) beat the editor's own at the same depth (`Input && mode == editor` and `Input` match on the same element: Shift+Alt+Up is Copy Line, not Add Cursor), and a deeper `Input` beats an outer `Explorer` (Cmd+Backspace in the Explorer's name field deletes text, not the file).
+- A key context only applies along the focus path: an element needs `.track_focus(&handle)` and a focus call on click (see the Git view's `git_focus`).
+- No unbind for a subset of bindings: `cx.clear_key_bindings()` would drop gpui-component's too. To reload, `keys::load` binds `NoAction` over the old (key, context) pairs, then the new ones (later wins).
+- `Keystroke::parse` and `KeyBinding::new` take `&'static str`; for user text use `Keystroke::parse_with_os(s, OperatingSystem::Mac)` and `KeyBinding::load`. `Keystroke::unparse(os)` gives the canonical spelling ("cmd-shift-f").
+- `use gpui_kit::*` in a test module brings gpui's `#[test]` macro and breaks `#[test]` ("recursion limit"): add `use core::prelude::v1::test;`.
+- Folding: `EditorState` has no way to fold, only `unfold_at(position, cx)` and the read-only `display_map().folded_ranges()` (gpui-base 0.8.1; `set_folded` needs `&mut DisplayMap`, which is private). Unfold All is a loop of `unfold_at`; Fold and Fold All are not possible.
+- Buttons: `Button::tooltip(String)`; the key text comes from `keys::label(cx, "Commit", "git.commit")`, which follows the user's keybindings.json.

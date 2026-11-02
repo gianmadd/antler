@@ -18,6 +18,7 @@ Antler copies VS Code's Explorer and Source Control; for git, ADR 0003 applies (
 | Windows | one app, several windows, reopening | one window per process; Open Folder replaces the folder |
 | Theme | light/dark and themes | dark only, Amber accent, font 14 |
 | Zoom keys | ⌘= / ⌘- zoom the whole window, ⌘0 focuses the side bar | ⌘= / ⌘- / ⌘0 change and reset the editor font size, like Zed |
+| Keybindings | `keybindings.json` with `when` expressions, comments allowed | `~/.config/antler/keybindings.json`, same `[{ key, command, when }]` and `-command`, reloaded within a second of saving; plain JSON (no comments), `when` is one of `input`, `editor`, `explorer`, `git`, `search`, `commit` (unknown ones are ignored with a warning); command ids are VS Code's where VS Code has the command |
 | Staged/Changes groups | collapsible | not collapsible (to be aligned) |
 
 Excluded by choice: integrated terminal, extensions, AI-generated commit messages.

@@ -39,7 +39,7 @@ impl Antler {
                             return then(t, window, cx);
                         }
                         // quit or close only once the writes are on disk, and not if one failed
-                        t.save_all(dirty.to_vec(), then.clone(), window, cx);
+                        t.save_dirty(dirty.to_vec(), then.clone(), window, cx);
                     })
                     .ok();
                 })
@@ -57,10 +57,10 @@ impl Antler {
     }
 
     /// Saves `dirty`, Untitled files one by one through Save As first, then runs `then` if every write went through.
-    fn save_all(&mut self, dirty: Vec<usize>, then: Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_dirty(&mut self, dirty: Vec<usize>, then: Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(&u) = dirty.iter().find(|&&i| self.ws.tabs[i].file().is_some_and(|f| f.untitled)) {
             let rest = dirty.into_iter().filter(|&i| i != u).collect();
-            return self.save_untitled(u, window, cx, move |t, window, cx| t.save_all(rest, then, window, cx));
+            return self.save_untitled(u, window, cx, move |t, window, cx| t.save_dirty(rest, then, window, cx));
         }
         let jobs = dirty.iter().filter_map(|&i| self.ws.save(i)).collect();
         self.write(jobs, window, cx, move |t, window, cx| then(t, window, cx));
