@@ -11,6 +11,18 @@ _Avoid_: Workspace, project
 **Window**:
 One of the windows of the single Antler process. Each has its own Root (or none), tabs, editor groups and git queue; settings and keybindings are shared. A folder has at most one Window.
 
+**Remote host**:
+A machine reached over SSH whose folders Antler can open; Linux, macOS or Windows.
+_Avoid_: Server, remote machine
+
+**Remote window**:
+A Window whose Root lives on a Remote host; it shows the host's name and works like a local Window.
+_Avoid_: SSH session, remote workspace
+
+**Forwarded port**:
+A port of the Remote host made reachable at `localhost` on the Mac while the Remote window is connected.
+_Avoid_: Tunnel
+
 **Nested repository**:
 A git repository found under the Root at any depth, even inside another repository or inside a folder that repository ignores. Each submodule counts as a Nested repository of its own.
 _Avoid_: Sub-repo, nested repo, worktree
