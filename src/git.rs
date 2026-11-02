@@ -13,7 +13,7 @@ fn run(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
 }
 
 fn run_env(repo: &Path, args: &[&str], stdin: Option<&str>, envs: &[(&str, &std::ffi::OsStr)]) -> Result<String> {
-    crate::host::at(repo).git(repo, args, stdin, envs)
+    crate::host::current().git(repo, args, stdin, envs)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,7 +73,7 @@ impl Operation {
 pub fn operation(repo: &Path) -> Option<Operation> {
     let dot_git = repo.join(".git");
     // a linked worktree's `.git` is a file pointing at its own git dir
-    let host = crate::host::at(repo);
+    let host = crate::host::current();
     let dir = match host.read_to_string(&dot_git) {
         Ok(text) => repo.join(text.trim().strip_prefix("gitdir:")?.trim()),
         Err(_) => dot_git,
@@ -462,7 +462,8 @@ pub fn diff_texts(old: &str, new: &str) -> Result<String> {
         .and_then(|()| std::fs::write(dir.join("current"), old))
         .and_then(|()| std::fs::write(dir.join("incoming"), new));
     let patch = written.map_err(|e| e.to_string()).and_then(|()| {
-        run(&dir, &["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "current", "incoming"], None)
+        // the files are in this machine's temp folder, whatever the Root's host
+        crate::host::local().git(&dir, &["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "current", "incoming"], None, &[])
     });
     std::fs::remove_dir_all(&dir).ok();
     patch
@@ -495,7 +496,7 @@ pub fn unstage_file(repo: &Path, path: &str) -> Result<()> {
 /// Discards working-tree changes; untracked files are deleted.
 pub fn discard_file(repo: &Path, file: &FileStatus) -> Result<()> {
     if file.is_untracked() {
-        crate::host::at(repo).remove_file(&repo.join(&file.path)).map_err(|e| e.to_string())
+        crate::host::current().remove_file(&repo.join(&file.path)).map_err(|e| e.to_string())
     } else {
         run(repo, &["restore", "--worktree", "--", &file.path], None).map(drop)
     }

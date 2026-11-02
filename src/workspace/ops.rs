@@ -349,19 +349,19 @@ impl Op {
             Op::Undo(op) | Op::Redo(op) => op.run(),
             Op::Create { path, folder } => {
                 // the outermost folder it makes is what an undo removes
-                let top = host::at(path).create(path, *folder).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
+                let top = host::current().create(path, *folder).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
                 Ok(Some(Op::Trash { path: top, unsaved: false }))
             }
             Op::Rename { from, to } => {
                 // `Host::rename` does not replace a file silently, as an undo or redo must not
-                host::at(from).rename(from, to).map_err(|e| match e.kind() {
+                host::current().rename(from, to).map_err(|e| match e.kind() {
                     std::io::ErrorKind::AlreadyExists => format!("Cannot move {} to {}: a file or folder with that name already exists.", from.display(), to.display()),
                     _ => format!("Cannot rename {}: {e}", from.display()),
                 })?;
                 Ok(Some(Op::Rename { from: to.clone(), to: from.clone() }))
             }
             Op::Copy { from, to } => {
-                let host = host::at(to);
+                let host = host::current();
                 if host.exists(to) {
                     return Err(format!("Cannot copy {} to {}: a file or folder with that name already exists.", from.display(), to.display()));
                 }
@@ -370,7 +370,7 @@ impl Op {
             }
             Op::Batch(_) => unreachable!("ScanJob::run runs a batch's ops one by one"),
             Op::Trash { path, .. } => {
-                let trashed = host::at(path).trash(path).map_err(|e| format!("Cannot move {} to the Trash: {e}", path.display()))?;
+                let trashed = host::current().trash(path).map_err(|e| format!("Cannot move {} to the Trash: {e}", path.display()))?;
                 Ok(trashed.map(|trashed| Op::Rename { from: trashed, to: path.clone() }))
             }
             git => git.run_git().map(|()| None),
@@ -392,7 +392,7 @@ impl Op {
             Op::RevertLines { repo, patch, .. } => git::apply_patch(repo, patch, false, true),
             Op::Ignore { repo, path } => {
                 let file = repo.join(".gitignore");
-                let host = host::at(repo);
+                let host = host::current();
                 let mut text = host.read_to_string(&file).unwrap_or_default();
                 if text.lines().any(|l| l.trim() == path) {
                     return Ok(());
@@ -450,7 +450,7 @@ pub(super) fn copy_target(dir: &Path, name: &std::ffi::OsStr, folder: bool, take
         None => (name.to_string(), ""),
     };
     let mut path = dir.join(&*name);
-    while host::at(dir).exists(&path) || taken.contains(&path) {
+    while host::current().exists(&path) || taken.contains(&path) {
         let counted = stem.rsplit_once(" copy ").and_then(|(base, n)| Some((base.to_string(), n.parse::<u32>().ok()?)));
         stem = match counted {
             Some((base, n)) => format!("{base} copy {}", n + 1),
@@ -465,7 +465,7 @@ pub(super) fn copy_target(dir: &Path, name: &std::ffi::OsStr, folder: bool, take
 /// Force Checkout's discard of one file of "Changes": restored from the index, or (untracked) moved to the Trash.
 fn force_discard(repo: &Path, file: &FileEntry) -> git::Result<()> {
     if file.is_untracked() {
-        host::at(repo).trash(&repo.join(&file.path)).map(drop).map_err(|e| format!("Cannot move {} to the Trash: {e}", file.path))
+        host::current().trash(&repo.join(&file.path)).map(drop).map_err(|e| format!("Cannot move {} to the Trash: {e}", file.path))
     } else {
         discard(repo, &file.path, false)
     }
@@ -1521,6 +1521,9 @@ mod transfer_tests {
 
     #[test]
     fn deleting_several_entries_asks_once_and_one_undo_brings_them_all_back() {
+        if crate::testing::over_remote() {
+            return; // the Trash is local: a remote deletes for good
+        }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let mut ws = four(root);
