@@ -7,6 +7,7 @@
 //! with `ConnectionAborted`.
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,6 +17,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::discovery::Repo;
 use crate::host::{Envs, Host, Meta, WatchGuard};
+use crate::ports::{ListeningPort, bind_local};
 use crate::protocol::*;
 use crate::search::{Query, Results};
 
@@ -38,6 +40,18 @@ pub enum Status {
 
 type Watches = Arc<Mutex<HashMap<u64, (PathBuf, Box<dyn Fn(PathBuf) + Send>)>>>;
 
+type Streams = Arc<Mutex<HashMap<u64, TcpStream>>>;
+type PortsWatch = Arc<Mutex<Option<(u64, Arc<dyn Fn(Vec<ListeningPort>) + Send + Sync>)>>>;
+
+/// Where the reader thread delivers what is not an answer; they outlive a connection.
+#[derive(Clone, Default)]
+struct Sinks {
+    watches: Watches,
+    /// The local sockets of the open forwarded streams, by stream id.
+    streams: Streams,
+    ports: PortsWatch,
+}
+
 /// Who is waiting for what; shared with the reader thread, which is the only one reading the server's output.
 #[derive(Default)]
 struct Shared {
@@ -56,7 +70,7 @@ struct Inner {
 struct Core {
     conn: Mutex<Arc<Inner>>,
     next: Arc<AtomicU64>,
-    watches: Watches,
+    sinks: Sinks,
     connector: Option<Arc<Connector>>,
     status: Mutex<Option<Arc<dyn Fn(Status) + Send + Sync>>>,
     /// The process behind the current connection.
@@ -91,7 +105,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Inner {
     /// Reads the `Hello` and starts the reader thread; `on_end` runs when the connection ends.
-    fn start(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>, next: Arc<AtomicU64>, watches: Watches, on_end: impl FnOnce() + Send + 'static) -> Result<(Arc<Inner>, ServerInfo), String> {
+    fn start(mut input: Box<dyn Read + Send>, output: Box<dyn Write + Send>, next: Arc<AtomicU64>, sinks: Sinks, on_end: impl FnOnce() + Send + 'static) -> Result<(Arc<Inner>, ServerInfo), String> {
         let hello = read_frame::<_, ResFrame>(&mut input).map_err(|e| format!("no answer from the server: {e}"))?;
         let server = match hello {
             Some((ResFrame { res: Res::Hello { protocol, os, arch }, .. }, _)) if protocol == VERSION => ServerInfo { os, arch },
@@ -102,12 +116,28 @@ impl Inner {
         let reader = shared.clone();
         std::thread::spawn(move || {
             while let Ok(Some((ResFrame { id, res }, body))) = read_frame(&mut input) {
-                if let Res::Event { path } = res {
-                    lock(&watches).get(&id).map(|(_, f)| f(native_wire(&path)));
-                } else if let Some(tx) = lock(&reader.pending).1.remove(&id) {
-                    tx.send((res, body)).ok();
+                match res {
+                    Res::Event { path } => drop(lock(&sinks.watches).get(&id).map(|(_, f)| f(native_wire(&path)))),
+                    Res::Ports { ports } => {
+                        let cb = lock(&sinks.ports).as_ref().filter(|(i, _)| *i == id).map(|(_, f)| f.clone());
+                        cb.map(|f| f(ports));
+                    }
+                    Res::Data => {
+                        let s = lock(&sinks.streams).get(&id).and_then(|s| s.try_clone().ok());
+                        // shortcut: a browser that does not read stalls every stream; upgrade with a writer thread per stream
+                        if s.is_some_and(|mut s| s.write_all(&body).is_err()) {
+                            lock(&sinks.streams).remove(&id).map(|s| s.shutdown(Shutdown::Both));
+                        }
+                    }
+                    Res::Closed => drop(lock(&sinks.streams).remove(&id).map(|s| s.shutdown(Shutdown::Write))),
+                    res => {
+                        if let Some(tx) = lock(&reader.pending).1.remove(&id) {
+                            tx.send((res, body)).ok();
+                        }
+                    }
                 }
             }
+            lock(&sinks.streams).drain().for_each(|(_, s)| drop(s.shutdown(Shutdown::Both))); // their frames are gone with the connection
             *lock(&reader.pending) = (true, HashMap::new()); // dropping the senders wakes every waiter
             on_end();
         });
@@ -132,7 +162,7 @@ impl Core {
         Arc::new(Core {
             conn: Mutex::new(Inner::dead(next.clone())),
             next,
-            watches: Default::default(),
+            sinks: Sinks::default(),
             connector,
             status: Mutex::new(None),
             child: Mutex::new(None),
@@ -159,16 +189,22 @@ impl Core {
                 Core::lost(&core, generation);
             }
         };
-        let result = Inner::start(input, output, core.next.clone(), core.watches.clone(), on_end).and_then(|(inner, info)| {
-            let watches: Vec<(u64, PathBuf)> = lock(&core.watches).iter().map(|(id, (root, _))| (*id, root.clone())).collect();
+        let result = Inner::start(input, output, core.next.clone(), core.sinks.clone(), on_end).and_then(|(inner, info)| {
+            let watches: Vec<(u64, PathBuf)> = lock(&core.sinks.watches).iter().map(|(id, (root, _))| (*id, root.clone())).collect();
             for (id, root) in watches {
                 let rx = inner.register(id).map_err(text)?;
                 inner.send(id, Req::Watch { root: wire_path(&root) }, &[]).map_err(text)?;
                 match rx.recv() {
                     Ok((Res::Ok, _)) => {}
-                    Ok(_) => drop(lock(&core.watches).remove(&id)), // its folder is gone: the watch ends
+                    Ok(_) => drop(lock(&core.sinks.watches).remove(&id)), // its folder is gone: the watch ends
                     Err(_) => return Err(lost().to_string()),
                 }
+            }
+            let ports = lock(&core.sinks.ports).as_ref().map(|(id, _)| *id);
+            if let Some(id) = ports {
+                let rx = inner.register(id).map_err(text)?;
+                inner.send(id, Req::WatchPorts, &[]).map_err(text)?;
+                rx.recv().map_err(|_| lost().to_string())?;
             }
             Ok((inner, info))
         });
@@ -286,9 +322,77 @@ impl Remote {
         !self.inner().is_lost()
     }
 
+    /// Reports the ports the host listens on: the whole list once now and again at each change (`ports::diff` tells
+    /// what is new). The watch is sent again after a reconnect. Call it once per `Remote`.
+    pub fn watch_ports(&self, on_ports: impl Fn(Vec<ListeningPort>) + Send + Sync + 'static) -> Result<(), String> {
+        let id = self.core.next.fetch_add(1, Ordering::Relaxed);
+        *lock(&self.core.sinks.ports) = Some((id, Arc::new(on_ports)));
+        let inner = self.inner();
+        let rx = inner.register(id).map_err(text)?;
+        inner.send(id, Req::WatchPorts, &[]).map_err(text)?;
+        rx.recv().map(drop).map_err(|_| lost().to_string())
+    }
+
+    /// Makes `host:port` (as the host sees it) reachable at `127.0.0.1:<local_port>`: the same number when free, else
+    /// another free one. Only loopback is bound. Each connection to it is a stream through the current connection,
+    /// so it works again after a reconnect; dropping the [`Forward`] closes the local port.
+    pub fn forward(&self, host: &str, port: u16, preferred: u16) -> io::Result<Forward> {
+        let listener = bind_local(preferred)?;
+        let local_port = listener.local_addr()?.port();
+        let (stop, core, host) = (Arc::new(AtomicBool::new(false)), self.core.clone(), host.to_string());
+        let flag = stop.clone();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                if flag.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Ok(conn) = conn {
+                    let (core, host) = (core.clone(), host.clone());
+                    std::thread::spawn(move || drop(relay(&core, conn, &host, port)));
+                }
+            }
+        });
+        Ok(Forward { local_port, stop })
+    }
+
     fn inner(&self) -> Arc<Inner> {
         lock(&self.core.conn).clone()
     }
+}
+
+/// A local port that leads to a port of the host; dropping it closes the local port (streams already open end).
+pub struct Forward {
+    pub local_port: u16,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Forward {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, self.local_port))).ok(); // wakes the accept
+    }
+}
+
+/// One local connection: opens a stream on the current connection and copies local bytes into it.
+fn relay(core: &Core, mut conn: TcpStream, host: &str, port: u16) -> io::Result<()> {
+    let inner = lock(&core.conn).clone();
+    let id = core.next.fetch_add(1, Ordering::Relaxed);
+    let rx = inner.register(id)?;
+    // before the request: the first bytes may follow its answer immediately
+    lock(&core.sinks.streams).insert(id, conn.try_clone()?);
+    let opened = inner.send(id, Req::Open { host: host.into(), port }, &[]).is_ok() && matches!(rx.recv(), Ok((Res::Ok, _)));
+    if !opened {
+        lock(&core.sinks.streams).remove(&id);
+        return Err(lost());
+    }
+    let mut buf = vec![0u8; 32 << 10];
+    while let Ok(n @ 1..) = conn.read(&mut buf) {
+        if inner.send(core.next.fetch_add(1, Ordering::Relaxed), Req::Data { target: id }, &buf[..n]).is_err() {
+            break;
+        }
+    }
+    lock(&core.sinks.streams).remove(&id);
+    inner.send(core.next.fetch_add(1, Ordering::Relaxed), Req::Cancel { target: id }, &[])
 }
 
 impl Drop for Remote {
@@ -449,7 +553,7 @@ impl Host for Remote {
         let inner = self.inner();
         let id = self.core.next.fetch_add(1, Ordering::Relaxed);
         // before the request: events may follow its answer immediately; kept (with the root) to send it again after a reconnect
-        lock(&self.core.watches).insert(id, (root.to_path_buf(), on_change));
+        lock(&self.core.sinks.watches).insert(id, (root.to_path_buf(), on_change));
         let guard = WatchStop { core: self.core.clone(), id };
         let rx = inner.register(id).map_err(text)?;
         inner.send(id, Req::Watch { root: wire_path(root) }, &[]).map_err(text)?;
@@ -483,7 +587,7 @@ struct WatchStop {
 
 impl Drop for WatchStop {
     fn drop(&mut self) {
-        lock(&self.core.watches).remove(&self.id);
+        lock(&self.core.sinks.watches).remove(&self.id);
         let cancel = self.core.next.fetch_add(1, Ordering::Relaxed);
         let inner = lock(&self.core.conn).clone();
         inner.send(cancel, Req::Cancel { target: self.id }, &[]).ok();

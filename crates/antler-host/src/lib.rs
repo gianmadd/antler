@@ -4,6 +4,7 @@
 pub mod discovery;
 pub mod exclude;
 pub mod host;
+pub mod ports;
 pub mod protocol;
 pub mod reconnect;
 pub mod remote;
