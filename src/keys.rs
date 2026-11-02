@@ -16,6 +16,7 @@ use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
+use crate::remote_view::{CloseRemoteConnection, ConnectToHost};
 use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleSidebar, set_menus};
 
 /// Where a binding applies: a GPUI key context, and the name `when` uses in keybindings.json.
@@ -134,6 +135,8 @@ cmds![
     ("workbench.action.files.saveAll", "Save All", "alt-cmd-s", Global, SaveAll),
     ("workbench.action.files.openFolder", "Open Folder…", "cmd-o", Global, OpenFolder),
     ("workbench.action.closeFolder", "Close Folder", "cmd-k f", Global, CloseFolder),
+    ("remote.ssh.connect", "Connect to Host…", "", Global, ConnectToHost),
+    ("workbench.action.remote.close", "Close Remote Connection", "", Global, CloseRemoteConnection),
     ("workbench.action.closeWindow", "Close Window", "shift-cmd-w", Global, CloseWindow),
     ("antler.minimizeWindow", "Minimize", "cmd-m", Global, MinimizeWindow),
     ("antler.focusNextWindow", "Next Window", "cmd-`", Global, FocusNextWindow),
@@ -613,6 +616,7 @@ pub(crate) const MENUS: &[(&str, &[&str])] = &[
             "-",
             "workbench.action.files.openFolder",
             "@recent",
+            "remote.ssh.connect",
             "workbench.action.closeFolder",
             "workbench.action.closeWindow",
             "-",

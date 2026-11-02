@@ -274,6 +274,13 @@ impl Remote {
         }
     }
 
+    /// After `Status::GaveUp`: starts over with a new grace time.
+    pub fn retry(&self) {
+        if self.core.supervised.load(Ordering::SeqCst) {
+            Core::start_reconnecting(&self.core);
+        }
+    }
+
     /// Whether there is a live connection now.
     pub fn is_connected(&self) -> bool {
         !self.inner().is_lost()

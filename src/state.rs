@@ -26,7 +26,7 @@ pub fn windows(file: &Path, last_root: Option<PathBuf>) -> Vec<WindowSave> {
     let layout = json.get("editor_layout").filter(|v| !v.is_null()).cloned();
     let untitled = json.get("untitled").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
     let root = last_root.unwrap_or_default();
-    vec![WindowSave { root, layout, untitled }]
+    vec![WindowSave { root, layout, untitled, ..Default::default() }]
 }
 
 /// Saves the windows (quit); the keys of the single-window file are cleared.
