@@ -73,16 +73,16 @@ impl Workspace {
     /// then `replaced`.
     pub fn replace(&mut self, what: Replace) -> Vec<search::ReplaceJob> {
         let Some(results) = self.search.results.as_mut() else { return Vec::new() };
-        let targets: Vec<(PathBuf, Option<usize>)> = match what {
+        let targets: Vec<(PathBuf, Option<(usize, String)>)> = match what {
             Replace::All => results.files.drain(..).map(|f| (f.path, None)).collect(),
             Replace::File(f) if f < results.files.len() => vec![(results.files.remove(f).path, None)],
             Replace::Line(f, l) if results.files.get(f).is_some_and(|file| l < file.lines.len()) => {
-                let line = results.files[f].lines.remove(l).line;
+                let search::LineMatch { line, text, .. } = results.files[f].lines.remove(l);
                 let path = results.files[f].path.clone();
                 if results.files[f].lines.is_empty() {
                     results.files.remove(f);
                 }
-                vec![(path, Some(line))]
+                vec![(path, Some((line, text)))]
             }
             // the results changed between the render and the click
             _ => Vec::new(),
@@ -92,12 +92,22 @@ impl Workspace {
         for (path, line) in targets {
             let dirty = self.tabs.iter().position(|t| t.file().is_some_and(|f| f.path == path && !f.loading && f.is_dirty()));
             match dirty {
-                // shortcut: the line number comes from the disk text, which the edits may have moved; search the buffers if it matters.
-                Some(ix) => match search::replace(&self.tabs[ix].file().unwrap().text, &query, &with, preserve_case, line) {
+                // the number is the disk's: the edits may have moved the line, so take the nearest buffer line with the same text
+                Some(ix) => {
+                    let buffer = &self.tabs[ix].file().unwrap().text;
+                    let line = line.as_ref().and_then(|(n, text)| {
+                        let at = |i: &usize| buffer.lines().nth(i - 1).is_some_and(|l| l.trim_start() == text);
+                        (1..=buffer.lines().count()).filter(at).min_by_key(|i| i.abs_diff(*n))
+                    });
+                    if line.is_none() && matches!(what, Replace::Line(..)) {
+                        continue; // the line is gone from the buffer
+                    }
+                    match search::replace(buffer, &query, &with, preserve_case, line) {
                     Ok(text) => self.edit(ix, text),
                     Err(e) => self.last_error = Some(e),
-                },
-                None => jobs.push(search::ReplaceJob { path, query: query.clone(), with: with.clone(), preserve_case, line }),
+                    }
+                }
+                None => jobs.push(search::ReplaceJob { path, query: query.clone(), with: with.clone(), preserve_case, line: line.map(|l| l.0) }),
             }
         }
         jobs
@@ -357,6 +367,21 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("dirty.txt")).unwrap(), "foo\n", "a dirty file is not written");
         let f = ws.tabs[dirty].file().unwrap();
         assert_eq!((f.text.as_str(), ws.tabs[dirty].is_dirty()), ("bar edited\n", true));
+    }
+
+    #[test]
+    fn replacing_one_line_of_a_dirty_tab_finds_it_in_the_buffer_not_at_its_disk_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("d.txt"), "foo 1\nfoo 2\n").unwrap();
+        let mut ws = Workspace::open(root);
+        let ix = ws.open_path_now(&root.join("d.txt"), None, true);
+        search(&mut ws, "foo", false, false, false);
+        ws.edit(ix, "new line\nfoo 1\nfoo 2\n".into());
+
+        replace_now(&mut ws, "bar", Replace::Line(0, 1));
+
+        assert_eq!(ws.tabs[ix].file().unwrap().text, "new line\nfoo 1\nbar 2\n");
     }
 
     #[test]

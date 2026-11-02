@@ -387,7 +387,7 @@ impl Op {
         match self {
             Op::Stage { repo, path } => git::stage_file(repo, path),
             Op::Unstage { repo, path } => git::unstage_file(repo, path),
-            Op::StageAll { repo } => git::stage_file(repo, "."),
+            Op::StageAll { repo } => git::stage_all(repo),
             Op::UnstageAll { repo } => git::unstage_file(repo, "."),
             Op::Revert { repo, path, untracked } => discard(repo, path, *untracked),
             Op::DiscardAll { repo, files } => files.iter().try_for_each(|f| discard(repo, &f.path, f.is_untracked())),
@@ -1890,6 +1890,23 @@ mod conflict_tests {
         assert!(s.merge.is_empty());
         assert!(s.staged.iter().any(|f| f.path == "a.txt" && f.badge == 'M'));
         assert_eq!(out(&app, &["diff", "--name-only", "--diff-filter=U"]), "", "git has it as resolved");
+    }
+
+    #[test]
+    fn stage_all_leaves_the_files_in_merge_changes_alone_like_vs_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("app");
+        diverged(&app);
+        assert!(!git(&app, &["merge", "-q", "feature"]));
+        fs::write(app.join("new.txt"), "n\n").unwrap();
+        let mut ws = Workspace::open(tmp.path());
+
+        ws.perform(Op::StageAll { repo: app.clone() });
+
+        assert_eq!(ws.last_error, None);
+        let s = &ws.sections[0];
+        assert_eq!(merge_paths(s), [("a.txt", '!')], "still unresolved: only Stage All Merge Changes resolves, asking first");
+        assert!(s.staged.iter().any(|f| f.path == "new.txt"));
     }
 
     #[test]

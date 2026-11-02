@@ -496,6 +496,18 @@ pub fn stage_file(repo: &Path, path: &str) -> Result<()> {
     run(repo, &["add", "--", path], None).map(drop)
 }
 
+/// VS Code's Stage All covers Changes only: files in Merge Changes stay unresolved.
+/// (An `:(exclude)` pathspec does not work: `git add .` resolves unmerged paths anyway.)
+pub fn stage_all(repo: &Path) -> Result<()> {
+    let files = status(repo)?;
+    let mut args = vec!["add", "--"];
+    args.extend(files.iter().filter(|f| !f.is_conflicted()).map(|f| f.path.as_str()));
+    if args.len() == 2 {
+        return Ok(());
+    }
+    run(repo, &args, None).map(drop)
+}
+
 pub fn unstage_file(repo: &Path, path: &str) -> Result<()> {
     // `restore --staged` fails before the first commit (no HEAD); `rm --cached` covers only that case, like VS Code.
     if run(repo, &["rev-parse", "--verify", "-q", "HEAD"], None).is_err() {
