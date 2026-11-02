@@ -143,6 +143,10 @@ struct Antler {
     wrap: bool,
     /// Cmd+= / Cmd+-: the editors' font size; `None` is the theme's.
     font_size: Option<Pixels>,
+    /// Cmd+D: the selections it added in the editor, in order; stale once the editor's selection is none of them.
+    cursors: Vec<std::ops::Range<usize>>,
+    /// ...and whether that session started on a word (empty selection): it then matches whole words, with case.
+    cursors_word: bool,
     /// Watches the Root; replaced when the Root changes, dropping it stops its events.
     watcher: Option<notify::RecommendedWatcher>,
     /// Search view: the query field (its text becomes `ws.search.query.text`).
@@ -215,6 +219,8 @@ impl Antler {
             cursor: (0, 0),
             wrap: false,
             font_size: None,
+            cursors: vec![],
+            cursors_word: false,
             query: (input, sub),
             search_fields: search_view::SearchFields::new(window, cx),
             git_list: ListState::new(0, ListAlignment::Top, px(200.)),

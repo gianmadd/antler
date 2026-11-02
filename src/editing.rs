@@ -330,6 +330,75 @@ pub fn line_starts(t: &str) -> Vec<usize> {
     std::iter::once(0).chain(t.match_indices('\n').map(|(i, _)| i + 1)).collect()
 }
 
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The word around byte offset `o` (touching it on either side), like VS Code's word at the cursor.
+fn word_at(t: &str, o: usize) -> Option<Range<usize>> {
+    let start = t[..o].char_indices().rev().take_while(|&(_, c)| is_word(c)).last().map_or(o, |(i, _)| i);
+    let end = o + t[o..].char_indices().take_while(|&(_, c)| is_word(c)).last().map_or(0, |(i, c)| i + c.len_utf8());
+    (start < end).then_some(start..end)
+}
+
+/// Matches of the text selected by `s`, in order. VS Code's rules: an empty selection searches its word, whole word
+/// and case-sensitive; a selection searches its text anywhere, ignoring case (the Find widget's defaults).
+/// shortcut: case folding is ASCII only, to keep byte offsets; upgrade if non-ASCII matches matter.
+/// `word` forces the whole-word, case-sensitive search on a non-empty selection (Cmd+D after it started on a word).
+fn matches(t: &str, s: &Range<usize>, word: bool) -> Vec<Range<usize>> {
+    let (needle, whole) = match s.is_empty() {
+        true => match word_at(t, s.start) {
+            Some(w) => (t[w].to_string(), true),
+            None => return vec![],
+        },
+        false => (t[s.clone()].to_string(), word),
+    };
+    let (hay, needle) = if whole { (t.to_string(), needle) } else { (t.to_ascii_lowercase(), needle.to_ascii_lowercase()) };
+    let ok = |m: &Range<usize>| !whole || (!t[..m.start].ends_with(is_word) && !t[m.end..].starts_with(is_word));
+    let mut out: Vec<Range<usize>> = vec![];
+    for (i, _) in hay.match_indices(&needle) {
+        let m = i..i + needle.len();
+        if ok(&m) {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// Cmd+D: what to add. An empty selection first becomes its word; otherwise the first match starting at or after
+/// `from` (the end of the last added selection), wrapping around to the top. `None`: no word or no match.
+/// `word`: the session started on a word, so matches stay whole words with the case.
+pub fn next_occurrence(t: &str, s: Range<usize>, from: usize, word: bool) -> Option<Range<usize>> {
+    if s.is_empty() {
+        return word_at(t, s.start);
+    }
+    let all = matches(t, &s, word);
+    all.iter().find(|m| m.start >= from).or(all.first()).cloned()
+}
+
+/// Cmd+Shift+L: every match of the selection (or of the word at an empty one).
+pub fn all_occurrences(t: &str, s: Range<usize>) -> Vec<Range<usize>> {
+    matches(t, &s, false)
+}
+
+/// Shift+Alt+I: a cursor at the end of every line of a selection; the last line's at the selection's end, unless
+/// that is its start. Empty selection: none.
+pub fn line_end_cursors(t: &str, s: Range<usize>) -> Vec<usize> {
+    let mut out = vec![];
+    if s.is_empty() {
+        return out;
+    }
+    let mut o = s.start;
+    while line_end(t, o) < s.end {
+        out.push(line_end(t, o));
+        o = line_end(t, o) + 1;
+    }
+    if s.end > line_start(t, s.end) {
+        out.push(s.end);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +581,45 @@ mod tests {
         let t = "<<<<<<< HEAD\nmine\n||||||| base\norig\n=======\ntheirs\n>>>>>>> b";
         assert_eq!(show(t, Some(accept(t, &conflicts(t)[0], Accept::Current))), "|mine\n");
         assert_eq!(show(t, Some(accept(t, &conflicts(t)[0], Accept::Both))), "|mine\ntheirs\n");
+    }
+
+    #[test]
+    fn next_occurrence_rules() {
+        let t = "foo bar Foo foobar foo";
+        // empty selection: the word under (or touching) the cursor
+        assert_eq!(next_occurrence(t, 1..1, 0, false), Some(0..3));
+        assert_eq!(next_occurrence(t, 3..3, 0, false), Some(0..3));
+        assert_eq!(next_occurrence("a  b", 2..2, 0, false), None);
+        // selection: next match after `from`, ignoring case, inside words too
+        assert_eq!(next_occurrence(t, 0..3, 3, false), Some(8..11));
+        assert_eq!(next_occurrence(t, 0..3, 11, false), Some(12..15));
+        assert_eq!(next_occurrence(t, 0..3, 15, false), Some(19..22));
+        // wrap around
+        assert_eq!(next_occurrence(t, 19..22, 22, false), Some(0..3));
+        assert_eq!(next_occurrence("é x é", 0..2, 2, false), Some(5..7));
+        assert_eq!(next_occurrence("abc", 0..3, 3, false), Some(0..3)); // only match: itself
+        // a session that started on a word: whole words, case-sensitive
+        assert_eq!(next_occurrence(t, 0..3, 3, true), Some(19..22));
+    }
+
+    #[test]
+    fn all_occurrences_rules() {
+        let t = "foo Foo foobar foo_x foo";
+        // empty selection: whole word, case-sensitive
+        assert_eq!(all_occurrences(t, 1..1), [0..3, 21..24]);
+        assert_eq!(all_occurrences(t, 3..3), [0..3, 21..24]);
+        assert_eq!(all_occurrences("x  y", 2..2), Vec::<Range<usize>>::new());
+        // selection: any substring, ignoring case
+        assert_eq!(all_occurrences(t, 0..3), [0..3, 4..7, 8..11, 15..18, 21..24]);
+        assert_eq!(all_occurrences("aaaa", 0..2), [0..2, 2..4]);
+    }
+
+    #[test]
+    fn line_end_cursors_rules() {
+        let t = "ab\ncd\nef";
+        assert_eq!(line_end_cursors(t, 1..8), [2, 5, 8]);
+        assert_eq!(line_end_cursors(t, 1..6), [2, 5]); // ends at a line start: no cursor there
+        assert_eq!(line_end_cursors(t, 0..1), [1]);
+        assert!(line_end_cursors(t, 1..1).is_empty());
     }
 }

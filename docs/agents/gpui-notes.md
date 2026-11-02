@@ -294,3 +294,9 @@ window.open_alert_dialog(cx, move |alert, _, _| {
 - A dialog button that must open this box: close the dialog first (`window.close_dialog`), then call `ask_input` in `this.update`.
 - `ask_input` takes a `Check`: the line shown under the text as it is typed (`Command::on_query` notifies Antler to re-render) and, if it is an error, Enter does nothing.
 - App state (graph choices) lives in `~/.config/antler/state.json` (`state.rs`), written with `settings::set`; read once at startup by `Graph::load_filters`.
+
+## Multi-cursor (#7)
+
+- gpui-base already has Alt+click, Cmd+Alt+Up/Down and `InputState::add_selection(range, cx)` (adds, merges overlaps, no-op if covered, scrolls to it). It has no getter for the whole cursor list, and `selected_range()` is `Selections::active()` = `selections.first()`, not the last added: after a merge (sorted by start) it is the lowest one. So Cmd+D keeps its own list (`Antler::cursors`) and continues only while `selected_range()` is one of them.
+- Antler adds Cmd+D (`AddNextMatch`), Cmd+Shift+L and Cmd+F2 (`SelectAllMatches`), Shift+Alt+I (`CursorsAtLineEnds`); logic in `editing::{next_occurrence, all_occurrences, line_end_cursors}`. VS Code rules (multicursor.ts): empty selection = word, whole word, case-sensitive; a selection = plain text, case-insensitive (Find widget defaults, `selectedTextMatchMode: findOptions`); Cmd+D searches from the end of the last added selection and wraps; a session started from an empty selection keeps whole-word, case-sensitive matching on every later press (`Antler::cursors_word`).
+- Not possible with the public API: Cmd+U (Cursor Undo) and Cmd+K Cmd+D (Move Last Selection To Next Find Match) need to read or remove single cursors. Not verified by hand: that `add_selection` makes the new range visible and that the typed text lands in every cursor.
