@@ -1,5 +1,5 @@
 #!/bin/bash
-# antler [--depth N] [--hide-clean] [FOLDER]: opens Antler.app on FOLDER (default: the current one), like `code .`.
+# antler [--depth N] [--hide-clean] [FOLDER]: opens FOLDER (default: the current one) in a window of Antler.app, like `code .`.
 # Installed in ~/.local/bin by `scripts/bundle.sh --install`.
 set -euo pipefail
 
@@ -28,5 +28,10 @@ if [[ ! -d $folder ]]; then
 fi
 folder=$(cd "$folder" && pwd)
 
-# -n: the app has one window per process today, so each call starts its own instance
-exec open -n -a "$app" --args ${flags[@]+"${flags[@]}"} "$folder"
+# One app, many windows: with the app running, `open -a` hands the folder to it (a new window, or the one that has it)
+# and the flags cannot reach it; otherwise it starts with the flags and the folder as arguments.
+if pgrep -qf "$app/Contents/MacOS/antler"; then
+    ((${#flags[@]})) && echo "antler: Antler is already running, ${flags[*]} ignored (the flags apply when the app starts)" >&2
+    exec open -a "$app" "$folder"
+fi
+exec open -a "$app" --args ${flags[@]+"${flags[@]}"} "$folder"

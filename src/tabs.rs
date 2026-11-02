@@ -462,9 +462,28 @@ impl Antler {
         });
     }
 
-    /// Cmd+Q or closing the window: asks about every unsaved tab, then quits.
+    /// Cmd+Q: asks about the unsaved tabs of every window, this one first, then quits the app.
     pub(crate) fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_unsaved(self.ws.quit_dirty_tabs(), window, cx, |_, _, cx| cx.quit());
+        self.quit_chain(Vec::new(), window, cx);
+    }
+
+    /// Asks about this window's unsaved tabs, then moves on to the next window not in `done`, and quits after the last.
+    fn quit_chain(&mut self, done: Vec<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_unsaved(self.ws.quit_dirty_tabs(), window, cx, move |this, _, cx| {
+            let done: Vec<u64> = done.iter().copied().chain([this.id]).collect();
+            let next = cx.global::<crate::Windows>().0.iter().find(|e| !done.contains(&e.id)).map(|e| e.view.clone());
+            match next {
+                Some((handle, view)) => {
+                    handle
+                        .update(cx, |_, window, cx| {
+                            window.activate_window();
+                            view.update(cx, |t, cx| t.quit_chain(done, window, cx)).ok();
+                        })
+                        .ok();
+                }
+                None => cx.quit(),
+            }
+        });
     }
 
     /// Opens a file's diff in a tab (preview unless `pin`) and loads it on a background thread.

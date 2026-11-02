@@ -30,6 +30,7 @@ mod style;
 mod sync_view;
 mod tabs;
 mod update;
+mod windows;
 #[cfg(test)]
 mod testing;
 mod workspace;
@@ -51,17 +52,34 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use style::{ACT, FG, FG_DIM, LINE_SOFT, MAIN, SIDE, c};
+use windows::{Registry, WindowSave};
 use workspace::{GitRow, Op, View, Workspace};
 
 actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch]);
 actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts]);
+actions!(antler, [NewWindow, CloseWindow, MinimizeWindow, FocusNextWindow]);
 
 /// File → Open Recent → a folder.
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = antler, no_json)]
 struct OpenRecent(PathBuf);
 
-/// The app menu; rebuilt when the recent folders change.
+/// Window menu → a window.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = antler, no_json)]
+struct FocusWindow(u64);
+
+/// The open windows: their handles and views, in the order they opened (see `windows::Registry`).
+#[derive(Default)]
+struct Windows(Registry<(AnyWindowHandle, WeakEntity<Antler>)>);
+impl Global for Windows {}
+
+/// What the last window to close held: the next start brings it back if the app quits with no window open.
+#[derive(Default)]
+struct LastClosed(Option<WindowSave>);
+impl Global for LastClosed {}
+
+/// The app menu; rebuilt when the recent folders or the open windows change.
 fn set_menus(cx: &mut App) {
     let home = std::env::home_dir();
     let recent = recent::list(&recent::default_path()).into_iter().map(|p| MenuItem::action(recent::display(&p, home.as_deref()), OpenRecent(p)));
@@ -71,6 +89,7 @@ fn set_menus(cx: &mut App) {
         keys::checked_item("antler.toggleMinimapCharacters", cx.global::<minimap_view::RenderCharacters>().0),
     ]);
     let layout = Menu::new("Editor Layout").items([keys::item("workbench.action.splitEditor"), keys::item("workbench.action.splitEditorDown")]);
+    let mut windows: Vec<MenuItem> = cx.global::<Windows>().0.iter().map(|e| MenuItem::action(windows::title(&e.root), FocusWindow(e.id))).collect();
     let (mut recent, mut minimap, mut layout) = (Some(open_recent), Some(minimap), Some(layout));
     // the first menu is the macOS app menu
     let app = Menu::new("Antler").items(
@@ -78,12 +97,13 @@ fn set_menus(cx: &mut App) {
             .chain([keys::item("workbench.action.openSettings"), keys::item("workbench.action.openGlobalKeybindings"), MenuItem::separator(), keys::item("workbench.action.quit")]),
     );
     let menus = keys::MENUS.iter().map(|(name, ids)| {
-        Menu::new(*name).items(ids.iter().filter_map(|id| match *id {
-            "-" => Some(MenuItem::separator()),
-            "@recent" => recent.take().map(MenuItem::submenu),
-            "@minimap" => minimap.take().map(MenuItem::submenu),
-            "@layout" => layout.take().map(MenuItem::submenu),
-            id => Some(keys::item(id)),
+        Menu::new(*name).items(ids.iter().flat_map(|id| match *id {
+            "-" => vec![MenuItem::separator()],
+            "@recent" => recent.take().map(MenuItem::submenu).into_iter().collect(),
+            "@minimap" => minimap.take().map(MenuItem::submenu).into_iter().collect(),
+            "@layout" => layout.take().map(MenuItem::submenu).into_iter().collect(),
+            "@windows" => std::mem::take(&mut windows),
+            id => vec![keys::item(id)],
         }))
     });
     cx.set_menus(std::iter::once(app).chain(menus).collect::<Vec<_>>());
@@ -118,6 +138,8 @@ fn copy_item(label: &'static str, text: String) -> PopupMenuItem {
 
 /// Thin view: draws the Workspace model and forwards events to it.
 struct Antler {
+    /// The window's id in `Windows`.
+    id: u64,
     ws: Workspace,
     loading: bool,
     /// A rescan was asked for during the running one (e.g. an auto-save): run another when it ends.
@@ -182,8 +204,6 @@ struct Antler {
     quick: quick_diff::QuickDiff,
     /// The editable diffs' left halves and colours.
     side: side_diff::SideDiff,
-    /// Versions the update toast already showed this session.
-    update_notified: std::collections::HashSet<String>,
     /// The settings last applied (`apply_settings` compares the new ones with them), and the subscription to changes.
     applied: settings::Settings,
     /// The Keyboard Shortcuts tab: its search field, the chosen row and the key capture.
@@ -197,15 +217,7 @@ impl Antler {
         focus.focus(window, cx); // so Cmd+W reaches `close_tab` before anything else has focus
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
-            // unsaved tabs: ask first, and quit from the dialog
-            this.update(cx, |t, cx| {
-                let clean = t.ws.quit_dirty_tabs().is_empty();
-                if !clean {
-                    t.quit(&Quit, window, cx);
-                }
-                clean
-            })
-            .unwrap_or(true)
+            this.update(cx, |t, cx| t.request_window_close(window, cx)).unwrap_or(true)
         });
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type to search"));
         let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
@@ -215,7 +227,12 @@ impl Antler {
         });
         let ws_recent = ws.state_file.as_deref().map(state::recent_commands).unwrap_or_default();
         let initial = cx.global::<settings::Current>().0.clone();
+        let id = window.window_handle().window_id().as_u64();
+        let me = (window.window_handle(), cx.entity().downgrade());
+        cx.global_mut::<Windows>().0.add(id, ws.root.clone(), me);
+        set_menus(cx);
         let mut this = Antler {
+            id,
             ws,
             loading: false,
             stale: false,
@@ -251,21 +268,11 @@ impl Antler {
             conflicts: Default::default(),
             quick: Default::default(),
             side: Default::default(),
-            update_notified: Default::default(),
             applied: initial,
             shortcuts: keybindings_view::State::new(window, cx),
             _settings_sub: cx.observe_global_in::<settings::Current>(window, |this, window, cx| this.apply_settings(window, cx)),
         };
         this.sync_diff(cx); // the first group's diff view
-        // hot exit: the Untitled files and their text go into the state file on quit and come back at the next start
-        cx.on_app_quit(|this, _| {
-            if let Some(f) = &this.ws.state_file {
-                crate::settings::set(f, "untitled", serde_json::json!(this.ws.untitled_state())).ok();
-                crate::settings::set(f, "editor_layout", this.ws.layout_state().unwrap_or_default()).ok();
-            }
-            async {}
-        })
-        .detach();
         if this.ws.has_folder() {
             this.watch(window, cx);
             this.refresh(window, cx);
@@ -275,6 +282,39 @@ impl Antler {
             this.auto_update_check(window, cx);
         }
         this
+    }
+
+    /// What this window keeps across a restart.
+    fn window_save(&self) -> WindowSave {
+        WindowSave { root: self.ws.root.clone(), layout: self.ws.layout_state(), untitled: self.ws.untitled_state() }
+    }
+
+    /// ⇧⌘W or the red button: asks about unsaved tabs (Untitled files too), then closes this window only; the app stays,
+    /// even with no window left. True when the window may close now.
+    fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let dirty = self.ws.dirty_tabs();
+        if dirty.is_empty() {
+            self.leaving(cx);
+            return true;
+        }
+        self.confirm_unsaved(dirty, window, cx, |this, window, cx| {
+            this.leaving(cx);
+            window.remove_window();
+        });
+        false
+    }
+
+    /// The last window to close is what the next start restores, if the app quits with none open.
+    fn leaving(&self, cx: &mut Context<Self>) {
+        if cx.global::<Windows>().0.len() == 1 {
+            cx.set_global(LastClosed(Some(self.window_save())));
+        }
+    }
+
+    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        if self.request_window_close(window, cx) {
+            window.remove_window();
+        }
     }
 
     /// The settings in `settings::Current` took effect: the model and the open editors follow now, no restart.
@@ -449,8 +489,8 @@ impl Antler {
     fn check_for_updates(&mut self, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
             let (result, brew) = cx.background_spawn(async { (update::check(), update::brew()) }).await;
-            this.update_in(cx, |this, window, cx| match result {
-                update::Check::Available(r) if manual || this.update_notified.insert(r.version.clone()) => {
+            this.update_in(cx, |_, window, cx| match result {
+                update::Check::Available(r) if manual || cx.default_global::<update::Notified>().0.insert(r.version.clone()) => {
                     let (text, url) = (update::message(&r, brew), r.url);
                     window.push_notification(
                         Notification::info("").title("Update available").autohide(false).content(move |_, _, _| {
@@ -498,9 +538,15 @@ impl Antler {
 
     /// Replaces the Root with `root` (asking about unsaved tabs first) and puts it on top of the recent folders.
     fn open_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // a folder shown by another window is focused there, like VS Code
+        if let Some(other) = cx.global::<Windows>().0.with_folder(&root).filter(|e| e.id != self.id).map(|e| e.view.0) {
+            other.update(cx, |_, window, _| window.activate_window()).ok();
+            return;
+        }
         self.confirm_unsaved(self.ws.dirty_tabs(), window, cx, move |this, window, cx| {
             this.ws.set_root(root.clone());
             recent::add(&recent::default_path(), &root);
+            cx.global_mut::<Windows>().0.set_root(this.id, root.clone());
             set_menus(cx);
             this.watch(window, cx);
             this.queue.clear();
@@ -518,6 +564,8 @@ impl Antler {
         }
         self.confirm_unsaved(self.ws.dirty_tabs(), window, cx, |this, window, cx| {
             this.ws.close_folder();
+            cx.global_mut::<Windows>().0.set_root(this.id, PathBuf::new());
+            set_menus(cx);
             this.query.0.update(cx, |q, cx| q.set_value("", window, cx));
             this.watcher = None; // dropping it ends its event loop
             this.queue.clear();
@@ -615,6 +663,8 @@ impl Render for Antler {
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::quit))
+            .on_action(cx.listener(Self::close_window))
+            .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| this.check_for_updates(true, window, cx)))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_keyboard_shortcuts))
@@ -657,6 +707,76 @@ impl Render for Antler {
     }
 }
 
+/// Opens a window for `save`: a workspace with the settings, the saved Untitled files and editor groups, the graph's
+/// branch choices. Each new window is offset from the last, like VS Code's.
+fn new_window(cx: &mut App, save: WindowSave, error: Option<String>) {
+    let s = cx.global::<settings::Current>().0.clone();
+    let root = std::fs::canonicalize(&save.root).unwrap_or(save.root); // watcher events carry canonical paths
+    if std::env::var_os("ANTLER_DEBUG").is_some() {
+        eprintln!("antler: new window on {:?}", root);
+    }
+    let mut ws = Workspace::new(root);
+    let mut restored = Vec::new(); // the tabs of a split layout, to read once there is a window
+    ws.apply_settings(&s);
+    ws.last_error = error; // shown after the first scan
+    ws.settings_file = settings::default_path();
+    ws.state_file = state::default_path();
+    if let Some(f) = ws.state_file.clone() {
+        ws.graph.load_filters(&state::graph_filters(&f));
+        restored = save.layout.map(|l| ws.restore_layout(&l)).unwrap_or_default();
+    }
+    ws.restore_untitled(save.untitled);
+    // the system title bar is hidden; `TitleBar` draws a dark one under the traffic lights
+    let mut bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
+    let shift = px(26. * (cx.global::<Windows>().0.len() % 8) as f32);
+    (bounds.origin.x, bounds.origin.y) = (bounds.origin.x + shift, bounds.origin.y + shift);
+    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..TitleBar::window_options() };
+    // ANTLER_BENCH_OPEN: ':'-separated files opened as pinned tabs at startup, used by scripts/benchmark.sh only.
+    let bench_open = std::env::var("ANTLER_BENCH_OPEN").unwrap_or_default();
+    gpui_kit::open_window(options, cx, |window, cx| {
+        cx.new(|cx| {
+            let mut antler = Antler::new(ws, window, cx);
+            for ix in restored {
+                antler.load_tab(ix, cx);
+            }
+            for path in bench_open.split(':').filter(|p| !p.is_empty()) {
+                antler.open_path(PathBuf::from(path), None, true, cx);
+            }
+            antler
+        })
+    })
+    .expect("failed to open window");
+}
+
+/// `antler <folder>` and Finder's "Open With": the window that shows `root` comes to the front, or a new one opens.
+/// Anything that is not a folder is ignored.
+fn open_folder_window(cx: &mut App, root: PathBuf) {
+    let Ok(root) = std::fs::canonicalize(&root) else { return };
+    if !root.is_dir() {
+        return;
+    }
+    recent::add(&recent::default_path(), &root);
+    match cx.global::<Windows>().0.with_folder(&root).map(|e| e.view.0) {
+        Some(handle) => {
+            if std::env::var_os("ANTLER_DEBUG").is_some() {
+                eprintln!("antler: focus the window on {:?}", root);
+            }
+            handle.update(cx, |_, window, _| window.activate_window()).ok();
+        }
+        None => new_window(cx, WindowSave::folder(root), None),
+    }
+    set_menus(cx);
+    cx.activate(true);
+}
+
+/// Brings the window with `id` to the front.
+fn focus_window(cx: &mut App, id: Option<u64>) {
+    let handle = id.and_then(|id| cx.global::<Windows>().0.iter().find(|e| e.id == id).map(|e| e.view.0));
+    if let Some(handle) = handle {
+        handle.update(cx, |_, window, _| window.activate_window()).ok();
+    }
+}
+
 fn main() {
     if std::env::var_os(git::ASKPASS_ENV).is_some() {
         // started by git or ssh as the askpass helper of a fetch, pull or push: ask, answer, exit
@@ -665,28 +785,31 @@ fn main() {
     let file = settings::default_path().unwrap_or_default(); // no HOME: an empty path reads as a missing file
     settings::migrate(&file); // keys of an older version get the new names
     let (root, s, error) = settings::startup(std::env::args().skip(1), &file);
-    // window.restoreWindows: without a folder to open, the last one comes back
-    let root = root.or_else(|| (s.restore_windows == settings::RestoreWindows::All).then(|| recent::list(&recent::default_path()).into_iter().find(|p| p.is_dir())).flatten());
-    // no folder (Finder, Dock, Spotlight give no args and a cwd of `/`): the window offers Open Folder…; the `antler` command passes `$PWD`
-    let root = root.map(|root| std::fs::canonicalize(&root).unwrap_or(root)).unwrap_or_default();
-    if !root.as_os_str().is_empty() {
-        recent::add(&recent::default_path(), &root);
+    // no folder (Finder, Dock, Spotlight give no args and a cwd of `/`): window.restoreWindows decides what opens; the `antler` command passes `$PWD`
+    let root = root.map(|root| std::fs::canonicalize(&root).unwrap_or(root));
+    if let Some(root) = &root {
+        recent::add(&recent::default_path(), root);
     }
-    let mut ws = Workspace::new(root);
-    let mut restored = Vec::new(); // the tabs of a split layout, to read once there is a window
-    ws.apply_settings(&s);
-    ws.last_error = error; // shown after the first scan
+    // the windows of the last quit; a state file from before there were several has one window, on the last folder
+    let last_root = recent::list(&recent::default_path()).into_iter().next();
+    let saved = state::default_path().map(|f| state::windows(&f, last_root)).unwrap_or_default();
+    let mut first_windows = windows::startup_windows(&s.restore_windows, saved, root).into_iter();
     workspace::set_excluded(s.excluded());
-    ws.settings_file = settings::default_path();
-    ws.state_file = state::default_path();
-    if let Some(f) = ws.state_file.clone() {
-        ws.graph.load_filters(&state::graph_filters(&f));
-        restored = state::editor_layout(&f).map(|l| ws.restore_layout(&l)).unwrap_or_default();
-        ws.restore_untitled(state::untitled(&f));
-    }
     let update_on = s.update_mode == settings::UpdateMode::Default;
     let (minimap, minimap_chars) = (s.editor_minimap_enabled, s.editor_minimap_render_characters);
-    gpui_kit::application().with_assets(icons::Assets).run(move |cx| {
+    let app = gpui_kit::application().with_assets(icons::Assets);
+    // `open -a Antler <folder>` (the `antler` command with the app running) arrives as file URLs, with no App at hand: queue them
+    let (urls_tx, urls_rx) = async_channel::unbounded::<Vec<String>>();
+    app.on_open_urls(move |urls| {
+        urls_tx.send_blocking(urls).ok();
+    });
+    // Dock icon with no window open: a new one, like VS Code
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            new_window(cx, WindowSave::default(), None);
+        }
+    });
+    app.run(move |cx| {
         gpui_kit::init(cx);
         style::apply(cx);
         gpui_kit::component::Theme::update(cx, |t| t.font_size = px(s.ui_font_size));
@@ -700,37 +823,54 @@ fn main() {
         if let Some(file) = keybindings {
             keys::watch(cx, file);
         }
-        // fallback when nothing in the window has focus; the view's own Quit asks about unsaved tabs first
+        // the view's own Quit asks about unsaved tabs first; this one runs when no window has focus
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &ClearRecent, cx| {
             recent::clear(&recent::default_path());
             set_menus(cx);
         });
+        cx.on_action(|_: &NewWindow, cx| new_window(cx, WindowSave::default(), None));
+        cx.on_action(|a: &FocusWindow, cx| focus_window(cx, Some(a.0)));
+        cx.on_action(|_: &FocusNextWindow, cx| {
+            let from = cx.active_window().map(|w| w.window_id().as_u64());
+            let next = from.and_then(|id| cx.global::<Windows>().0.next_after(id).map(|e| e.id));
+            focus_window(cx, next);
+        });
+        cx.set_global(Windows::default());
+        cx.set_global(LastClosed::default());
+        // a closed window leaves the registry and the Window menu; the app stays
+        cx.on_window_closed(|cx, id| {
+            cx.global_mut::<Windows>().0.remove(id.as_u64());
+            set_menus(cx);
+        })
+        .detach();
+        // hot exit: every window's folder, editor groups and Untitled files go into the state file on quit and come back at the next start
+        cx.on_app_quit(|cx| {
+            if let Some(f) = state::default_path() {
+                let mut list: Vec<WindowSave> = cx.global::<Windows>().0.iter().filter_map(|e| e.view.1.upgrade()).map(|v| v.read(cx).window_save()).collect();
+                if list.is_empty() {
+                    list.extend(cx.global::<LastClosed>().0.clone());
+                }
+                state::save_windows(&f, &list);
+            }
+            async {}
+        })
+        .detach();
         cx.set_global(update::Enabled(update_on));
         cx.set_global(minimap_view::Enabled(minimap));
         cx.set_global(minimap_view::RenderCharacters(minimap_chars));
         set_menus(cx);
-        // the system title bar is hidden; `TitleBar` draws a dark one under the traffic lights
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1200.), px(800.)), cx))),
-            ..TitleBar::window_options()
-        };
-        // ANTLER_BENCH_OPEN: ':'-separated files opened as pinned tabs at startup, used by scripts/benchmark.sh only.
-        let bench_open = std::env::var("ANTLER_BENCH_OPEN").unwrap_or_default();
-        gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| {
-                let mut antler = Antler::new(ws, window, cx);
-                for ix in restored {
-                    antler.load_tab(ix, cx);
-                }
-                for path in bench_open.split(':').filter(|p| !p.is_empty()) {
-                    antler.open_path(PathBuf::from(path), None, true, cx);
-                }
-                antler
-            })
-        })
-            .expect("failed to open window");
+        let mut error = error;
+        for save in first_windows.by_ref() {
+            new_window(cx, save, error.take());
+        }
         keys::notify(cx, warnings);
         cx.activate(true);
+        cx.spawn(async move |cx| {
+            while let Ok(urls) = urls_rx.recv().await {
+                cx.update(|cx| urls.iter().filter_map(|u| windows::url_to_path(u)).for_each(|p| open_folder_window(cx, p)));
+            }
+        })
+        .detach();
     });
 }

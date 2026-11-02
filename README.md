@@ -41,6 +41,7 @@ antler [folder]
 ```
 
 - `folder`: the folder to open. Without it, Antler shows a window with "Open Folder…" (Cmd+O).
+- One app, many windows: with Antler running, `antler folder` opens a window in it, or brings forward the window that already shows that folder. New Window is ⇧⌘N, Close Window ⇧⌘W; at the next start every window comes back (`window.restoreWindows`).
 
 ## Building from source
 

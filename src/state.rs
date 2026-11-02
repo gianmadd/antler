@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::windows::WindowSave;
+
 /// `~/.config/antler/state.json`; `None` without a home directory.
 pub fn default_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/antler/state.json"))
@@ -14,16 +16,25 @@ pub fn graph_filters(file: &Path) -> HashMap<PathBuf, serde_json::Value> {
     json.get("graph_filters").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
 }
 
-/// The Untitled files saved on quit (hot exit): (name, text); a missing or broken file is none.
-pub fn untitled(file: &Path) -> Vec<(String, String)> {
+/// The windows open at the last quit (`windows`), oldest first. A file written before there were several
+/// windows has the single window's `untitled` and `editor_layout` at the top: it becomes one window on `last_root`.
+pub fn windows(file: &Path, last_root: Option<PathBuf>) -> Vec<WindowSave> {
     let json: serde_json::Value = std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    json.get("untitled").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
+    if let Some(list) = json.get("windows").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+        return list;
+    }
+    let layout = json.get("editor_layout").filter(|v| !v.is_null()).cloned();
+    let untitled = json.get("untitled").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    let root = last_root.unwrap_or_default();
+    vec![WindowSave { root, layout, untitled }]
 }
 
-/// The editor groups saved on quit (`Workspace::layout_state`); none if there was no split.
-pub fn editor_layout(file: &Path) -> Option<serde_json::Value> {
-    let json: serde_json::Value = std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok())?;
-    json.get("editor_layout").filter(|v| !v.is_null()).cloned()
+/// Saves the windows (quit); the keys of the single-window file are cleared.
+pub fn save_windows(file: &Path, list: &[WindowSave]) {
+    crate::settings::set(file, "windows", serde_json::json!(list)).ok();
+    for old in ["untitled", "editor_layout"] {
+        crate::settings::set(file, old, serde_json::Value::Null).ok();
+    }
 }
 
 /// The ids of the commands run from the Command palette, newest first; a missing or broken file is none.
@@ -37,11 +48,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn untitled_files_roundtrip_through_the_state_file() {
+    fn windows_roundtrip_and_an_old_single_window_file_becomes_one_window() {
         let file = tempfile::tempdir().unwrap().keep().join("state.json");
-        assert!(untitled(&file).is_empty());
+        assert_eq!(windows(&file, None), [WindowSave::default()]);
         crate::settings::set(&file, "untitled", serde_json::json!([("Untitled-2", "x\ny")])).unwrap();
-        assert_eq!(untitled(&file), [("Untitled-2".to_string(), "x\ny".to_string())]);
+        let old = windows(&file, Some("/r".into()));
+        assert_eq!((old[0].root.clone(), old[0].untitled.clone()), (PathBuf::from("/r"), vec![("Untitled-2".to_string(), "x\ny".to_string())]));
+        let two = [WindowSave::folder("/a".into()), WindowSave { untitled: vec![("Untitled-1".into(), "t".into())], ..Default::default() }];
+        save_windows(&file, &two);
+        assert_eq!(windows(&file, Some("/r".into())), two);
     }
 
     #[test]

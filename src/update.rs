@@ -14,6 +14,11 @@ pub const BREW_HINT: &str = "brew upgrade --cask antler";
 pub(crate) struct Enabled(pub bool);
 impl Global for Enabled {}
 
+/// Versions the update toast already showed this session, for every window (each window runs the hourly check).
+#[derive(Default)]
+pub(crate) struct Notified(pub std::collections::HashSet<String>);
+impl Global for Notified {}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: String,

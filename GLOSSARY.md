@@ -8,6 +8,9 @@ Explorer, editor and diff viewer for macOS that shows all git repositories neste
 The folder open in a window; everything Antler shows lives under it.
 _Avoid_: Workspace, project
 
+**Window**:
+One of the windows of the single Antler process. Each has its own Root (or none), tabs, editor groups and git queue; settings and keybindings are shared. A folder has at most one Window.
+
 **Nested repository**:
 A git repository found under the Root at any depth, even inside another repository or inside a folder that repository ignores. Each submodule counts as a Nested repository of its own.
 _Avoid_: Sub-repo, nested repo, worktree

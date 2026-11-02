@@ -15,7 +15,7 @@ use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
-use crate::{CheckForUpdates, CloseFolder, CloseTab, Commit, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleSidebar, set_menus};
+use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleSidebar, set_menus};
 
 /// Where a binding applies: a GPUI key context, and the name `when` uses in keybindings.json.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -128,10 +128,14 @@ macro_rules! cmds {
 cmds![
     // File
     ("workbench.action.files.newUntitledFile", "New File", "cmd-n", Global, NewUntitledFile),
+    ("workbench.action.newWindow", "New Window", "shift-cmd-n", Global, NewWindow),
     ("workbench.action.files.save", "Save", "cmd-s", Global, Save),
     ("workbench.action.files.saveAll", "Save All", "alt-cmd-s", Global, SaveAll),
     ("workbench.action.files.openFolder", "Open Folder…", "cmd-o", Global, OpenFolder),
     ("workbench.action.closeFolder", "Close Folder", "cmd-k f", Global, CloseFolder),
+    ("workbench.action.closeWindow", "Close Window", "shift-cmd-w", Global, CloseWindow),
+    ("antler.minimizeWindow", "Minimize", "cmd-m", Global, MinimizeWindow),
+    ("antler.focusNextWindow", "Next Window", "cmd-`", Global, FocusNextWindow),
     ("workbench.action.closeActiveEditor", "Close Editor", "cmd-w", Global, CloseTab),
     ("workbench.action.reopenClosedEditor", "Reopen Closed Editor", "shift-cmd-t", Global, ReopenClosedTab),
     ("workbench.action.closeAllEditors", "Close All Editors", "cmd-k cmd-w", Global, CloseAllTabs),
@@ -592,12 +596,13 @@ pub(crate) fn ensure_file() -> Option<PathBuf> {
 }
 
 /// The menu bar, VS Code's menus with the commands Antler has: ids, "-" for a separator, "@…" for a submenu `set_menus` builds.
-/// (Window and Help have nothing to hold yet: Antler has no window or help command.)
+/// (Help has nothing to hold yet.)
 pub(crate) const MENUS: &[(&str, &[&str])] = &[
     (
         "File",
         &[
             "workbench.action.files.newUntitledFile",
+            "workbench.action.newWindow",
             "-",
             "workbench.action.files.save",
             "workbench.action.files.saveAll",
@@ -605,6 +610,7 @@ pub(crate) const MENUS: &[(&str, &[&str])] = &[
             "workbench.action.files.openFolder",
             "@recent",
             "workbench.action.closeFolder",
+            "workbench.action.closeWindow",
             "-",
             "workbench.action.closeActiveEditor",
             "workbench.action.reopenClosedEditor",
@@ -681,6 +687,7 @@ pub(crate) const MENUS: &[(&str, &[&str])] = &[
             "workbench.action.editor.previousChange",
         ],
     ),
+    ("Window", &["antler.minimizeWindow", "antler.focusNextWindow", "-", "@windows"]),
 ];
 
 #[cfg(test)]
