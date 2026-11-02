@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable,
     button::{Button, ButtonVariants as _},
-    diff::{Diff, DiffAnnotation, DiffFile, DiffLinePosition, DiffMode, DiffSide},
+    diff::{Diff, DiffAnnotation, DiffFile, DiffLinePosition, DiffMode, DiffSide, DiffState},
     input::{Editor, EditorState, InputEvent, Position, RangeDecoration},
     menu::{ContextMenuExt as _, PopupMenu},
     notification::Notification,
@@ -17,7 +17,7 @@ use gpui_kit::*;
 
 use crate::editing::{self, Edit};
 use crate::style::{self, ACCENT, FG, FG_DIM, FG_FAINT, HOVER, LINE, LINE_SOFT, MAIN, RAISE, SEL, SIDE, c};
-use crate::workspace::{self, CloseScope, TabKind};
+use crate::workspace::{self, CloseScope, GroupId, Layout, Side, TabKind};
 use crate::{Antler, CloseTab, Quit, Save, SaveAll, menu_item};
 
 actions!(antler, [TogglePreview, NewUntitledFile]);
@@ -27,6 +27,15 @@ actions!(antler, [AddNextMatch, SelectAllMatches, CursorsAtLineEnds, UnfoldAll, 
 actions!(antler, [CloseOtherTabs, CloseTabsToTheRight, CloseSavedTabs, CloseAllTabs, CopyTabPath, CopyRelativeTabPath, RevealTabInFinder]);
 actions!(antler, [NextChange, PreviousChange, StageSelectedRanges, UnstageSelectedRanges, RevertSelectedRanges]);
 actions!(antler, [RevealTabInExplorer, KeepTabOpen, ReopenClosedTab, NextRecentTab, PreviousRecentTab, NextTab, PreviousTab]);
+actions!(antler, [SplitEditor, SplitEditorDown, SplitEditorOrthogonal, CloseEditorsInGroup]);
+actions!(antler, [FocusFirstGroup, FocusSecondGroup, FocusThirdGroup, FocusFourthGroup, FocusFifthGroup, FocusSixthGroup, FocusSeventhGroup, FocusEighthGroup]);
+
+/// What an editor group draws besides its tabs: its diff view (showing the group's active tab) and that view's width,
+/// measured each frame (a narrow one shows inline).
+pub(crate) struct GroupUi {
+    pub diff: Entity<DiffState>,
+    pub width: std::rc::Rc<std::cell::Cell<f32>>,
+}
 
 /// Replaces the editor's built-in menu: its Cut / Copy / Paste / Select All come back, then VS Code's two
 /// (Unstage Selected Ranges needs the staged diff, which the editor does not have).
@@ -72,15 +81,19 @@ impl Antler {
     /// Creates an editor for each new file tab, drops those of closed tabs, and pushes model-side changes
     /// (reload, "open at line") into them.
     pub(crate) fn sync_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let open: Vec<PathBuf> = self.ws.tabs.iter().filter_map(|t| t.file()).map(|f| f.path.clone()).collect();
-        self.editors.retain(|p, _| open.contains(p));
+        if self.ws.groups().iter().any(|g| !self.group_ui.contains_key(g)) {
+            self.sync_diff(cx);
+        }
+        let open: Vec<(GroupId, PathBuf)> = self.ws.tabs.iter().filter_map(|t| Some((t.group, t.file()?.path.clone()))).collect();
+        self.editors.retain(|k, _| open.contains(k));
         let tab_size = self.tab_size();
         for tab in &mut self.ws.tabs {
+            let group = tab.group;
             let Some(f) = tab.file_mut() else { continue };
             if f.loading {
                 continue;
             }
-            let (editor, _) = self.editors.entry(f.path.clone()).or_insert_with(|| {
+            let (editor, _) = self.editors.entry((group, f.path.clone())).or_insert_with(|| {
                 let editor = cx.new(|cx| {
                     EditorState::new(window, cx).language(f.language()).soft_wrap(self.wrap).tab_size(tab_size).default_value(f.text.clone())
                 });
@@ -132,12 +145,32 @@ impl Antler {
                 editor.update(cx, |e, cx| e.set_cursor_position(Position::new(line.saturating_sub(1) as u32, 0), window, cx));
             }
         }
+        if std::mem::take(&mut self.focus_editor) {
+            match self.active_editor() {
+                Some((editor, _)) => editor.update(cx, |e, cx| e.focus(window, cx)),
+                None => self.focus.focus(window, cx),
+            }
+        }
+    }
+
+    /// The editor of file `path` in group `g`.
+    pub(crate) fn editor_in(&self, g: GroupId, path: &std::path::Path) -> Option<&Entity<EditorState>> {
+        self.editors.get(&(g, path.to_path_buf())).map(|(e, _)| e)
+    }
+
+    /// The diff view and width of group `g`; `sync_diff` makes them.
+    pub(crate) fn diff_of(&self, g: GroupId) -> &Entity<DiffState> {
+        &self.group_ui[&g].diff
+    }
+
+    pub(crate) fn width_of(&self, g: GroupId) -> f32 {
+        self.group_ui.get(&g).map_or(0., |u| u.width.get())
     }
 
     /// The active tab's editor and its language.
     pub(crate) fn active_editor(&self) -> Option<(Entity<EditorState>, String)> {
         let f = self.ws.tabs.get(self.ws.active?)?.file()?;
-        Some((self.editors.get(&f.path)?.0.clone(), f.language()))
+        Some((self.editor_in(self.ws.group, &f.path)?.clone(), f.language()))
     }
 
     /// Runs a line command of `editing` on the active editor's text and selection, as one undo step.
@@ -261,7 +294,7 @@ impl Antler {
     }
 
     /// Reads a file or image tab still empty off the UI thread.
-    fn load_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub(crate) fn load_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(path) = self.ws.tabs[ix].path().map(std::path::Path::to_path_buf) else { return };
         if self.ws.tabs[ix].image().is_some_and(|i| i.info.is_none()) {
             cx.spawn(async move |this, cx| {
@@ -286,6 +319,36 @@ impl Antler {
                 .ok();
             })
             .detach();
+        } else if self.ws.tabs[ix].file().is_some_and(|f| !f.untitled) {
+            self.load_quick(path, cx); // a file shown in another group already: only its margin diff is missing
+        }
+    }
+
+    /// Splits the active group (⌘\, ⌘K ⌘\, View > Editor Layout): the active tab shows in the new group too.
+    fn split(&mut self, how: Option<bool>, window: &mut Window, cx: &mut Context<Self>) {
+        let ix = match how {
+            Some(down) => self.ws.split_group(down),
+            None => self.ws.split_group_orthogonal(),
+        };
+        let Some(ix) = ix else { return };
+        self.sync_diff(cx);
+        self.focus_editor = true;
+        self.load_new_tab(ix, window, cx);
+    }
+
+    /// A tab just made (by a split or ⇧⌘T): a diff or file still empty is read.
+    fn load_new_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.ws.tabs[ix].diff() {
+            Some(d) if d.patch.is_none() => self.load_diff(d.source.clone(), window, cx),
+            _ => self.load_tab(ix, cx),
+        }
+    }
+
+    /// ⌘1…⌘8: the `n`th group takes the focus.
+    fn focus_group(&mut self, n: usize, cx: &mut Context<Self>) {
+        if self.ws.focus_group(n) {
+            self.focus_editor = true;
+            self.sync_diff(cx);
         }
     }
 
@@ -392,7 +455,7 @@ impl Antler {
 
     /// Closes tab `ix`, asking Save / Don't Save / Cancel if it has unsaved changes.
     pub(crate) fn request_close(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let dirty = if self.ws.tabs[ix].is_dirty() { vec![ix] } else { vec![] };
+        let dirty = self.ws.unsaved_among(&[ix]);
         self.confirm_unsaved(dirty, window, cx, move |this, _, cx| {
             this.ws.close_tab(ix);
             this.sync_diff(cx);
@@ -431,28 +494,28 @@ impl Antler {
         .detach();
     }
 
-    /// Shows the active tab's patch in the diff view.
+    /// Shows each group's active tab's patch in the group's diff view (made here for a new group, dropped with its group).
     pub(crate) fn sync_diff(&mut self, cx: &mut Context<Self>) {
-        let patch = self.ws.active.and_then(|a| self.ws.tabs[a].diff()?.patch.as_deref()).unwrap_or("");
-        let files = DiffFile::parse(patch).unwrap_or_default();
-        let mode = self.diff_mode();
-        self.diff.update(cx, |d, cx| {
-            d.set_files(files, cx);
-            d.set_mode(mode, cx);
-        });
+        let groups = self.ws.groups();
+        self.group_ui.retain(|g, _| groups.contains(g));
+        for g in groups {
+            let ui = self.group_ui.entry(g).or_insert_with(|| GroupUi { diff: cx.new(|cx| DiffState::new([], cx)), width: Default::default() });
+            let patch = self.ws.active_in(g).and_then(|a| self.ws.tabs[a].diff()?.patch.as_deref()).unwrap_or("");
+            let files = DiffFile::parse(patch).unwrap_or_default();
+            let mode = if workspace::side_by_side(self.ws.split, ui.width.get()) { DiffMode::Split } else { DiffMode::Unified };
+            ui.diff.update(cx, |d, cx| {
+                d.set_files(files, cx);
+                d.set_mode(mode, cx);
+            });
+        }
         cx.notify();
-    }
-
-    /// Side by side unless the user chose inline or the diff view is narrower than VS Code's breakpoint.
-    fn diff_mode(&self) -> DiffMode {
-        if workspace::side_by_side(self.ws.split, self.diff_width.get()) { DiffMode::Split } else { DiffMode::Unified }
     }
 
     /// Alt+F5 / Shift+Alt+F5 and the arrows above a diff: the next or previous change, in the diff or the editor.
     fn step_change(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         match self.ws.active.map(|a| &self.ws.tabs[a].kind) {
-            Some(TabKind::Diff(d)) if self.editable_split(d) => self.jump_to_change(forward, window, cx),
-            Some(TabKind::Diff(_)) => self.diff.update(cx, |d, cx| if forward { d.next_change(cx) } else { d.previous_change(cx) }),
+            Some(TabKind::Diff(d)) if self.editable_split(self.ws.group, d) => self.jump_to_change(forward, window, cx),
+            Some(TabKind::Diff(_)) => self.diff_of(self.ws.group).clone().update(cx, |d, cx| if forward { d.next_change(cx) } else { d.previous_change(cx) }),
             Some(TabKind::File(_)) => self.jump_to_change(forward, window, cx),
             _ => {}
         }
@@ -467,7 +530,7 @@ impl Antler {
     /// Close Others / to the Right / Saved / All from tab `ix`, asking Save / Don't Save / Cancel about the unsaved ones.
     fn close_scope(&mut self, ix: usize, scope: CloseScope, window: &mut Window, cx: &mut Context<Self>) {
         let ixs = self.ws.tabs_to_close(ix, scope);
-        let dirty = ixs.iter().copied().filter(|&i| self.ws.tabs[i].is_dirty()).collect();
+        let dirty = self.ws.unsaved_among(&ixs);
         self.confirm_unsaved(dirty, window, cx, move |this, _, cx| {
             this.ws.close_tabs(&ixs);
             this.sync_diff(cx);
@@ -498,10 +561,14 @@ impl Antler {
     fn reopen_closed_tab(&mut self, _: &ReopenClosedTab, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.ws.reopen_closed() else { return };
         self.sync_diff(cx);
-        match self.ws.tabs[ix].diff() {
-            Some(d) if d.patch.is_none() => self.load_diff(d.source.clone(), window, cx),
-            _ => self.load_tab(ix, cx),
-        }
+        self.load_new_tab(ix, window, cx);
+    }
+
+    /// Alt+Cmd+Right / Left: the next or previous tab of the active group, wrapping.
+    fn step_tab(&mut self, step: isize, cx: &mut Context<Self>) {
+        let tabs = self.ws.group_tabs(self.ws.group);
+        let Some(at) = tabs.iter().position(|&i| Some(i) == self.ws.active) else { return };
+        self.activate_tab(tabs[(at as isize + step).rem_euclid(tabs.len() as isize) as usize], cx);
     }
 
     fn activate_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -511,7 +578,7 @@ impl Antler {
 
     /// Ctrl+Tab / Ctrl+Shift+Tab: opens the recent-tabs popup on the next (or last) one, then moves through it.
     fn cycle_recent(&mut self, step: isize, cx: &mut Context<Self>) {
-        let n = self.ws.tabs.len() as isize;
+        let n = self.ws.group_tabs(self.ws.group).len() as isize;
         if n > 0 {
             self.switcher = Some((self.switcher.unwrap_or(0) as isize + step).rem_euclid(n) as usize);
             cx.notify();
@@ -549,14 +616,20 @@ impl Antler {
             .on_action(cx.listener(|this, _: &PreviousChange, w, cx| this.step_change(false, w, cx)))
             .on_action(cx.listener(|this, _: &NextRecentTab, _, cx| this.cycle_recent(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousRecentTab, _, cx| this.cycle_recent(-1, cx)))
-            .on_action(cx.listener(|this, _: &NextTab, _, cx| {
-                let n = this.ws.tabs.len();
-                on_active(this, |t, a| t.activate_tab((a + 1) % n, cx));
-            }))
-            .on_action(cx.listener(|this, _: &PreviousTab, _, cx| {
-                let n = this.ws.tabs.len();
-                on_active(this, |t, a| t.activate_tab((a + n - 1) % n, cx));
-            }))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| this.step_tab(1, cx)))
+            .on_action(cx.listener(|this, _: &PreviousTab, _, cx| this.step_tab(-1, cx)))
+            .on_action(cx.listener(|this, _: &SplitEditor, w, cx| this.split(Some(false), w, cx)))
+            .on_action(cx.listener(|this, _: &SplitEditorDown, w, cx| this.split(Some(true), w, cx)))
+            .on_action(cx.listener(|this, _: &SplitEditorOrthogonal, w, cx| this.split(None, w, cx)))
+            .on_action(cx.listener(|this, _: &CloseEditorsInGroup, w, cx| on_active(this, |t, a| t.close_scope(a, CloseScope::Group, w, cx))))
+            .on_action(cx.listener(|this, _: &FocusFirstGroup, _, cx| this.focus_group(0, cx)))
+            .on_action(cx.listener(|this, _: &FocusSecondGroup, _, cx| this.focus_group(1, cx)))
+            .on_action(cx.listener(|this, _: &FocusThirdGroup, _, cx| this.focus_group(2, cx)))
+            .on_action(cx.listener(|this, _: &FocusFourthGroup, _, cx| this.focus_group(3, cx)))
+            .on_action(cx.listener(|this, _: &FocusFifthGroup, _, cx| this.focus_group(4, cx)))
+            .on_action(cx.listener(|this, _: &FocusSixthGroup, _, cx| this.focus_group(5, cx)))
+            .on_action(cx.listener(|this, _: &FocusSeventhGroup, _, cx| this.focus_group(6, cx)))
+            .on_action(cx.listener(|this, _: &FocusEighthGroup, _, cx| this.focus_group(7, cx)))
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
                 if !ev.modifiers.control {
                     this.choose_recent(cx);
@@ -612,16 +685,41 @@ impl Antler {
         ))
     }
 
+    /// The editor area: the groups as the layout puts them, side by side or one over the other, each with a resizable edge.
     pub(crate) fn tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(active) = self.ws.active else {
+        if self.ws.tabs.is_empty() {
+            return self.empty_state(cx).into_any_element();
+        }
+        self.layout_view(&self.ws.layout, cx)
+    }
+
+    fn layout_view(&self, layout: &Layout, cx: &mut Context<Self>) -> AnyElement {
+        match layout {
+            Layout::Group(g) => self.group_view(*g, cx),
+            Layout::Split { down, items } => {
+                // the id names the groups inside: a split that gains or loses one starts with equal sizes
+                let id = format!("split-{:?}", layout.groups());
+                let panels = items.iter().map(|l| resizable_panel().child(div().size_full().min_w_0().min_h_0().overflow_hidden().child(self.layout_view(l, cx)))).collect::<Vec<_>>();
+                match down {
+                    true => v_resizable(id).children(panels).into_any_element(),
+                    false => h_resizable(id).children(panels).into_any_element(),
+                }
+            }
+        }
+    }
+
+    /// One editor group: its tab strip, the path row and the content of its active tab. A click anywhere in it makes
+    /// it the active group; while a tab is dragged, its edges and middle are drop zones.
+    fn group_view(&self, g: GroupId, cx: &mut Context<Self>) -> AnyElement {
+        let Some(active) = self.ws.active_in(g) else {
             return self.empty_state(cx).into_any_element();
         };
-        let bar = self.tab_bar(active, cx);
-        let crumbs = self.crumbs(active, cx);
+        let bar = self.tab_bar(g, active, cx);
+        let crumbs = self.crumbs(g, active, cx);
         let content = match &self.ws.tabs[active].kind {
-            TabKind::Diff(tab) => self.diff_view(tab, cx),
-            TabKind::File(f) => match (&f.error, self.editors.get(&f.path)) {
-                (None, Some((editor, _))) => Self::editor_actions(v_flex(), cx)
+            TabKind::Diff(tab) => self.diff_view(g, tab, cx),
+            TabKind::File(f) => match (&f.error, self.editor_in(g, &f.path)) {
+                (None, Some(editor)) => Self::editor_actions(v_flex(), cx)
                     .flex_1()
                     .min_h_0()
                     .when(f.conflict.is_some(), |el| el.child(self.conflict_banner(active, cx)))
@@ -651,7 +749,43 @@ impl Antler {
             TabKind::Image(i) => image_view(i),
             TabKind::Settings => self.settings_view(cx),
         };
-        v_flex().size_full().child(bar).child(crumbs).child(content).into_any_element()
+        let zone = |id: &'static str, side: Option<Side>, cx: &mut Context<Self>| {
+            div()
+                .id((id, g))
+                .absolute()
+                .map(|el| match side {
+                    Some(Side::Left) => el.top_0().bottom_0().left_0().w_1_4(),
+                    Some(Side::Right) => el.top_0().bottom_0().right_0().w_1_4(),
+                    Some(Side::Up) => el.top_0().left_0().right_0().h_1_4(),
+                    Some(Side::Down) => el.bottom_0().left_0().right_0().h_1_4(),
+                    None => el.inset_0(),
+                })
+                .drag_over::<DraggedTab>(|s, _, _, _| s.bg(c(ACCENT).opacity(0.25)))
+                .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| {
+                    match side {
+                        Some(side) => this.ws.move_tab_to_side(d.ix, g, side),
+                        None => (this.ws.tabs[d.ix].group != g).then(|| this.ws.move_tab_to(d.ix, g, None)),
+                    };
+                    this.sync_diff(cx);
+                }))
+        };
+        let zones = cx.has_active_drag().then(|| {
+            // later ones lie over earlier ones: the corners go to the edges
+            div().absolute().inset_0().child(zone("drop-middle", None, cx)).children([Side::Left, Side::Right, Side::Up, Side::Down].map(|s| zone(["drop-left", "drop-right", "drop-up", "drop-down"][s as usize], Some(s), cx)))
+        });
+        v_flex()
+            .id(("group", g))
+            .size_full()
+            .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                if this.ws.group != g {
+                    this.ws.focus(g);
+                    this.sync_diff(cx);
+                }
+            }))
+            .child(bar)
+            .child(crumbs)
+            .child(v_flex().relative().flex_1().min_h_0().child(content).children(zones))
+            .into_any_element()
     }
 
     /// No tab open: the deer watermark with the shortcuts under it, or the Open Folder… button in a window without a folder.
@@ -706,20 +840,20 @@ impl Antler {
             })))
     }
 
-    pub(crate) fn diff_view(&self,tab: &workspace::DiffTab, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn diff_view(&self, g: GroupId, tab: &workspace::DiffTab, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let msg = |m: &str| div().p_4().text_color(theme.muted_foreground).child(m.to_string()).into_any_element();
         match &tab.patch {
             _ if tab.error.is_some() => msg(tab.error.as_deref().unwrap_or_default()),
             None => msg("Loading…"),
-            Some(_) if self.editable_split(tab) => {
-                let probe = self.width_probe(tab, true, cx);
-                Self::editor_actions(v_flex(), cx).id("diff-area").relative().flex_1().min_h_0().child(probe).child(self.side_diff_view(tab, cx)).into_any_element()
+            Some(_) if self.editable_split(g, tab) => {
+                let probe = self.width_probe(g, tab, true, cx);
+                Self::editor_actions(v_flex(), cx).id(("diff-area", g)).relative().flex_1().min_h_0().child(probe).child(self.side_diff_view(g, tab, cx)).into_any_element()
             }
             Some(_) if tab.is_binary() => msg("Binary file: no diff to show."),
-            Some(_) if self.diff.read(cx).files().is_empty() => msg("No changes."),
+            Some(_) if self.diff_of(g).read(cx).files().is_empty() => msg("No changes."),
             Some(_) => {
-                let file = self.diff.read(cx).files()[0].path().clone();
+                let file = self.diff_of(g).read(cx).files()[0].path().clone();
                 // a commit's diff is read-only: no Block actions. A Block is one change, as in VS Code, not the Hunk around it.
                 let changes = if tab.source.read_only() { Vec::new() } else { tab.parsed.changes() };
                 let annotations = changes.iter().enumerate().map(|(i, c)| {
@@ -731,8 +865,8 @@ impl Antler {
                 // (stage or unstage, discard, the change's lines): a typed text is discarded in the editor, not on the disk
                 let ops = std::rc::Rc::new(changes.iter().enumerate().map(|(k, c)| (tab.block_op(k, false), tab.block_op(k, true), c.lines.clone())).collect::<Vec<_>>());
                 let typed = (tab.is_editable() && !staged).then(|| tab.source.repo.join(&tab.source.path));
-                let measure = self.width_probe(tab, false, cx);
-                let view = Diff::new(&self.diff)
+                let measure = self.width_probe(g, tab, false, cx);
+                let view = Diff::new(self.diff_of(g))
                     .header_visible(false)
                     // unwrapped Split shares one horizontal canvas 2x the longest line, so the
                     // right half and the Hunk buttons fall off-screen; wrapping pins 50/50.
@@ -773,7 +907,7 @@ impl Antler {
                     .min_h_0();
                 let (weak, read_only) = (cx.entity().downgrade(), tab.source.read_only());
                 v_flex()
-                    .id("diff-area")
+                    .id(("diff-area", g))
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -797,8 +931,8 @@ impl Antler {
 
     /// An invisible child that measures the diff view's width each frame: a narrow view shows inline, and a view whose
     /// width crosses the breakpoint (or is measured for the first time) is drawn again as the other kind.
-    fn width_probe(&self, tab: &workspace::DiffTab, showing_editor: bool, cx: &mut Context<Self>) -> AnyElement {
-        let (width, diff, split, me) = (self.diff_width.clone(), self.diff.clone(), self.ws.split, cx.entity());
+    fn width_probe(&self, g: GroupId, tab: &workspace::DiffTab, showing_editor: bool, cx: &mut Context<Self>) -> AnyElement {
+        let (width, diff, split, me) = (self.group_ui[&g].width.clone(), self.diff_of(g).clone(), self.ws.split, cx.entity());
         let editable = tab.is_editable();
         canvas(
             |bounds, _, _| bounds.size.width.as_f32(),
@@ -823,9 +957,9 @@ impl Antler {
 
     /// The tab strip: active tab raised with an accent line on top, preview in italic,
     /// ● on unsaved tabs (× when hovered), × shown on the active or hovered tab.
-    pub(crate) fn tab_bar(&self, active: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn tab_bar(&self, g: GroupId, active: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let weak = cx.entity().downgrade();
-        let tabs = self.ws.tabs.iter().enumerate().map(|(i, t)| {
+        let tabs = self.ws.group_tabs(g).into_iter().map(|i| (i, &self.ws.tabs[i])).map(|(i, t)| {
             let (on, dirty, preview, weak) = (i == active, t.is_dirty(), t.preview, weak.clone());
             let (tab_group, close_group): (SharedString, SharedString) = (format!("tab-{i}").into(), format!("tab-close-{i}").into());
             let name = match (&t.kind, t.path()) {
@@ -880,8 +1014,8 @@ impl Antler {
                 .on_drag(DraggedTab { ix: i, title: t.title() }, |d, _, _, cx| cx.new(|_| d.clone()))
                 .drag_over::<DraggedTab>(|s, _, _, _| s.bg(c(HOVER)))
                 .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| {
-                    this.ws.move_tab(d.ix, i);
-                    this.activate_tab(i, cx);
+                    let to = this.ws.move_tab_to(d.ix, g, Some(i));
+                    this.activate_tab(to, cx);
                 }))
                 .child(style::file_icon(&name))
                 .child(div().when(t.preview, |el| el.italic()).child(t.title()))
@@ -890,22 +1024,21 @@ impl Antler {
         });
         let tabs: Vec<_> = tabs.collect();
         h_flex()
-            .id("tabs")
+            .id(("tabs", g))
             .h(px(36.))
             .flex_none()
             .bg(c(SIDE))
             .overflow_x_scroll()
             .children(tabs)
             // dropped past the last tab: it goes last
-            .on_drop(cx.listener(|this, d: &DraggedTab, _, cx| {
-                let last = this.ws.tabs.len() - 1;
-                this.ws.move_tab(d.ix, last);
-                this.activate_tab(last, cx);
+            .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| {
+                let to = this.ws.move_tab_to(d.ix, g, None);
+                this.activate_tab(to, cx);
             }))
     }
 
     /// The row under the tabs: where the tab's file is, and the diff tools.
-    pub(crate) fn crumbs(&self, active: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn crumbs(&self, g: GroupId, active: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let section_name = self.ws.active_section().map(|s| s.name.clone());
         let path = match (&self.ws.tabs[active].kind, self.ws.tabs[active].path()) {
             (TabKind::Diff(d), _) => section_name.into_iter().chain([d.source.path.clone()]).collect::<Vec<_>>().join("/"),
@@ -919,7 +1052,7 @@ impl Antler {
             _ => None,
         }
         .map(|f| {
-            Button::new("toggle-preview")
+            Button::new(("toggle-preview", g))
                 .ghost()
                 .xsmall()
                 .icon(IconName::Eye)
@@ -932,13 +1065,16 @@ impl Antler {
         let tools = self.ws.tabs[active].diff().map(|diff| {
             let file = diff.source.repo.join(&diff.source.path);
             let mode = |id: &'static str, label: &'static str, split: bool| {
-                Button::new(id).ghost().xsmall().label(label).selected(workspace::side_by_side(self.ws.split, self.diff_width.get()) == split).on_click(cx.listener(move |this, _, _, cx| {
+                Button::new((id, g)).ghost().xsmall().label(label).selected(workspace::side_by_side(self.ws.split, self.width_of(g)) == split).on_click(cx.listener(move |this, _, _, cx| {
                     this.ws.split = split;
                     this.sync_diff(cx);
                 }))
             };
             let step = |id: &'static str, icon, tip_text: String, forward: bool| {
-                Button::new(id).ghost().xsmall().icon(icon).tooltip(tip_text).on_click(cx.listener(move |this, _, w, cx| this.step_change(forward, w, cx)))
+                Button::new((id, g)).ghost().xsmall().icon(icon).tooltip(tip_text).on_click(cx.listener(move |this, _, w, cx| {
+                    this.ws.focus(g); // a click on a button of the group makes it the active one first
+                    this.step_change(forward, w, cx)
+                }))
             };
             h_flex()
                 .flex_none()
@@ -946,7 +1082,7 @@ impl Antler {
                 .child(step("previous-change", IconName::ArrowUp, crate::keys::label(cx, "Previous Change", "workbench.action.editor.previousChange"), false))
                 .child(step("next-change", IconName::ArrowDown, crate::keys::label(cx, "Next Change", "workbench.action.editor.nextChange"), true))
                 .child(
-                    Button::new("open-file")
+                    Button::new(("open-file", g))
                         .ghost()
                         .xsmall()
                         .icon(IconName::ExternalLink)

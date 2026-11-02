@@ -102,7 +102,7 @@ impl Antler {
         let right: Vec<String> = match self.ws.active.map(|a| &self.ws.tabs[a].kind) {
             Some(TabKind::File(f)) if f.rendered && f.is_markdown() => vec!["Markdown Preview".into()],
             Some(TabKind::File(f)) => {
-                let p = self.editors.get(&f.path).map(|(e, _)| e.read(cx).cursor_position());
+                let p = self.editor_in(self.ws.group, &f.path).map(|e| e.read(cx).cursor_position());
                 let (line, col) = p.map_or((0, 0), |p| (p.line, p.character));
                 vec![format!("Ln {}, Col {}", line + 1, col + 1), "UTF-8".into(), style::language_name(&f.language()).into()]
             }

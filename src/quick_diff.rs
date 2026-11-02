@@ -73,10 +73,10 @@ impl Antler {
     pub(crate) fn act_on_selection(&mut self, revert: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.ws.active.map(|a| &self.ws.tabs[a]) else { return };
         // the editable diff's patch is of the text typed
-        let live = tab.diff().filter(|d| self.editable_split(d));
+        let live = tab.diff().filter(|d| self.editable_split(self.ws.group, d));
         let op = match (tab.diff(), tab.file()) {
             (Some(d), _) if live.is_none() => {
-                let Some(sel) = self.diff.read(cx).selected_lines() else { return };
+                let Some(sel) = self.diff_of(self.ws.group).read(cx).selected_lines() else { return };
                 let end = |side: DiffSide, n| (side == DiffSide::Original, n);
                 let picked = d.parsed.pick_between(end(sel.side(), sel.start()), end(sel.end_side(), sel.end()));
                 if revert && d.is_editable() {
@@ -113,7 +113,7 @@ impl Antler {
         let Some(index) = self.ws.tabs.iter().find_map(|t| t.diff().filter(|d| d.file.as_ref().is_some_and(|f| f.path == path))?.index.as_deref()).or_else(|| self.ws.tabs[ix].file()?.quick.as_ref()?.index.as_deref()) else { return };
         let Some(text) = self.ws.tabs[ix].file().map(|f| f.text.as_str()) else { return };
         let new = git::revert_text(index, text, revert);
-        let Some((editor, _)) = self.editors.get(path) else { return };
+        let Some(editor) = self.editor_in(self.ws.group, path) else { return };
         if new == text {
             return;
         }

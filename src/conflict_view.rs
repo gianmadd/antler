@@ -109,7 +109,7 @@ impl Antler {
 
     /// Conflict block `k` of the editor of `path`, as the editor has it now.
     fn conflict_block(&self, path: &Path, k: usize, cx: &App) -> Option<(Entity<EditorState>, String, Conflict)> {
-        let (editor, _) = self.editors.get(path)?;
+        let editor = self.editor_in(self.ws.group, path)?;
         let text = editor.read(cx).value().to_string();
         let block = editing::conflicts(&text).into_iter().nth(k)?;
         Some((editor.clone(), text, block))

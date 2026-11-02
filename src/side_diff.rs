@@ -31,7 +31,7 @@ struct Sides {
 
 #[derive(Default)]
 pub(crate) struct SideDiff {
-    sides: HashMap<PathBuf, Sides>,
+    sides: HashMap<(workspace::GroupId, PathBuf), Sides>,
 }
 
 /// The runs of 0-based `lines` of `text` as byte ranges that take in each run's last newline, so a fill reaches the edge.
@@ -43,8 +43,8 @@ fn line_ranges(text: &str, lines: impl IntoIterator<Item = Range<usize>>) -> Vec
 
 impl Antler {
     /// The diff of `tab` shows its right half as an editor: it can be, and the view is wide enough for two halves.
-    pub(crate) fn editable_split(&self, tab: &DiffTab) -> bool {
-        tab.is_editable() && workspace::side_by_side(self.ws.split, self.diff_width.get())
+    pub(crate) fn editable_split(&self, g: workspace::GroupId, tab: &DiffTab) -> bool {
+        tab.is_editable() && workspace::side_by_side(self.ws.split, self.width_of(g))
     }
 
     /// Reads the index and the file for the right side of `source`'s diff, off the UI thread.
@@ -65,9 +65,9 @@ impl Antler {
     /// colours stay off while another tab shows the same editor.
     pub(crate) fn sync_sides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wrap = self.wrap;
-        let open: Vec<&Path> = self.ws.tabs.iter().filter_map(|t| t.diff()?.file.as_deref()).map(|f| f.path.as_path()).collect();
-        self.side.sides.retain(|p, s| {
-            let keep = open.contains(&p.as_path());
+        let open: Vec<(workspace::GroupId, &Path)> = self.ws.tabs.iter().filter_map(|t| Some((t.group, t.diff()?.file.as_deref()?.path.as_path()))).collect();
+        self.side.sides.retain(|(g, p), s| {
+            let keep = open.contains(&(*g, p.as_path()));
             if !keep {
                 s.right_marks.clear(cx);
             }
@@ -76,8 +76,8 @@ impl Antler {
         for (ix, tab) in self.ws.tabs.iter().enumerate() {
             let Some(d) = tab.diff().filter(|d| d.is_editable()) else { continue };
             let (Some(f), Some(index)) = (d.file.as_deref(), d.index.as_deref()) else { continue };
-            let Some((right, _)) = self.editors.get(&f.path) else { continue }; // `sync_editors` makes it first
-            let s = self.side.sides.entry(f.path.clone()).or_insert_with(|| {
+            let Some(right) = self.editors.get(&(tab.group, f.path.clone())).map(|(e, _)| e) else { continue }; // `sync_editors` makes it first
+            let s = self.side.sides.entry((tab.group, f.path.clone())).or_insert_with(|| {
                 let left = cx.new(|cx| EditorState::new(window, cx).language(f.language()).soft_wrap(wrap).default_value(index.to_string()));
                 let left_marks = left.update(cx, |e, cx| e.create_range_decorations_collection(Vec::new(), cx));
                 let right_marks = right.update(cx, |e, cx| e.create_range_decorations_collection(Vec::new(), cx));
@@ -99,9 +99,9 @@ impl Antler {
     }
 
     /// The two halves, scrolling together, with Stage Block / Discard Block beside each Hunk.
-    pub(crate) fn side_diff_view(&self, tab: &DiffTab, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn side_diff_view(&self, g: workspace::GroupId, tab: &DiffTab, cx: &mut Context<Self>) -> AnyElement {
         let Some(f) = tab.file.as_deref() else { return div().into_any_element() };
-        let (Some((right, _)), Some(s)) = (self.editors.get(&f.path), self.side.sides.get(&f.path)) else { return div().into_any_element() };
+        let (Some(right), Some(s)) = (self.editor_in(g, &f.path), self.side.sides.get(&(g, f.path.clone()))) else { return div().into_any_element() };
         let (left, size) = (s.left.clone(), self.font_size);
         let (ro, lo) = (right.read(cx).scroll_offset(), left.read(cx).scroll_offset());
         // the layout read below is the last painted one: after a scroll or an edit, draw once more
