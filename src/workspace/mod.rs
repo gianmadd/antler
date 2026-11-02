@@ -9,6 +9,7 @@ use crate::git;
 use crate::graph;
 use crate::search::{self, Query, Results, SearchJob};
 
+mod groups;
 mod ops;
 mod scan;
 mod search_model;
@@ -18,6 +19,7 @@ mod tree;
 #[cfg(test)]
 mod tests_common;
 
+pub use groups::*;
 pub use ops::*;
 pub use scan::*;
 pub use search_model::*;
@@ -46,11 +48,16 @@ pub struct Workspace {
     pub last_error: Option<String>,
     /// Open diff tabs: at most one preview, the others pinned.
     pub tabs: Vec<Tab>,
+    /// The active tab: the active group's most recently used one.
     pub active: Option<usize>,
+    /// How the editor groups are laid out, and which one is active (the others' tabs are in `tabs` too).
+    pub layout: Layout,
+    pub group: GroupId,
+    next_group: GroupId,
     /// Activations so far, stamped on each tab as it is activated.
     uses: u64,
     /// Closed tabs, last on top, with where they were: ⇧⌘T reopens them.
-    closed: Vec<(usize, Reopen)>,
+    closed: Vec<(usize, GroupId, Reopen)>,
     /// Diff view mode for all tabs: side by side (true, VS Code's `renderSideBySide`) or inline; see `side_by_side`.
     pub split: bool,
     /// Salvataggio automatico: `afterDelay` with this delay since the last edit; `None` is `off`.
@@ -151,6 +158,9 @@ impl Workspace {
             last_error: None,
             tabs: Vec::new(),
             active: None,
+            layout: Layout::Group(0),
+            group: 0,
+            next_group: 0,
             uses: 0,
             closed: Vec::new(),
             split: true,

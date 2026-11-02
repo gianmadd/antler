@@ -19,6 +19,7 @@ Antler copies VS Code's Explorer and Source Control; for git, ADR 0003 applies (
 | Theme | light/dark and themes | dark only, Amber accent, font 14 |
 | Zoom keys | ⌘= / ⌘- zoom the whole window, ⌘0 focuses the side bar | ⌘= / ⌘- / ⌘0 change and reset the editor font size, like Zed |
 | Keybindings | `keybindings.json` with `when` expressions, comments allowed | `~/.config/antler/keybindings.json`, same `[{ key, command, when }]` and `-command`, reloaded within a second of saving; plain JSON (no comments), `when` is one of `input`, `editor`, `explorer`, `git`, `search`, `commit` (unknown ones are ignored with a warning); command ids are VS Code's where VS Code has the command |
+| Editor groups | any number, split in four directions, drag a tab to an edge; layout, sizes and all tabs restored | right and down only (`workbench.action.splitEditor` is "Split Editor Right"); a drag to any edge makes a group; only a layout with a split is restored (its groups and their files, no sizes: every split starts equal), a single group is not; closing the last tab of a group removes it. Settings opens once, in the group it was opened in, and cannot be split. Two views of one file share the text and its edits, not the cursor, selection, scroll or undo history. Split Editor Orthogonal (⌘K ⌘\\) and the group keys ⌘1…⌘8 are VS Code's; Split Editor Down has no key (as in VS Code), nor Focus Next/Previous Group |
 | Staged/Changes groups | collapsible | not collapsible (to be aligned) |
 
 Excluded by choice: integrated terminal, extensions, AI-generated commit messages.

@@ -20,6 +20,12 @@ pub fn untitled(file: &Path) -> Vec<(String, String)> {
     json.get("untitled").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
 }
 
+/// The editor groups saved on quit (`Workspace::layout_state`); none if there was no split.
+pub fn editor_layout(file: &Path) -> Option<serde_json::Value> {
+    let json: serde_json::Value = std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok())?;
+    json.get("editor_layout").filter(|v| !v.is_null()).cloned()
+}
+
 /// The ids of the commands run from the Command palette, newest first; a missing or broken file is none.
 pub fn recent_commands(file: &Path) -> Vec<String> {
     let json: serde_json::Value = std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();

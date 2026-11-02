@@ -67,8 +67,10 @@ pub fn side_by_side(split: bool, width: f32) -> bool {
 pub struct Tab {
     pub preview: bool,
     pub kind: TabKind,
-    /// When it was last activated (`Workspace::uses`): Ctrl+Tab's most-recent order.
-    used: u64,
+    /// When it was last activated (`Workspace::uses`): Ctrl+Tab's most-recent order, and a group's active tab.
+    pub(super) used: u64,
+    /// The editor group it is in.
+    pub group: GroupId,
 }
 
 /// What ⇧⌘T needs to bring a closed tab back: its file, or its diff.
@@ -87,6 +89,8 @@ pub enum CloseScope {
     Right,
     Saved,
     All,
+    /// Every tab of the group (⌘K W).
+    Group,
 }
 
 pub enum TabKind {
@@ -101,7 +105,7 @@ pub enum TabKind {
 
 impl TabKind {
     /// A new tab for file `path`, empty until loaded: `FileTab::load` then `set_file`, or `ImageTab::load` then `set_image`.
-    fn loading(path: &Path) -> TabKind {
+    pub(super) fn loading(path: &Path) -> TabKind {
         if ImageTab::is_image(path) {
             return TabKind::Image(ImageTab { path: path.to_path_buf(), info: None });
         }
@@ -111,7 +115,7 @@ impl TabKind {
 
 impl Tab {
     /// What reopens this tab once closed.
-    fn reopen(&self) -> Reopen {
+    pub(super) fn reopen(&self) -> Reopen {
         match (&self.kind, self.path()) {
             (TabKind::Diff(d), _) => Reopen::Diff(d.source.clone()),
             (TabKind::Settings, _) => Reopen::Settings,
@@ -327,6 +331,21 @@ impl FileTab {
     }
 
     /// An empty file tab, `loading` until `set`.
+    /// A copy for another group: same text and state, so it shows at once; the margin diff is read again.
+    pub(super) fn twin(&self) -> FileTab {
+        FileTab {
+            path: self.path.clone(),
+            text: self.text.clone(),
+            disk: self.disk.clone(),
+            error: self.error.clone(),
+            conflict: self.conflict.clone(),
+            loading: self.loading,
+            rendered: self.rendered,
+            untitled: self.untitled,
+            ..FileTab::new(&self.path)
+        }
+    }
+
     fn new(path: &Path) -> FileTab {
         FileTab { path: path.to_path_buf(), text: String::new(), disk: String::new(), error: None, goto: None, edited: None, conflict: None, loading: true, quick: None, rendered: false, untitled: false, save_error: None, saving: None }
     }
@@ -425,20 +444,20 @@ impl Workspace {
 
     /// Shows `source` in a tab (the existing one if open), preview unless `pin`; returns it back.
     pub(crate) fn open_diff(&mut self, source: DiffSource, pin: bool) -> DiffSource {
-        let existing = self.tabs.iter().position(|t| t.diff().is_some_and(|d| d.source == source));
+        let existing = self.find_here(|t| t.diff().is_some_and(|d| d.source == source));
         self.show_tab(existing, || TabKind::Diff(DiffTab::new(source.clone())), pin);
         source
     }
 
     /// Cmd+, : the Settings tab (the existing one if open), pinned.
     pub fn open_settings(&mut self) {
-        let existing = self.tabs.iter().position(|t| matches!(t.kind, TabKind::Settings));
+        let existing = self.find_here(|t| matches!(t.kind, TabKind::Settings));
         self.show_tab(existing, || TabKind::Settings, true);
     }
 
     /// Cmd+K Cmd+S : the Keyboard Shortcuts tab (the existing one if open), pinned.
     pub fn open_keybindings(&mut self) {
-        let existing = self.tabs.iter().position(|t| matches!(t.kind, TabKind::Keybindings));
+        let existing = self.find_here(|t| matches!(t.kind, TabKind::Keybindings));
         self.show_tab(existing, || TabKind::Keybindings, true);
     }
 
@@ -450,11 +469,16 @@ impl Workspace {
         self.open_diff(source, false)
     }
 
-    /// Activates tab `existing`, or puts `new()` in the preview slot (or a new slot); pins it if `pin`.
+    /// The first tab of the active group that `f` likes.
+    fn find_here(&self, f: impl Fn(&Tab) -> bool) -> Option<usize> {
+        self.tabs.iter().position(|t| t.group == self.group && f(t))
+    }
+
+    /// Activates tab `existing` (of the active group), or puts `new()` in the group's preview slot (or a new slot); pins it if `pin`.
     pub(crate) fn show_tab(&mut self, existing: Option<usize>, new: impl FnOnce() -> TabKind, pin: bool) -> usize {
         let ix = existing.unwrap_or_else(|| {
-            let tab = Tab { preview: true, kind: new(), used: 0 };
-            match self.tabs.iter().position(|t| t.preview) {
+            let tab = Tab { preview: true, kind: new(), used: 0, group: self.group };
+            match self.find_here(|t| t.preview) {
                 Some(ix) => {
                     self.tabs[ix] = tab;
                     ix
@@ -476,17 +500,35 @@ impl Workspace {
     pub fn activate(&mut self, ix: usize) {
         self.uses += 1;
         self.tabs[ix].used = self.uses;
+        self.group = self.tabs[ix].group;
         self.active = Some(ix);
     }
 
     /// The tabs `scope` closes, seen from tab `ix`; the view asks about the unsaved ones, then calls `close_tabs`.
+    /// All closes every group's tabs; the others stay in the group of `ix`.
     pub fn tabs_to_close(&self, ix: usize, scope: CloseScope) -> Vec<usize> {
+        let g = self.tabs[ix].group;
         (0..self.tabs.len())
             .filter(|&i| match scope {
+                CloseScope::All => true,
+                _ if self.tabs[i].group != g => false,
+                CloseScope::Group => true,
                 CloseScope::Others => i != ix,
                 CloseScope::Right => i > ix,
                 CloseScope::Saved => !self.tabs[i].is_dirty(),
-                CloseScope::All => true,
+            })
+            .collect()
+    }
+
+    /// Of tabs `ixs` about to close, the ones to ask about: unsaved, and whose file no tab left open shows, once per file.
+    pub fn unsaved_among(&self, ixs: &[usize]) -> Vec<usize> {
+        let mut seen = HashSet::new();
+        ixs.iter()
+            .copied()
+            .filter(|&i| self.tabs[i].is_dirty())
+            .filter(|&i| {
+                let path = self.tabs[i].file().map(|f| &f.path);
+                path.is_some_and(|p| !(0..self.tabs.len()).any(|o| !ixs.contains(&o) && self.tabs[o].file().is_some_and(|f| &f.path == p))) && seen.insert(path)
             })
             .collect()
     }
@@ -502,19 +544,15 @@ impl Workspace {
     pub fn move_tab(&mut self, from: usize, to: usize) {
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
-        self.active = self.active.map(|a| match a {
-            a if a == from => to,
-            a if from < a && a <= to => a - 1,
-            a if to <= a && a < from => a + 1,
-            a => a,
-        });
+        self.active = self.active_in(self.group);
     }
 
     /// ⇧⌘T: brings back the last closed tab, pinned and active, where it was; just activates it if it is open again.
     /// Returns its index: a reopened tab is empty until the view loads it, as after `open_path` or `open_file`.
     pub fn reopen_closed(&mut self) -> Option<usize> {
-        let (ix, what) = self.closed.pop()?;
-        let open = self.tabs.iter().position(|t| t.reopen() == what);
+        let (pos, group, what) = self.closed.pop()?;
+        let group = if self.groups().contains(&group) { group } else { self.group }; // its group is gone: the active one
+        let open = self.tabs.iter().position(|t| t.group == group && t.reopen() == what);
         let ix = open.unwrap_or_else(|| {
             let kind = match what {
                 Reopen::Path(path) => TabKind::loading(&path),
@@ -522,8 +560,9 @@ impl Workspace {
                 Reopen::Settings => TabKind::Settings,
                 Reopen::Keybindings => TabKind::Keybindings,
             };
-            let ix = ix.min(self.tabs.len());
-            self.tabs.insert(ix, Tab { preview: false, kind, used: 0 });
+            let here = self.group_tabs(group);
+            let ix = here.get(pos).copied().unwrap_or_else(|| here.last().map_or(self.tabs.len(), |l| l + 1));
+            self.tabs.insert(ix, Tab { preview: false, kind, used: 0, group });
             ix
         });
         self.activate(ix);
@@ -532,7 +571,7 @@ impl Workspace {
 
     /// Ctrl+Tab's list: the active tab, then the others from the most recently used.
     pub fn recent_tabs(&self) -> Vec<usize> {
-        let mut ixs: Vec<usize> = (0..self.tabs.len()).collect();
+        let mut ixs = self.group_tabs(self.group);
         ixs.sort_by_key(|&i| (Some(i) != self.active, std::cmp::Reverse(self.tabs[i].used)));
         ixs
     }
@@ -550,37 +589,39 @@ impl Workspace {
     /// indicators. `true` if the changes differ from the last.
     pub fn set_quick(&mut self, path: &Path, index: git::Result<String>) -> bool {
         let Some(source) = self.quick_source(path) else { return false };
-        let Some(f) = self.tabs.iter_mut().find_map(|t| match &mut t.kind {
+        let index = index.ok();
+        let mut changed = false;
+        for f in self.tabs.iter_mut().filter_map(|t| match &mut t.kind {
             TabKind::File(f) if f.path == path => Some(f),
             _ => None,
-        }) else {
-            return false;
-        };
-        let old = f.quick.as_ref().and_then(|q| q.patch.clone());
-        f.quick = index.ok().map(|index| {
-            let mut tab = DiffTab::new(source);
-            tab.index = Some(index);
-            tab
-        });
-        f.requick();
-        old != f.quick.as_ref().and_then(|q| q.patch.clone())
+        }) {
+            let old = f.quick.as_ref().and_then(|q| q.patch.clone());
+            f.quick = index.clone().map(|index| {
+                let mut tab = DiffTab::new(source.clone());
+                tab.index = Some(index);
+                tab
+            });
+            f.requick();
+            changed |= old != f.quick.as_ref().and_then(|q| q.patch.clone());
+        }
+        changed
     }
 
     /// Installs a loaded diff; ignored if its tab was closed or replaced meanwhile.
     pub fn set_diff(&mut self, source: &DiffSource, patch: git::Result<String>) {
-        let tab = self.tabs.iter_mut().find_map(|t| match &mut t.kind {
+        let tabs = self.tabs.iter_mut().filter_map(|t| match &mut t.kind {
             TabKind::Diff(d) if &d.source == source => Some(d),
             _ => None,
         });
         match patch {
             // an editable diff takes its patch from the text on the right: the disk may be a keystroke behind
             Ok(p) => {
-                if let Some(tab) = tab.filter(|t| !t.is_editable()) {
-                    tab.set_patch(p);
+                for tab in tabs.filter(|t| !t.is_editable()) {
+                    tab.set_patch(p.clone());
                 }
             }
             Err(e) => {
-                if let Some(tab) = tab {
+                for tab in tabs {
                     tab.error = Some(e.clone());
                 }
                 self.last_error = Some(e);
@@ -591,28 +632,34 @@ impl Workspace {
     /// Installs what `DiffSource::load_right` read for the diff of `source`: the left side, and the file on the right
     /// unless it is already there with the edits. A file that cannot be read (deleted, binary) leaves the diff read-only.
     pub fn set_right(&mut self, source: &DiffSource, index: git::Result<String>, file: Result<String, String>) {
-        let Some(tab) = self.tabs.iter_mut().find_map(|t| match &mut t.kind {
+        let Ok(index) = index else { return };
+        let text = self.tabs.iter().find_map(|t| t.file().filter(|f| f.path == source.repo.join(&source.path) && !f.loading)).map(|f| f.text.clone());
+        for tab in self.tabs.iter_mut().filter_map(|t| match &mut t.kind {
             TabKind::Diff(d) if &d.source == source && source.editable() => Some(d),
             _ => None,
-        }) else {
-            return;
-        };
-        let Ok(index) = index else { return };
-        if tab.file.is_none() {
-            let mut f = FileTab::new(&source.repo.join(&source.path));
-            f.set(file);
-            tab.file = Some(Box::new(f));
+        }) {
+            if tab.file.is_none() {
+                let mut f = FileTab::new(&source.repo.join(&source.path));
+                f.set(file.clone());
+                // the file is open in a tab already (maybe in another group): its text, edits included
+                if let (Some(t), None) = (&text, &f.error) {
+                    f.text.clone_from(t);
+                }
+                tab.file = Some(Box::new(f));
+            }
+            tab.index = Some(index.clone());
+            tab.recompute();
         }
-        tab.index = Some(index);
-        tab.recompute();
     }
 
     /// Opens file `path` (absolute) in an editor tab, preview unless `pin`, and makes it active; with `line`
     /// (1-based) the cursor goes there. An already open file keeps its edits. Used by "Open File", Explorer and search.
     /// A new tab is `loading`: read it off the UI thread with `FileTab::load`, then `set_file`.
     pub fn open_path(&mut self, path: &Path, line: Option<usize>, pin: bool) -> usize {
-        let existing = self.tabs.iter().position(|t| t.path() == Some(path));
-        let ix = self.show_tab(existing, || TabKind::loading(path), pin);
+        let existing = self.find_here(|t| t.path() == Some(path));
+        // open in another group: that tab's text (with its unsaved edits) is shown, not read again
+        let shown = self.tabs.iter().find(|t| t.path() == Some(path) && matches!(t.kind, TabKind::File(_) | TabKind::Image(_))).and_then(|t| t.twin(self.group));
+        let ix = self.show_tab(existing, || shown.map_or_else(|| TabKind::loading(path), |t| t.kind), pin);
         self.goto.opened(path);
         if let (Some(line), TabKind::File(f)) = (line, &mut self.tabs[ix].kind) {
             f.goto = Some(line);
@@ -622,11 +669,11 @@ impl Workspace {
 
     /// Installs a file read by `FileTab::load`; ignored if its tab was closed or is no longer loading.
     pub fn set_file(&mut self, path: &Path, text: Result<String, String>) {
-        if let Some(f) = self.tabs.iter_mut().find_map(|t| match &mut t.kind {
+        for f in self.tabs.iter_mut().filter_map(|t| match &mut t.kind {
             TabKind::File(f) if f.path == path && f.loading => Some(f),
             _ => None,
         }) {
-            f.set(text);
+            f.set(text.clone());
         }
     }
 
@@ -861,7 +908,8 @@ impl Workspace {
 
     /// Tabs with unsaved edits, to ask about before they are lost.
     pub fn dirty_tabs(&self) -> Vec<usize> {
-        (0..self.tabs.len()).filter(|&i| self.tabs[i].is_dirty()).collect()
+        let all: Vec<usize> = (0..self.tabs.len()).collect();
+        self.unsaved_among(&all)
     }
 
     /// Like `dirty_tabs` for quitting: Untitled files are kept by hot exit (`untitled_state`), so nothing asks.
@@ -879,7 +927,7 @@ impl Workspace {
     fn add_untitled(&mut self, name: String, text: String) -> usize {
         let mut f = FileTab::new(Path::new(&name));
         (f.loading, f.untitled, f.text) = (false, true, text);
-        self.tabs.push(Tab { preview: false, kind: TabKind::File(f), used: 0 });
+        self.tabs.push(Tab { preview: false, kind: TabKind::File(f), used: 0, group: self.group });
         let ix = self.tabs.len() - 1;
         self.activate(ix);
         ix
@@ -910,18 +958,15 @@ impl Workspace {
     }
 
     /// Closes tab `ix` (no questions: the view asks about unsaved ones first). Closing the active tab activates
-    /// the most recently used one, like VS Code's `focusRecentEditorAfterClose`.
+    /// the group's most recently used one, like VS Code's `focusRecentEditorAfterClose`; the last tab of a group
+    /// closes the group.
     pub fn close_tab(&mut self, ix: usize) {
+        let pos = self.group_tabs(self.tabs[ix].group).iter().position(|&i| i == ix).unwrap_or(0);
         let tab = self.tabs.remove(ix);
         if !tab.file().is_some_and(|f| f.untitled) {
-            self.closed.push((ix, tab.reopen())); // an Untitled file has nothing to reopen
+            self.closed.push((pos, tab.group, tab.reopen())); // an Untitled file has nothing to reopen
         }
-        self.active = match self.active {
-            _ if self.tabs.is_empty() => None,
-            Some(a) if a == ix => (0..self.tabs.len()).max_by_key(|&i| self.tabs[i].used),
-            Some(a) if a > ix => Some(a - 1),
-            a => a,
-        };
+        self.tidy(tab.group);
     }
 
     /// Blocking convenience (tests): open_file + load + set_diff.

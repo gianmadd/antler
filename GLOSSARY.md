@@ -42,6 +42,10 @@ _Avoid_: Search panel, find in files
 The side panel with the Repository sections of all Nested repositories.
 _Avoid_: Source Control, SCM, git panel
 
+**Editor group (Group)**:
+One tab strip with its tabs and the content of its active tab; the editor area holds one or more, side by side or one over the other. A file open in two Groups has one text.
+_Avoid_: Pane, split, column
+
 **Untitled file**:
 A file opened with no path yet ("Untitled-1"); it gets one on its first save.
 _Avoid_: New file, scratch buffer

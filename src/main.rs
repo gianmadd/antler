@@ -42,7 +42,6 @@ use notify::Watcher as _;
 
 use gpui_kit::component::{
     TitleBar, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex,
-    diff::DiffState,
     input::{EditorState, InputEvent, InputState, TextareaState},
     button::{Button, ButtonVariants as _},
     menu::PopupMenuItem,
@@ -71,7 +70,8 @@ fn set_menus(cx: &mut App) {
         keys::checked_item("antler.toggleMinimap", cx.global::<minimap_view::Enabled>().0),
         keys::checked_item("antler.toggleMinimapCharacters", cx.global::<minimap_view::RenderCharacters>().0),
     ]);
-    let (mut recent, mut minimap) = (Some(open_recent), Some(minimap));
+    let layout = Menu::new("Editor Layout").items([keys::item("workbench.action.splitEditor"), keys::item("workbench.action.splitEditorDown")]);
+    let (mut recent, mut minimap, mut layout) = (Some(open_recent), Some(minimap), Some(layout));
     // the first menu is the macOS app menu
     let app = Menu::new("Antler").items(
         (cx.global::<update::Enabled>().0.then(|| keys::item("antler.checkForUpdates")).into_iter())
@@ -82,6 +82,7 @@ fn set_menus(cx: &mut App) {
             "-" => Some(MenuItem::separator()),
             "@recent" => recent.take().map(MenuItem::submenu),
             "@minimap" => minimap.take().map(MenuItem::submenu),
+            "@layout" => layout.take().map(MenuItem::submenu),
             id => Some(keys::item(id)),
         }))
     });
@@ -121,8 +122,10 @@ struct Antler {
     loading: bool,
     /// A rescan was asked for during the running one (e.g. an auto-save): run another when it ends.
     stale: bool,
-    /// One diff view shared by all tabs, showing the active one (so its mode is global).
-    diff: Entity<DiffState>,
+    /// Per editor group: its diff view (showing the group's active tab) and the measured width of that view.
+    group_ui: HashMap<workspace::GroupId, tabs::GroupUi>,
+    /// Focus the active group's editor at the next render (after a split or ⌘1…): it may not exist yet.
+    focus_editor: bool,
     focus: FocusHandle,
     /// Ops waiting for the running batch; batches run one at a time so git never races itself on the index.
     /// shortcut: one queue for every repo, so a slow pull or push holds back ops on other repos; split per repo if it bites.
@@ -131,8 +134,8 @@ struct Antler {
     running: Vec<Op>,
     /// Commit message box per repo; the text itself lives in `Section::message`.
     messages: HashMap<PathBuf, (Entity<TextareaState>, Subscription)>,
-    /// Editor per open file tab; the text itself lives in `FileTab::text`.
-    editors: HashMap<PathBuf, (Entity<EditorState>, [Subscription; 2])>,
+    /// Editor per open file tab and group (a file shown in two groups has two, kept equal); the text itself lives in `FileTab::text`.
+    editors: HashMap<(workspace::GroupId, PathBuf), (Entity<EditorState>, [Subscription; 2])>,
     /// Minimap per open file tab, built when its editor is the active one.
     minimaps: HashMap<PathBuf, minimap_view::Minimap>,
     /// Last cursor (line, column) seen in an editor: the status bar redraws only when it moves.
@@ -177,8 +180,6 @@ struct Antler {
     conflicts: conflict_view::ConflictMarks,
     /// The editors' margin bars and the Hunk open under one.
     quick: quick_diff::QuickDiff,
-    /// Width of the diff view, measured each frame: a narrow one shows inline.
-    diff_width: std::rc::Rc<std::cell::Cell<f32>>,
     /// The editable diffs' left halves and colours.
     side: side_diff::SideDiff,
     /// Versions the update toast already showed this session.
@@ -194,7 +195,6 @@ impl Antler {
     fn new(ws: Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx); // so Cmd+W reaches `close_tab` before anything else has focus
-        let diff = cx.new(|cx| DiffState::new([], cx));
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             // unsaved tabs: ask first, and quit from the dialog
@@ -219,7 +219,8 @@ impl Antler {
             ws,
             loading: false,
             stale: false,
-            diff,
+            group_ui: HashMap::new(),
+            focus_editor: false,
             focus,
             queue: Vec::new(),
             running: Vec::new(),
@@ -249,17 +250,18 @@ impl Antler {
             graph_width: Default::default(),
             conflicts: Default::default(),
             quick: Default::default(),
-            diff_width: Default::default(),
             side: Default::default(),
             update_notified: Default::default(),
             applied: initial,
             shortcuts: keybindings_view::State::new(window, cx),
             _settings_sub: cx.observe_global_in::<settings::Current>(window, |this, window, cx| this.apply_settings(window, cx)),
         };
+        this.sync_diff(cx); // the first group's diff view
         // hot exit: the Untitled files and their text go into the state file on quit and come back at the next start
         cx.on_app_quit(|this, _| {
             if let Some(f) = &this.ws.state_file {
                 crate::settings::set(f, "untitled", serde_json::json!(this.ws.untitled_state())).ok();
+                crate::settings::set(f, "editor_layout", this.ws.layout_state().unwrap_or_default()).ok();
             }
             async {}
         })
@@ -671,14 +673,16 @@ fn main() {
         recent::add(&recent::default_path(), &root);
     }
     let mut ws = Workspace::new(root);
+    let mut restored = Vec::new(); // the tabs of a split layout, to read once there is a window
     ws.apply_settings(&s);
     ws.last_error = error; // shown after the first scan
     workspace::set_excluded(s.excluded());
     ws.settings_file = settings::default_path();
     ws.state_file = state::default_path();
-    if let Some(f) = &ws.state_file {
-        ws.graph.load_filters(&state::graph_filters(f));
-        ws.restore_untitled(state::untitled(f));
+    if let Some(f) = ws.state_file.clone() {
+        ws.graph.load_filters(&state::graph_filters(&f));
+        restored = state::editor_layout(&f).map(|l| ws.restore_layout(&l)).unwrap_or_default();
+        ws.restore_untitled(state::untitled(&f));
     }
     let update_on = s.update_mode == settings::UpdateMode::Default;
     let (minimap, minimap_chars) = (s.editor_minimap_enabled, s.editor_minimap_render_characters);
@@ -716,6 +720,9 @@ fn main() {
         gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| {
                 let mut antler = Antler::new(ws, window, cx);
+                for ix in restored {
+                    antler.load_tab(ix, cx);
+                }
                 for path in bench_open.split(':').filter(|p| !p.is_empty()) {
                     antler.open_path(PathBuf::from(path), None, true, cx);
                 }

@@ -84,7 +84,7 @@ fn build(text: Rope, lang: &str, theme: &HighlightTheme, fg: Hsla, chars: bool) 
 impl Antler {
     /// Starts building the active editor's minimap when its text changed; drops those of closed files.
     pub(crate) fn sync_minimap(&mut self, cx: &mut Context<Self>) {
-        self.minimaps.retain(|p, _| self.editors.contains_key(p));
+        self.minimaps.retain(|p, _| self.editors.keys().any(|(_, ep)| ep == p));
         let Some(path) = self.ws.active.and_then(|a| self.ws.tabs[a].file()).map(|f| f.path.clone()) else { return };
         let Some((editor, lang)) = self.active_editor().filter(|_| cx.global::<Enabled>().0) else { return };
         let m = self.minimaps.entry(path.clone()).or_default();
