@@ -85,7 +85,7 @@ pub struct SearchJob {
 
 impl SearchJob {
     pub fn run(&self) -> Results {
-        search(&self.root, &self.repos, &self.query, self.limit, &self.cancel)
+        crate::host::at(&self.root).search(&self.root, &self.repos, &self.query, self.limit, &self.cancel)
     }
 }
 
@@ -104,9 +104,10 @@ impl ReplaceJob {
     /// Blocking: reads the file, replaces, writes it back; the new text.
     pub fn run(&self) -> Result<String, String> {
         let fail = |e: String| format!("Cannot replace in {}: {e}", self.path.display());
-        let text = std::fs::read_to_string(&self.path).map_err(|e| fail(e.to_string()))?;
+        let host = crate::host::at(&self.path);
+        let text = host.read_to_string(&self.path).map_err(|e| fail(e.to_string()))?;
         let new = replace(&text, &self.query, &self.with, self.preserve_case, self.line).map_err(fail)?;
-        std::fs::write(&self.path, &new).map_err(|e| fail(e.to_string()))?;
+        host.write(&self.path, new.as_bytes()).map_err(|e| fail(e.to_string()))?;
         Ok(new)
     }
 }
@@ -167,7 +168,8 @@ fn case_like(found: &str, rep: &str) -> String {
     }
 }
 
-fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool) -> Results {
+/// The local implementation of `Host::search`.
+pub(crate) fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool) -> Results {
     let mut results = Results::default();
     let matcher = match matcher(query) {
         Ok(m) => m,
@@ -217,6 +219,7 @@ fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &
     results
 }
 
+/// The local implementation of `Host::files`.
 /// Every file under the Root that the search and Go to File see: each nested repo honours its own .gitignore,
 /// the default exclusions are skipped. Walk order, one walk after another (not sorted overall; `search` sorts its results by path). Blocking.
 pub fn walk(root: &Path, repos: &[PathBuf]) -> impl Iterator<Item = ignore::DirEntry> + use<> {

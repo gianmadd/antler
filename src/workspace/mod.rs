@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::discovery::{self, Repo};
 use crate::git;
 use crate::graph;
+use crate::host;
 use crate::search::{self, Query, Results, SearchJob};
 
 mod groups;

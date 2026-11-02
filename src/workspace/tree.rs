@@ -430,7 +430,7 @@ fn check_name(dir: &Path, name: &str, current: Option<&str>) -> Result<PathBuf, 
     }
     let path = dir.join(name);
     let same = current.is_some_and(|c| c.to_lowercase() == name.to_lowercase());
-    if !same && path.symlink_metadata().is_ok() {
+    if !same && crate::host::at(dir).exists(&path) {
         return Err(format!("A file or folder {name} already exists at this location."));
     }
     Ok(path)

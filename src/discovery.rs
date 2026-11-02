@@ -15,6 +15,7 @@ pub struct Repo {
     pub worktree_of: Option<PathBuf>,
 }
 
+/// The local implementation of `Host::discover` (the only code here that touches the disk).
 /// Finds every repository under `root` (the root itself is depth 0, its children depth 1, ...).
 pub fn discover(root: &Path, max_depth: usize) -> Vec<Repo> {
     let mut repos = Vec::new();

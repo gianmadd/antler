@@ -8,6 +8,7 @@ mod explorer;
 mod git;
 mod git_panel;
 mod goto;
+mod host;
 mod goto_view;
 mod palette;
 mod graph;
@@ -39,7 +40,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use notify::Watcher as _;
 
 use gpui_kit::component::{
     TitleBar, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex,
@@ -171,7 +171,7 @@ struct Antler {
     /// ...and whether that session started on a word (empty selection): it then matches whole words, with case.
     cursors_word: bool,
     /// Watches the Root; replaced when the Root changes, dropping it stops its events.
-    watcher: Option<notify::RecommendedWatcher>,
+    watcher: Option<host::WatchGuard>,
     /// Search view: the query field (its text becomes `ws.search.query.text`).
     query: (Entity<InputState>, Subscription),
     /// Search view: the Replace, "files to include" and "files to exclude" fields.
@@ -362,13 +362,9 @@ impl Antler {
     /// once the model's debounce has passed.
     fn watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (tx, rx) = async_channel::unbounded();
-        let watcher = notify::recommended_watcher(move |e: notify::Result<notify::Event>| {
-            for path in e.map(|e| e.paths).unwrap_or_default() {
-                tx.send_blocking(path).ok();
-            }
-        });
+        let watcher = host::at(&self.ws.root).watch(&self.ws.root, Box::new(move |path| drop(tx.send_blocking(path))));
         // replacing the old watcher drops its sender, which ends its loop below
-        self.watcher = match watcher.and_then(|mut w| w.watch(&self.ws.root, notify::RecursiveMode::Recursive).map(|()| w)) {
+        self.watcher = match watcher {
             Ok(w) => Some(w),
             Err(e) => {
                 let e = format!("Cannot watch {} for changes: {e}", self.ws.root.display());

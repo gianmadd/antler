@@ -270,13 +270,15 @@ impl ImageTab {
 
     /// Blocking: reads the image's header (the whole file for an SVG) and size on disk.
     pub fn load(path: &Path) -> ImageInfo {
+        let bytes = crate::host::at(path).read(path).ok();
         let size = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
-            let svg = std::fs::read(path).ok().and_then(|b| usvg::Tree::from_data(&b, &usvg::Options::default()).ok());
+            let svg = bytes.and_then(|b| usvg::Tree::from_data(&b, &usvg::Options::default()).ok());
             svg.map(|t| (t.size().width().round() as u32, t.size().height().round() as u32))
         } else {
-            image::image_dimensions(path).ok()
+            // shortcut: reads the whole image to get its header; a remote host should answer with the size alone.
+            bytes.and_then(|b| image::ImageReader::new(std::io::Cursor::new(b)).with_guessed_format().ok()?.into_dimensions().ok())
         };
-        ImageInfo { size, bytes: std::fs::metadata(path).map_or(0, |m| m.len()) }
+        ImageInfo { size, bytes: crate::host::at(path).metadata(path).map_or(0, |m| m.size) }
     }
 }
 
@@ -300,7 +302,7 @@ pub struct SaveJob {
 impl SaveJob {
     /// Blocking.
     pub fn run(&self) -> Result<(), String> {
-        std::fs::write(&self.path, &self.text).map_err(|e| format!("Cannot save {}: {e}", self.path.display()))
+        crate::host::at(&self.path).write(&self.path, self.text.as_bytes()).map_err(|e| format!("Cannot save {}: {e}", self.path.display()))
     }
 }
 
@@ -352,7 +354,7 @@ impl FileTab {
 
     /// Blocking: the file's text, or why it cannot be opened: "Binary file" (a NUL byte or not UTF-8), or the read error.
     pub fn load(path: &Path) -> Result<String, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+        let bytes = crate::host::at(path).read(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
         match String::from_utf8(bytes) {
             Ok(text) if !text.contains('\0') => Ok(text),
             _ => Err("Binary file".into()),

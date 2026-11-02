@@ -1,8 +1,7 @@
 //! Thin layer over the system `git` CLI (see docs/adr/0001).
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Branch name reported when HEAD is detached.
 pub const DETACHED: &str = "HEAD (detached)";
@@ -14,31 +13,7 @@ fn run(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
 }
 
 fn run_env(repo: &Path, args: &[&str], stdin: Option<&str>, envs: &[(&str, &std::ffi::OsStr)]) -> Result<String> {
-    let mut child = Command::new("git")
-        .envs(envs.iter().copied())
-        .env("GIT_OPTIONAL_LOCKS", "0") // status must not rewrite .git/index: the watcher would see it and rescan forever
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run git: {e}"))?;
-    if let Some(input) = stdin {
-        // git may exit before reading all of it (Broken pipe); its stderr below says why
-        child.stdin.take().unwrap().write_all(input.as_bytes()).ok();
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    // `diff --no-index` exits 1 when files differ; that is not an error.
-    if out.status.success() || (args.contains(&"--no-index") && out.status.code() == Some(1)) {
-        Ok(stdout)
-    } else {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        // a conflict (stash pop, cherry-pick) is reported on stdout only
-        Err(if err.is_empty() { stdout.trim().to_string() } else { err })
-    }
+    crate::host::at(repo).git(repo, args, stdin, envs)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,11 +73,12 @@ impl Operation {
 pub fn operation(repo: &Path) -> Option<Operation> {
     let dot_git = repo.join(".git");
     // a linked worktree's `.git` is a file pointing at its own git dir
-    let dir = match std::fs::read_to_string(&dot_git) {
+    let host = crate::host::at(repo);
+    let dir = match host.read_to_string(&dot_git) {
         Ok(text) => repo.join(text.trim().strip_prefix("gitdir:")?.trim()),
         Err(_) => dot_git,
     };
-    let has = |name: &str| dir.join(name).exists();
+    let has = |name: &str| host.metadata(&dir.join(name)).is_ok();
     if has("rebase-merge") || has("rebase-apply") {
         Some(Operation::Rebase)
     } else if has("MERGE_HEAD") {
@@ -519,7 +495,7 @@ pub fn unstage_file(repo: &Path, path: &str) -> Result<()> {
 /// Discards working-tree changes; untracked files are deleted.
 pub fn discard_file(repo: &Path, file: &FileStatus) -> Result<()> {
     if file.is_untracked() {
-        std::fs::remove_file(repo.join(&file.path)).map_err(|e| e.to_string())
+        crate::host::at(repo).remove_file(&repo.join(&file.path)).map_err(|e| e.to_string())
     } else {
         run(repo, &["restore", "--worktree", "--", &file.path], None).map(drop)
     }

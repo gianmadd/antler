@@ -126,21 +126,13 @@ pub fn excluded(name: &std::ffi::OsStr) -> bool {
 
 /// The entries of folder `dir` as (path, is folder), folders first then by name; `files.exclude` names are left out. Blocking.
 pub fn read_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
-    let mut entries: Vec<(PathBuf, bool)> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| !excluded(&e.file_name()))
-        .map(|e| (e.path(), e.path().is_dir()))
-        .collect();
-    entries.sort_by_cached_key(|(p, dir)| (!dir, p.file_name().unwrap_or_default().to_string_lossy().to_lowercase()));
-    entries
+    crate::host::at(dir).list_dir(dir)
 }
 
 /// Discovers the repos under `root` and reads their state. Blocking: run it off the UI thread.
 pub fn scan(root: &Path, depth: usize) -> Scan {
     let mut errors = Vec::new();
-    let sections = discovery::discover(root, depth)
+    let sections = crate::host::at(root).discover(root, depth)
         .into_iter()
         .map(|repo| {
             let files = git::status(&repo.path).unwrap_or_else(|e| {

@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::search;
 use crate::workspace::Workspace;
 
 /// State of the Go to File popup.
@@ -33,7 +32,7 @@ pub struct FilesJob {
 impl FilesJob {
     pub fn run(&self) -> Vec<String> {
         let rel = |p: &Path| p.strip_prefix(&self.root).ok().map(|p| p.to_string_lossy().into_owned());
-        let mut files: Vec<String> = search::walk(&self.root, &self.repos).filter_map(|e| rel(e.path())).collect();
+        let mut files: Vec<String> = crate::host::at(&self.root).files(&self.root, &self.repos).iter().filter_map(|p| rel(p)).collect();
         files.sort_unstable();
         files
     }

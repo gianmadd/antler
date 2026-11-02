@@ -233,7 +233,7 @@ impl Workspace {
                 };
             }
             let files: Vec<PathBuf> = v.get("files").and_then(|f| serde_json::from_value(f.clone()).ok()).unwrap_or_default();
-            let files: Vec<PathBuf> = files.into_iter().filter(|p| p.is_file()).collect();
+            let files: Vec<PathBuf> = files.into_iter().filter(|p| crate::host::at(p).metadata(p).is_ok_and(|m| m.is_file)).collect();
             if files.is_empty() {
                 return None;
             }
