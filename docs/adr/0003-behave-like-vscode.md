@@ -1,0 +1,3 @@
+# Git behaves like VS Code with default settings
+
+For every git feature (Git view, diff, commit, graph, sync, branch, stash, conflicts) Antler copies the behavior of VS Code with default settings, including confirmation texts, button order and shortcuts. The owner does not want to rethink the git workflow they already know (2026-11-02). The only exceptions are those already decided and documented in `docs/vscode-differences.md` (e.g. nested repos in ignored folders, the Linked worktree label, Auto fetch enabled by default). When in doubt about a git feature, the answer is "do what VS Code does".

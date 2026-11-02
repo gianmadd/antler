@@ -1,0 +1,63 @@
+# Antler
+
+Explorer, editor and diff viewer for macOS that shows all git repositories nested under a folder in a single panel. Replaces VS Code and Zed for people who work in folders with several repos.
+
+## Workspace
+
+**Root**:
+The folder open in a window; everything Antler shows lives under it.
+_Avoid_: Workspace, project
+
+**Nested repository**:
+A git repository found under the Root at any depth, even inside another repository or inside a folder that repository ignores. Each submodule counts as a Nested repository of its own.
+_Avoid_: Sub-repo, nested repo, worktree
+
+**Scan depth**:
+The maximum number of folder levels under the Root searched for Nested repositories; a repo directly inside the Root is at depth 1.
+_Avoid_: file_scan_depth
+
+**Linked worktree**:
+A Nested repository created with `git worktree add` from another repository, whose history it shares; it appears as a repo of its own but belongs to a main repo.
+_Avoid_: Worktree (alone), copy, clone
+
+**Repository section (Section)**:
+The collapsible block of the Git view dedicated to one Nested repository, with its own commit message, branch and change groups.
+_Avoid_: Tab, repo tab
+
+## Interface
+
+**Activity bar**:
+The vertical column of icons on the left used to choose which view the side panel shows.
+_Avoid_: Sidebar
+
+**Explorer view**:
+The side panel with the tree of files and folders under the Root.
+_Avoid_: File tree, project panel
+
+**Search view**:
+The side panel for searching text across all files under the Root.
+_Avoid_: Search panel, find in files
+
+**Git view**:
+The side panel with the Repository sections of all Nested repositories.
+_Avoid_: Source Control, SCM, git panel
+
+## Changes
+
+**Hunk**:
+A contiguous group of changed lines in a diff, the smallest unit of stage, unstage and revert alongside selected lines.
+_Avoid_: Chunk
+
+**Partial staging**:
+Staging only some Hunks or lines of a file.
+_Avoid_: Partial add, patch add
+
+## Synchronization
+
+**Sync**:
+Pull followed by push on a single Nested repository. There is no Sync that acts on several repositories at once.
+_Avoid_: Sync all, update
+
+**Auto fetch**:
+The periodic background fetch of all Nested repositories, which updates the incoming and outgoing commit counters without touching the working tree.
+_Avoid_: Auto-sync, polling

@@ -1,0 +1,32 @@
+#!/bin/bash
+# antler [--depth N] [--hide-clean] [FOLDER]: opens Antler.app on FOLDER (default: the current one), like `code .`.
+# Installed in ~/.local/bin by `scripts/bundle.sh --install`.
+set -euo pipefail
+
+app=/Applications/Antler.app
+if [[ ! -d $app ]]; then
+    echo "antler: $app is not installed; run scripts/bundle.sh --install from the Antler repo" >&2
+    exit 1
+fi
+
+flags=()
+folder=$PWD
+while (($#)); do
+    case $1 in
+        --depth)
+            flags+=("$1")
+            shift
+            if (($#)); then flags+=("$1"); shift; fi # a missing or wrong number is reported by the app
+            ;;
+        -*) flags+=("$1"); shift ;;
+        *) folder=$1; shift ;;
+    esac
+done
+if [[ ! -d $folder ]]; then
+    echo "antler: $folder is not a folder" >&2
+    exit 1
+fi
+folder=$(cd "$folder" && pwd)
+
+# -n: the app has one window per process today, so each call starts its own instance
+exec open -n -a "$app" --args ${flags[@]+"${flags[@]}"} "$folder"

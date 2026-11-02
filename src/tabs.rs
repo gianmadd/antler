@@ -1,0 +1,989 @@
+//! The editor area: tabs, diff view, file editors, and saving.
+use std::path::PathBuf;
+use std::time::Instant;
+
+use gpui_kit::base::Selectable as _;
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+    button::{Button, ButtonVariants as _},
+    diff::{Diff, DiffAnnotation, DiffFile, DiffLinePosition, DiffMode, DiffSide},
+    input::{Editor, EditorState, InputEvent, Position, RangeDecoration},
+    menu::{ContextMenuExt as _, PopupMenu},
+    notification::Notification,
+    text::TextView,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+
+use crate::editing::{self, Edit};
+use crate::style::{self, ACCENT, FG, FG_DIM, FG_FAINT, HOVER, LINE, LINE_SOFT, MAIN, RAISE, SEL, SIDE, c};
+use crate::workspace::{self, CloseScope, TabKind};
+use crate::{Antler, CloseTab, Quit, Save, menu_item};
+
+actions!(antler, [TogglePreview]);
+actions!(antler, [ToggleLineComment, ToggleBlockComment, MoveLineUp, MoveLineDown, CopyLineUp, CopyLineDown, DeleteLine]);
+actions!(antler, [InsertLineBelow, InsertLineAbove, Unfold, ToggleWordWrap, ZoomIn, ZoomOut, ZoomReset]);
+actions!(antler, [CloseOtherTabs, CloseTabsToTheRight, CloseSavedTabs, CloseAllTabs, CopyTabPath, CopyRelativeTabPath, RevealTabInFinder]);
+actions!(antler, [NextChange, PreviousChange, StageSelectedRanges, UnstageSelectedRanges, RevertSelectedRanges]);
+actions!(antler, [RevealTabInExplorer, KeepTabOpen, ReopenClosedTab, NextRecentTab, PreviousRecentTab, NextTab, PreviousTab]);
+
+/// Replaces the editor's built-in menu: its Cut / Copy / Paste / Select All come back, then VS Code's two
+/// (Unstage Selected Ranges needs the staged diff, which the editor does not have).
+pub(crate) fn editor_menu(editor: Editor) -> Editor {
+    editor.context_menu(|menu, _, _| {
+        use gpui_kit::component::input::{Copy, Cut, Paste, SelectAll};
+        menu.menu("Cut", Box::new(Cut))
+            .menu("Copy", Box::new(Copy))
+            .menu("Paste", Box::new(Paste))
+            .separator()
+            .menu("Select All", Box::new(SelectAll))
+            .separator()
+            .menu("Stage Selected Ranges", Box::new(StageSelectedRanges))
+            .menu("Revert Selected Ranges", Box::new(RevertSelectedRanges))
+    })
+}
+
+/// VS Code's macOS keys for the editor commands. Only in the code editor (not the commit box or search field), and
+/// bound after gpui_kit::init so they win over the editor's own cmd-enter and shift-alt-up/down (extra cursors,
+/// still on cmd-alt-up/down). Cmd+] / Cmd+[ (indent) and Cmd+Z come with the editor.
+pub(crate) fn bind_keys(cx: &mut App) {
+    let ed = Some("Input && mode == editor");
+    cx.bind_keys([
+        KeyBinding::new("cmd-/", ToggleLineComment, ed),
+        KeyBinding::new("alt-shift-a", ToggleBlockComment, ed),
+        KeyBinding::new("alt-up", MoveLineUp, ed),
+        KeyBinding::new("alt-down", MoveLineDown, ed),
+        KeyBinding::new("shift-alt-up", CopyLineUp, ed),
+        KeyBinding::new("shift-alt-down", CopyLineDown, ed),
+        KeyBinding::new("cmd-shift-k", DeleteLine, ed),
+        KeyBinding::new("cmd-enter", InsertLineBelow, ed),
+        KeyBinding::new("cmd-shift-enter", InsertLineAbove, ed),
+        KeyBinding::new("cmd-alt-]", Unfold, ed),
+        KeyBinding::new("alt-z", ToggleWordWrap, ed),
+        KeyBinding::new("cmd-=", ZoomIn, ed),
+        KeyBinding::new("cmd-+", ZoomIn, ed), // layouts with a + key of its own (Italian): VS Code binds both
+        KeyBinding::new("cmd--", ZoomOut, ed),
+        KeyBinding::new("cmd-0", ZoomReset, ed),
+    ]);
+    // the tab commands, VS Code's macOS defaults; for Copy Path and Reveal in Finder, VS Code's "active file" cmd-k
+    // chords, which work anywhere. Close to the Right and Reveal in Explorer View have no default key.
+    cx.bind_keys([
+        KeyBinding::new("alt-cmd-t", CloseOtherTabs, None),
+        KeyBinding::new("cmd-k u", CloseSavedTabs, None),
+        KeyBinding::new("alt-cmd-w", CloseAllTabs, None),
+        KeyBinding::new("cmd-k cmd-w", CloseAllTabs, None),
+        KeyBinding::new("cmd-k alt-cmd-c", CopyTabPath, None),
+        KeyBinding::new("cmd-k shift-alt-cmd-c", CopyRelativeTabPath, None),
+        KeyBinding::new("cmd-k r", RevealTabInFinder, None),
+        KeyBinding::new("cmd-k enter", KeepTabOpen, None),
+        KeyBinding::new("shift-cmd-t", ReopenClosedTab, None),
+        KeyBinding::new("ctrl-tab", NextRecentTab, None),
+        KeyBinding::new("ctrl-shift-tab", PreviousRecentTab, None),
+        KeyBinding::new("alt-cmd-right", NextTab, None),
+        KeyBinding::new("alt-cmd-left", PreviousTab, None),
+        KeyBinding::new("alt-f5", NextChange, None),
+        KeyBinding::new("shift-alt-f5", PreviousChange, None),
+    ]);
+}
+
+/// A tab being dragged to a new place in the strip: its index, and what follows the pointer.
+#[derive(Clone)]
+struct DraggedTab {
+    ix: usize,
+    title: String,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h(px(30.))
+            .px(px(12.))
+            .gap(px(6.))
+            .bg(c(RAISE))
+            .border_1()
+            .border_color(c(LINE))
+            .rounded(px(4.))
+            .text_color(c(FG))
+            .text_size(px(13.))
+            .child(style::file_icon(&self.title))
+            .child(self.title.clone())
+    }
+}
+
+impl Antler {
+    /// Creates an editor for each new file tab, drops those of closed tabs, and pushes model-side changes
+    /// (reload, "open at line") into them.
+    pub(crate) fn sync_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let open: Vec<PathBuf> = self.ws.tabs.iter().filter_map(|t| t.file()).map(|f| f.path.clone()).collect();
+        self.editors.retain(|p, _| open.contains(p));
+        for tab in &mut self.ws.tabs {
+            let Some(f) = tab.file_mut() else { continue };
+            if f.loading {
+                continue;
+            }
+            let (editor, _) = self.editors.entry(f.path.clone()).or_insert_with(|| {
+                let editor = cx.new(|cx| {
+                    EditorState::new(window, cx).language(f.language()).soft_wrap(self.wrap).default_value(f.text.clone())
+                });
+                let brackets = editor.update(cx, |e, cx| e.create_range_decorations_collection(vec![], cx));
+                let path = f.path.clone();
+                let path2 = f.path.clone();
+                let sub = cx.subscribe_in(&editor, window, move |this, editor, ev: &InputEvent, window, cx| {
+                    if let InputEvent::Change = ev
+                        && let Some(ix) = this.ws.tabs.iter().position(|t| t.file().is_some_and(|f| f.path == path))
+                    {
+                        this.ws.edit(ix, editor.read(cx).value().to_string());
+                        if this.ws.active.is_some_and(|a| this.ws.tabs[a].diff().is_some()) {
+                            this.sync_diff(cx); // the inline view reads the patch the edit redid
+                        }
+                        this.minimaps.entry(path.clone()).or_default().version += 1;
+                        this.schedule_auto_save(window, cx);
+                        cx.notify();
+                    }
+                });
+                // the editor notifies on every caret blink too: redraw only when the position changed
+                let moved = cx.observe(&editor, move |this, editor, cx| {
+                    let (p, at) = (editor.read(cx).cursor_position(), editor.read(cx).cursor());
+                    if this.cursor != (p.line, p.character) {
+                        this.cursor = (p.line, p.character);
+                        // the Change event that updates the tab's text comes before this notification
+                        let text = this.ws.tabs.iter().find_map(|t| t.file().filter(|f| f.path == path2)).map_or("", |f| f.text.as_str());
+                        let pair = editing::matching_bracket(text, at).into_iter().flatten();
+                        brackets.set(pair.map(|o| RangeDecoration::new(o..o + 1)).collect(), cx);
+                        cx.notify();
+                    }
+                });
+                (editor, [sub, moved])
+            });
+            if editor.read(cx).value().as_ref() != f.text {
+                let text = f.text.clone();
+                editor.update(cx, |e, cx| e.set_value(text, window, cx));
+                self.minimaps.entry(f.path.clone()).or_default().version += 1;
+            }
+            if let Some(line) = f.goto.take() {
+                editor.update(cx, |e, cx| e.set_cursor_position(Position::new(line.saturating_sub(1) as u32, 0), window, cx));
+            }
+        }
+    }
+
+    /// The active tab's editor and its language.
+    pub(crate) fn active_editor(&self) -> Option<(Entity<EditorState>, String)> {
+        let f = self.ws.tabs.get(self.ws.active?)?.file()?;
+        Some((self.editors.get(&f.path)?.0.clone(), f.language()))
+    }
+
+    /// Runs a line command of `editing` on the active editor's text and selection, as one undo step.
+    fn edit_lines(&mut self, window: &mut Window, cx: &mut Context<Self>, f: impl FnOnce(&str, std::ops::Range<usize>, &str) -> Option<Edit>) {
+        let Some((editor, lang)) = self.active_editor() else { return };
+        editor.update(cx, |e, cx| {
+            let Some(edit) = f(&e.value(), e.selected_range(), &lang) else { return };
+            e.set_selected_range(edit.range, cx);
+            e.replace(edit.text, window, cx);
+            e.set_selected_range(edit.select, cx);
+        });
+    }
+
+    /// Cmd+= / Cmd+- / Cmd+0: the editors' font size, one pixel a step; not saved.
+    fn zoom(&mut self, step: Option<f32>, cx: &mut Context<Self>) {
+        let size = self.font_size.unwrap_or(cx.theme().mono_font_size).as_f32();
+        self.font_size = step.map(|step| px((size + step).clamp(6., 72.)));
+        cx.notify();
+    }
+
+    /// The editor commands on the element around the editor; the keys are in `bind_keys`.
+    fn editor_actions(el: Div, cx: &mut Context<Self>) -> Div {
+        el.on_action(cx.listener(|this, _: &ToggleLineComment, w, cx| this.edit_lines(w, cx, editing::toggle_comment)))
+            .on_action(cx.listener(|this, _: &ToggleBlockComment, w, cx| this.edit_lines(w, cx, editing::toggle_block_comment)))
+            .on_action(cx.listener(|this, _: &MoveLineUp, w, cx| this.edit_lines(w, cx, |t, s, _| editing::move_lines(t, s, true))))
+            .on_action(cx.listener(|this, _: &MoveLineDown, w, cx| this.edit_lines(w, cx, |t, s, _| editing::move_lines(t, s, false))))
+            .on_action(cx.listener(|this, _: &CopyLineUp, w, cx| this.edit_lines(w, cx, |t, s, _| editing::copy_lines(t, s, true))))
+            .on_action(cx.listener(|this, _: &CopyLineDown, w, cx| this.edit_lines(w, cx, |t, s, _| editing::copy_lines(t, s, false))))
+            .on_action(cx.listener(|this, _: &DeleteLine, w, cx| this.edit_lines(w, cx, |t, s, _| editing::delete_lines(t, s))))
+            .on_action(cx.listener(|this, _: &InsertLineBelow, w, cx| this.edit_lines(w, cx, |t, s, _| editing::insert_line(t, s, false))))
+            .on_action(cx.listener(|this, _: &InsertLineAbove, w, cx| this.edit_lines(w, cx, |t, s, _| editing::insert_line(t, s, true))))
+            .on_action(cx.listener(|this, _: &Unfold, _, cx| {
+                // a fold keeps its first line visible, so the line under the cursor's is the one it hides
+                if let Some((editor, _)) = this.active_editor() {
+                    editor.update(cx, |e, cx| e.unfold_at(Position::new(e.cursor_position().line + 1, 0), cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleWordWrap, window, cx| {
+                this.wrap = !this.wrap;
+                for (editor, _) in this.editors.values() {
+                    editor.update(cx, |e, cx| e.set_soft_wrap(this.wrap, window, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(1.), cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-1.), cx)))
+            .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(None, cx)))
+            .on_action(cx.listener(|this, _: &StageSelectedRanges, w, cx| this.act_on_selection(false, w, cx)))
+            .on_action(cx.listener(|this, _: &RevertSelectedRanges, w, cx| this.act_on_selection(true, w, cx)))
+    }
+
+    /// Opens a file in an editor tab (preview unless `pin`), optionally at a 1-based line.
+    pub(crate) fn open_path(&mut self, path: PathBuf, line: Option<usize>, pin: bool, cx: &mut Context<Self>) {
+        let ix = self.ws.open_path(&path, line, pin);
+        self.sync_diff(cx);
+        self.load_tab(ix, cx);
+    }
+
+    /// Reads a file or image tab still empty off the UI thread.
+    fn load_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.ws.tabs[ix].path().map(std::path::Path::to_path_buf) else { return };
+        if self.ws.tabs[ix].image().is_some_and(|i| i.info.is_none()) {
+            cx.spawn(async move |this, cx| {
+                let p = path.clone();
+                let info = cx.background_spawn(async move { workspace::ImageTab::load(&p) }).await;
+                this.update(cx, |this, cx| {
+                    this.ws.set_image(&path, info);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        } else if self.ws.tabs[ix].file().is_some_and(|f| f.loading) {
+            cx.spawn(async move |this, cx| {
+                let p = path.clone();
+                let text = cx.background_spawn(async move { workspace::FileTab::load(&p) }).await;
+                this.update(cx, |this, cx| {
+                    this.ws.set_file(&path, text);
+                    this.load_quick(path, cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// Cmd+Shift+V or the button above a Markdown file: flips the tab between source and rendered preview.
+    pub(crate) fn toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(a) = self.ws.active
+            && self.ws.toggle_preview(a)
+        {
+            cx.notify();
+        }
+    }
+
+    /// Cmd+S: writes the active file tab, then rescans so the Git view and open diffs follow.
+    pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = self.ws.active else { return };
+        let jobs = self.ws.save(a).into_iter().collect();
+        self.write(jobs, window, cx, |_, _, _| {});
+    }
+
+    /// Writes `jobs` off the UI thread, after any earlier write so the disk ends with the newest text; then
+    /// installs them, shows a failure, rescans, and runs `then` if every write went through.
+    pub(crate) fn write(
+        &mut self,
+        jobs: Vec<workspace::SaveJob>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let (tx, rx) = async_channel::bounded(1);
+        let prev = self.writing.take();
+        self.writing = Some(cx.background_spawn(async move {
+            if let Some(prev) = prev {
+                prev.await;
+            }
+            let results: Vec<_> = jobs.into_iter().map(|job| (job.run(), job)).collect();
+            tx.send(results).await.ok();
+        }));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(results) = rx.recv().await else { return };
+            this.update_in(cx, |this, window, cx| {
+                let ok = results.into_iter().fold(true, |ok, (result, job)| this.ws.saved(&job, result) && ok);
+                if let Some(e) = this.ws.last_error.take() {
+                    window.push_notification(Notification::error(e).title("Save"), cx);
+                }
+                this.wait_refresh(window, cx);
+                if ok {
+                    then(this, window, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// After an edit: once the auto-save delay has passed, saves what is due and rescans like Cmd+S.
+    /// Each edit schedules its own tick; ticks of older edits find nothing due.
+    pub(crate) fn schedule_auto_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(delay) = self.ws.auto_save else { return };
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update_in(cx, |this, window, cx| {
+                let jobs = this.ws.auto_save(Instant::now());
+                if !jobs.is_empty() {
+                    this.write(jobs, window, cx, |_, _, _| {});
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Closes tab `ix`, asking Save / Don't Save / Cancel if it has unsaved changes.
+    pub(crate) fn request_close(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = if self.ws.tabs[ix].is_dirty() { vec![ix] } else { vec![] };
+        self.confirm_unsaved(dirty, window, cx, move |this, _, cx| {
+            this.ws.close_tab(ix);
+            this.sync_diff(cx);
+        });
+    }
+
+    /// Cmd+Q or closing the window: asks about every unsaved tab, then quits.
+    pub(crate) fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_unsaved(self.ws.dirty_tabs(), window, cx, |_, _, cx| cx.quit());
+    }
+
+    /// Opens a file's diff in a tab (preview unless `pin`) and loads it on a background thread.
+    pub(crate) fn open_file(&mut self, section: usize, staged: bool, path: &str, pin: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let source = self.ws.open_file(section, staged, path, pin);
+        self.sync_diff(cx);
+        self.load_diff(source, window, cx);
+    }
+
+    /// Loads `source`'s diff on a background thread into its tab.
+    pub(crate) fn load_diff(&mut self, source: workspace::DiffSource, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let src = source.clone();
+            let patch = cx.background_spawn(async move { src.load() }).await;
+            this.update_in(cx, |this, window, cx| {
+                this.ws.set_diff(&source, patch);
+                if let Some(e) = this.ws.last_error.take() {
+                    window.push_notification(Notification::error(e).title("git"), cx);
+                }
+                this.sync_diff(cx);
+                if source.editable() {
+                    this.load_right(source, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shows the active tab's patch in the diff view.
+    pub(crate) fn sync_diff(&mut self, cx: &mut Context<Self>) {
+        let patch = self.ws.active.and_then(|a| self.ws.tabs[a].diff()?.patch.as_deref()).unwrap_or("");
+        let files = DiffFile::parse(patch).unwrap_or_default();
+        let mode = self.diff_mode();
+        self.diff.update(cx, |d, cx| {
+            d.set_files(files, cx);
+            d.set_mode(mode, cx);
+        });
+        cx.notify();
+    }
+
+    /// Side by side unless the user chose inline or the diff view is narrower than VS Code's breakpoint.
+    fn diff_mode(&self) -> DiffMode {
+        if workspace::side_by_side(self.ws.split, self.diff_width.get()) { DiffMode::Split } else { DiffMode::Unified }
+    }
+
+    /// Alt+F5 / Shift+Alt+F5 and the arrows above a diff: the next or previous change, in the diff or the editor.
+    fn step_change(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match self.ws.active.map(|a| &self.ws.tabs[a].kind) {
+            Some(TabKind::Diff(d)) if self.editable_split(d) => self.jump_to_change(forward, window, cx),
+            Some(TabKind::Diff(_)) => self.diff.update(cx, |d, cx| if forward { d.next_change(cx) } else { d.previous_change(cx) }),
+            Some(TabKind::File(_)) => self.jump_to_change(forward, window, cx),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(a) = self.ws.active {
+            self.request_close(a, window, cx);
+        }
+    }
+
+    /// Close Others / to the Right / Saved / All from tab `ix`, asking Save / Don't Save / Cancel about the unsaved ones.
+    fn close_scope(&mut self, ix: usize, scope: CloseScope, window: &mut Window, cx: &mut Context<Self>) {
+        let ixs = self.ws.tabs_to_close(ix, scope);
+        let dirty = ixs.iter().copied().filter(|&i| self.ws.tabs[i].is_dirty()).collect();
+        self.confirm_unsaved(dirty, window, cx, move |this, _, cx| {
+            this.ws.close_tabs(&ixs);
+            this.sync_diff(cx);
+        });
+    }
+
+    /// The file tab `ix` shows; a diff's file in its repo.
+    fn tab_file(&self, ix: usize) -> PathBuf {
+        match (&self.ws.tabs[ix].kind, self.ws.tabs[ix].path()) {
+            (TabKind::Diff(d), _) => d.source.repo.join(&d.source.path),
+            (_, path) => path.unwrap_or(std::path::Path::new("")).to_path_buf(),
+        }
+    }
+
+    fn copy_tab_path(&self, ix: usize, relative: bool, cx: &mut App) {
+        let file = self.tab_file(ix);
+        let path = if relative { file.strip_prefix(&self.ws.root).unwrap_or(&file) } else { &file };
+        cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+    }
+
+    /// Keep Open: a preview tab stays (the double click on it).
+    fn keep_tab_open(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.ws.tabs[ix].preview = false;
+        cx.notify();
+    }
+
+    /// ⇧⌘T: the last closed tab back, loaded again.
+    fn reopen_closed_tab(&mut self, _: &ReopenClosedTab, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.ws.reopen_closed() else { return };
+        self.sync_diff(cx);
+        match self.ws.tabs[ix].diff() {
+            Some(d) if d.patch.is_none() => self.load_diff(d.source.clone(), window, cx),
+            _ => self.load_tab(ix, cx),
+        }
+    }
+
+    fn activate_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.ws.activate(ix);
+        self.sync_diff(cx);
+    }
+
+    /// Ctrl+Tab / Ctrl+Shift+Tab: opens the recent-tabs popup on the next (or last) one, then moves through it.
+    fn cycle_recent(&mut self, step: isize, cx: &mut Context<Self>) {
+        let n = self.ws.tabs.len() as isize;
+        if n > 0 {
+            self.switcher = Some((self.switcher.unwrap_or(0) as isize + step).rem_euclid(n) as usize);
+            cx.notify();
+        }
+    }
+
+    /// Releasing Ctrl (or a click on a row) opens the tab chosen in the recent-tabs popup.
+    fn choose_recent(&mut self, cx: &mut Context<Self>) {
+        let Some(pos) = self.switcher.take() else { return };
+        match self.ws.recent_tabs().get(pos) {
+            Some(&ix) => self.activate_tab(ix, cx),
+            None => cx.notify(),
+        }
+    }
+
+    /// The tab commands on the active tab, and Ctrl+Tab's popup, on the root element; the keys are in `bind_keys`.
+    pub(crate) fn tab_actions(el: Div, cx: &mut Context<Self>) -> Div {
+        fn on_active(this: &mut Antler, f: impl FnOnce(&mut Antler, usize)) {
+            if let Some(a) = this.ws.active {
+                f(this, a);
+            }
+        }
+        el.on_action(cx.listener(|this, _: &CloseOtherTabs, w, cx| on_active(this, |t, a| t.close_scope(a, CloseScope::Others, w, cx))))
+            .on_action(cx.listener(|this, _: &CloseTabsToTheRight, w, cx| on_active(this, |t, a| t.close_scope(a, CloseScope::Right, w, cx))))
+            .on_action(cx.listener(|this, _: &CloseSavedTabs, w, cx| on_active(this, |t, a| t.close_scope(a, CloseScope::Saved, w, cx))))
+            .on_action(cx.listener(|this, _: &CloseAllTabs, w, cx| on_active(this, |t, a| t.close_scope(a, CloseScope::All, w, cx))))
+            .on_action(cx.listener(|this, _: &CopyTabPath, _, cx| on_active(this, |t, a| t.copy_tab_path(a, false, cx))))
+            .on_action(cx.listener(|this, _: &CopyRelativeTabPath, _, cx| on_active(this, |t, a| t.copy_tab_path(a, true, cx))))
+            .on_action(cx.listener(|this, _: &RevealTabInFinder, _, cx| on_active(this, |t, a| cx.reveal_path(&t.tab_file(a)))))
+            .on_action(cx.listener(|this, _: &RevealTabInExplorer, w, cx| on_active(this, |t, a| t.reveal_in_explorer(t.tab_file(a), w, cx))))
+            .on_action(cx.listener(|this, _: &KeepTabOpen, _, cx| on_active(this, |t, a| t.keep_tab_open(a, cx))))
+            .on_action(cx.listener(Self::reopen_closed_tab))
+            .on_action(cx.listener(|this, _: &NextChange, w, cx| this.step_change(true, w, cx)))
+            .on_action(cx.listener(|this, _: &PreviousChange, w, cx| this.step_change(false, w, cx)))
+            .on_action(cx.listener(|this, _: &NextRecentTab, _, cx| this.cycle_recent(1, cx)))
+            .on_action(cx.listener(|this, _: &PreviousRecentTab, _, cx| this.cycle_recent(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| {
+                let n = this.ws.tabs.len();
+                on_active(this, |t, a| t.activate_tab((a + 1) % n, cx));
+            }))
+            .on_action(cx.listener(|this, _: &PreviousTab, _, cx| {
+                let n = this.ws.tabs.len();
+                on_active(this, |t, a| t.activate_tab((a + n - 1) % n, cx));
+            }))
+            .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| {
+                if !ev.modifiers.control {
+                    this.choose_recent(cx);
+                }
+            }))
+    }
+
+    /// Ctrl+Tab's popup: the tabs from the most recently used, the chosen one highlighted; `None` while closed.
+    pub(crate) fn recent_popup(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let chosen = self.switcher?;
+        let rows: Vec<_> = self
+            .ws
+            .recent_tabs()
+            .into_iter()
+            .enumerate()
+            .map(|(pos, ix)| {
+                let file = self.tab_file(ix);
+                let dir = file.parent().map(|d| d.strip_prefix(&self.ws.root).unwrap_or(d).display().to_string()).unwrap_or_default();
+                h_flex()
+                    .id(("recent", pos))
+                    .h(px(24.))
+                    .px(px(10.))
+                    .gap(px(6.))
+                    .rounded(px(4.))
+                    .when(pos == chosen, |el| el.bg(c(SEL)))
+                    .hover(|s| s.bg(c(HOVER)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.switcher = Some(pos);
+                        this.choose_recent(cx);
+                    }))
+                    .child(style::file_icon(&file.to_string_lossy()))
+                    .child(div().flex_none().child(self.ws.tabs[ix].title()))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(c(FG_FAINT)).child(dir))
+            })
+            .collect();
+        Some(deferred(
+            div().absolute().top(px(44.)).left_0().right_0().flex().justify_center().child(
+                v_flex()
+                    .w(px(480.))
+                    .p(px(4.))
+                    .bg(c(RAISE))
+                    .border_1()
+                    .border_color(c(LINE))
+                    .rounded(px(6.))
+                    .shadow_lg()
+                    .text_size(px(13.))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.switcher = None;
+                        cx.notify();
+                    }))
+                    .children(rows),
+            ),
+        ))
+    }
+
+    pub(crate) fn tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(active) = self.ws.active else {
+            return self.empty_state(cx).into_any_element();
+        };
+        let bar = self.tab_bar(active, cx);
+        let crumbs = self.crumbs(active, cx);
+        let content = match &self.ws.tabs[active].kind {
+            TabKind::Diff(tab) => self.diff_view(tab, cx),
+            TabKind::File(f) => match (&f.error, self.editors.get(&f.path)) {
+                (None, Some((editor, _))) => Self::editor_actions(v_flex(), cx)
+                    .flex_1()
+                    .min_h_0()
+                    .when(f.conflict.is_some(), |el| el.child(self.conflict_banner(active, cx)))
+                    .map(|el| match f.rendered && f.is_markdown() {
+                        true => el.child(markdown_view(f, active)),
+                        false => el.child(
+                            // the minimap floats over the editor's right edge, so long lines show through its background
+                            div()
+                                .relative()
+                                .flex_1()
+                                .min_h_0()
+                                .child(
+                                    editor_menu(Editor::new(editor).bordered(false).size_full().when_some(self.font_size, |e, s| e.text_size(s))),
+                                )
+                                .children(self.minimap(&f.path, editor, cx)),
+                        ),
+                    })
+                    .when(!(f.rendered && f.is_markdown()), |el| {
+                        el.children(self.conflict_lens(&f.path, &f.text, editor, cx)).children(self.quick_margin(f, editor, cx))
+                    })
+                    .into_any_element(),
+                (error, _) => {
+                    let m = error.clone().unwrap_or_else(|| if f.loading { "Loading…".into() } else { String::new() });
+                    div().p_4().text_color(c(FG_FAINT)).child(m).into_any_element()
+                }
+            },
+            TabKind::Image(i) => image_view(i),
+        };
+        v_flex().size_full().child(bar).child(crumbs).child(content).into_any_element()
+    }
+
+    /// No tab open: the deer watermark with the shortcuts under it, or the Open Folder… button in a window without a folder.
+    pub(crate) fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mark = img(crate::icons::MARK).size(px(128.)).opacity(0.25);
+        let below = if self.ws.has_folder() {
+            let hints = [("Explorer", "⇧⌘E"), ("Git", "⇧⌘G"), ("Search", "⇧⌘F"), ("Go to File", "⌘P"), ("Open Folder", "⌘O"), ("Close Folder", "⌘K F")];
+            let cell = |text: &'static str| div().h(px(16.)).flex().items_center().child(text);
+            h_flex()
+                .gap(px(32.))
+                .text_color(c(FG_DIM))
+                // two left-aligned columns: labels, then keys; the block itself stays centred under the mark
+                .child(v_flex().gap(px(8.)).items_start().text_size(px(13.)).children(hints.map(|(label, _)| cell(label))))
+                .child(v_flex().gap(px(8.)).items_start().font_family(cx.theme().mono_font_family.clone()).text_size(px(12.)).children(hints.map(|(_, key)| cell(key))))
+                .into_any_element()
+        } else {
+            Button::new("open-folder")
+                .label("Open Folder…   ⌘O")
+                .on_click(cx.listener(|this, _, window, cx| this.open_folder(&crate::OpenFolder, window, cx)))
+                .into_any_element()
+        };
+        let recent = (!self.ws.has_folder()).then(|| self.recent_list(cx));
+        v_flex().size_full().items_center().justify_center().gap(px(18.)).child(mark).child(below).children(recent)
+    }
+
+    /// Shown above a tab with unsaved edits whose file another program changed on disk.
+    pub(crate) fn conflict_banner(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let warn = c(style::GIT_M);
+        h_flex()
+            .px(px(14.))
+            .py(px(8.))
+            .gap(px(10.))
+            .bg(warn.opacity(0.13))
+            .border_b_1()
+            .border_color(warn.opacity(0.3))
+            .child(Icon::new(IconName::TriangleAlert).text_color(warn))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child("This file changed on disk.")
+                    .child(div().text_size(px(12.)).text_color(c(FG_DIM)).child("Reload it, or keep your changes and overwrite it on save?")),
+            )
+            .child(Button::new("reload").small().label("Reload").on_click(cx.listener(move |this, _, _, cx| {
+                this.ws.reload(ix);
+                cx.notify();
+            })))
+            .child(Button::new("keep-mine").small().primary().label("Keep Mine").on_click(cx.listener(move |this, _, _, cx| {
+                this.ws.keep_mine(ix);
+                cx.notify();
+            })))
+    }
+
+    pub(crate) fn diff_view(&self,tab: &workspace::DiffTab, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let msg = |m: &str| div().p_4().text_color(theme.muted_foreground).child(m.to_string()).into_any_element();
+        match &tab.patch {
+            _ if tab.error.is_some() => msg(tab.error.as_deref().unwrap_or_default()),
+            None => msg("Loading…"),
+            Some(_) if self.editable_split(tab) => {
+                let probe = self.width_probe(tab, true, cx);
+                Self::editor_actions(v_flex(), cx).id("diff-area").relative().flex_1().min_h_0().child(probe).child(self.side_diff_view(tab, cx)).into_any_element()
+            }
+            Some(_) if tab.is_binary() => msg("Binary file: no diff to show."),
+            Some(_) if self.diff.read(cx).files().is_empty() => msg("No changes."),
+            Some(_) => {
+                let file = self.diff.read(cx).files()[0].path().clone();
+                // a commit's diff is read-only: no Block actions. A Block is one change, as in VS Code, not the Hunk around it.
+                let changes = if tab.source.read_only() { Vec::new() } else { tab.parsed.changes() };
+                let annotations = changes.iter().enumerate().map(|(i, c)| {
+                    let (original, line) = tab.parsed.last_line_of(c);
+                    let side = if original { DiffSide::Original } else { DiffSide::Modified };
+                    DiffAnnotation::line(("hunk", i), DiffLinePosition::new(file.clone(), side, line))
+                });
+                let (this, staged) = (cx.entity().downgrade(), tab.source.staged);
+                // (stage or unstage, discard, the change's lines): a typed text is discarded in the editor, not on the disk
+                let ops = std::rc::Rc::new(changes.iter().enumerate().map(|(k, c)| (tab.block_op(k, false), tab.block_op(k, true), c.lines.clone())).collect::<Vec<_>>());
+                let typed = (tab.is_editable() && !staged).then(|| tab.source.repo.join(&tab.source.path));
+                let measure = self.width_probe(tab, false, cx);
+                let view = Diff::new(&self.diff)
+                    .header_visible(false)
+                    // unwrapped Split shares one horizontal canvas 2x the longest line, so the
+                    // right half and the Hunk buttons fall off-screen; wrapping pins 50/50.
+                    // shortcut: this component (read-only diffs: Staged Changes, commits, inline) wraps instead of
+                    // per-half scroll (gpui-component 0.8.1 has none); the editable diff has its own halves (side_diff.rs).
+                    .soft_wrap(true)
+                    .annotations(annotations)
+                    .render_annotation(move |a, _, _| {
+                        let ElementId::NamedInteger(_, i) = a.id() else { return h_flex() };
+                        let i = *i as usize;
+                        let button = |id: &'static str, icon, label: &'static str, revert: bool| {
+                            let (this, ops, typed) = (this.clone(), ops.clone(), typed.clone());
+                            Button::new((id, i)).ghost().xsmall().icon(icon).label(label).on_click(move |_, window, cx| {
+                                this.update(cx, |t, cx| match (&typed, revert) {
+                                    (Some(path), true) => {
+                                        let wanted = ops[i].2.clone();
+                                        t.revert_changes(path, move |r| *r == wanted, window, cx);
+                                    }
+                                    _ => {
+                                        if let Some(op) = if revert { &ops[i].1 } else { &ops[i].0 } {
+                                            t.confirm_and_run(op.clone(), window, cx);
+                                        }
+                                    }
+                                })
+                                .ok();
+                            })
+                        };
+                        if staged {
+                            h_flex().child(button("unstage-hunk", IconName::Minus, "Unstage Block", false))
+                        } else {
+                            h_flex()
+                                .gap_1()
+                                .child(button("revert-hunk", IconName::Undo2, "Discard Block", true))
+                                .child(button("stage-hunk", IconName::Plus, "Stage Block", false))
+                        }
+                    })
+                    .flex_1()
+                    .min_h_0();
+                let (weak, read_only) = (cx.entity().downgrade(), tab.source.read_only());
+                v_flex()
+                    .id("diff-area")
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(measure)
+                    .child(view)
+                    .context_menu(move |menu, _, _| {
+                        if read_only {
+                            return menu;
+                        }
+                        let item = |label: &'static str, revert: bool| menu_item(&weak, label, move |t, w, cx| t.act_on_selection(revert, w, cx));
+                        if staged {
+                            menu.item(item("Unstage Selected Ranges", false))
+                        } else {
+                            menu.item(item("Stage Selected Ranges", false)).item(item("Revert Selected Ranges", true))
+                        }
+                    })
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// An invisible child that measures the diff view's width each frame: a narrow view shows inline, and a view whose
+    /// width crosses the breakpoint (or is measured for the first time) is drawn again as the other kind.
+    fn width_probe(&self, tab: &workspace::DiffTab, showing_editor: bool, cx: &mut Context<Self>) -> AnyElement {
+        let (width, diff, split, me) = (self.diff_width.clone(), self.diff.clone(), self.ws.split, cx.entity());
+        let editable = tab.is_editable();
+        canvas(
+            |bounds, _, _| bounds.size.width.as_f32(),
+            move |_, w, _, cx| {
+                width.set(w);
+                let side = workspace::side_by_side(split, w);
+                diff.update(cx, |d, cx| {
+                    let want = if side { DiffMode::Split } else { DiffMode::Unified };
+                    if d.mode() != want {
+                        d.set_mode(want, cx)
+                    }
+                });
+                if (editable && side) != showing_editor {
+                    me.update(cx, |_, cx| cx.notify());
+                }
+            },
+        )
+        .absolute()
+        .size_full()
+        .into_any_element()
+    }
+
+    /// The tab strip: active tab raised with an accent line on top, preview in italic,
+    /// ● on unsaved tabs (× when hovered), × shown on the active or hovered tab.
+    pub(crate) fn tab_bar(&self, active: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak = cx.entity().downgrade();
+        let tabs = self.ws.tabs.iter().enumerate().map(|(i, t)| {
+            let (on, dirty, preview, weak) = (i == active, t.is_dirty(), t.preview, weak.clone());
+            let (tab_group, close_group): (SharedString, SharedString) = (format!("tab-{i}").into(), format!("tab-close-{i}").into());
+            let name = match (&t.kind, t.path()) {
+                (TabKind::Diff(d), _) => d.source.path.clone(),
+                (_, path) => path.unwrap_or(std::path::Path::new("")).display().to_string(),
+            };
+            let x = Icon::new(IconName::Close).xsmall();
+            let close = div()
+                .id(("close", i))
+                .group(close_group.clone())
+                .size(px(20.))
+                .flex_none()
+                .rounded(px(4.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(c(FG_FAINT))
+                .hover(|s| s.bg(c(HOVER)).text_color(c(FG)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.request_close(i, window, cx);
+                }))
+                .map(|el| {
+                    if dirty {
+                        el.child(div().text_color(c(FG)).child("●").group_hover(close_group.clone(), |s| s.hidden()))
+                            .child(div().hidden().group_hover(close_group, |s| s.flex()).child(x))
+                    } else {
+                        el.child(div().flex().when(!on, |d| d.invisible().group_hover(tab_group.clone(), |s| s.visible())).child(x))
+                    }
+                });
+            h_flex()
+                .id(("tab", i))
+                .group(tab_group.clone())
+                .relative()
+                .h_full()
+                .flex_none()
+                .pl(px(12.))
+                .pr(px(8.))
+                .gap(px(6.))
+                .border_r_1()
+                .border_color(c(LINE_SOFT))
+                .text_color(c(if on { FG } else { FG_DIM }))
+                .hover(|s| s.text_color(c(FG)))
+                .when(on, |el| el.bg(c(MAIN)).child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(c(ACCENT))))
+                .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
+                    this.ws.activate(i);
+                    if ev.click_count() >= 2 {
+                        this.ws.pin_tab(i);
+                    }
+                    this.sync_diff(cx);
+                }))
+                .on_drag(DraggedTab { ix: i, title: t.title() }, |d, _, _, cx| cx.new(|_| d.clone()))
+                .drag_over::<DraggedTab>(|s, _, _, _| s.bg(c(HOVER)))
+                .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| {
+                    this.ws.move_tab(d.ix, i);
+                    this.activate_tab(i, cx);
+                }))
+                .child(style::file_icon(&name))
+                .child(div().when(t.preview, |el| el.italic()).child(t.title()))
+                .child(close)
+                .context_menu(move |menu, _, _| tab_menu(menu, &weak, i, preview))
+        });
+        let tabs: Vec<_> = tabs.collect();
+        h_flex()
+            .id("tabs")
+            .h(px(36.))
+            .flex_none()
+            .bg(c(SIDE))
+            .overflow_x_scroll()
+            .children(tabs)
+            // dropped past the last tab: it goes last
+            .on_drop(cx.listener(|this, d: &DraggedTab, _, cx| {
+                let last = this.ws.tabs.len() - 1;
+                this.ws.move_tab(d.ix, last);
+                this.activate_tab(last, cx);
+            }))
+    }
+
+    /// The row under the tabs: where the tab's file is, and the diff tools.
+    pub(crate) fn crumbs(&self, active: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let section_name = self.ws.active_section().map(|s| s.name.clone());
+        let path = match (&self.ws.tabs[active].kind, self.ws.tabs[active].path()) {
+            (TabKind::Diff(d), _) => section_name.into_iter().chain([d.source.path.clone()]).collect::<Vec<_>>().join("/"),
+            (_, path) => {
+                let path = path.unwrap_or(std::path::Path::new(""));
+                path.strip_prefix(&self.ws.root).unwrap_or(path).display().to_string()
+            }
+        };
+        let preview = match &self.ws.tabs[active].kind {
+            TabKind::File(f) if f.is_markdown() => Some(f),
+            _ => None,
+        }
+        .map(|f| {
+            Button::new("toggle-preview")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Eye)
+                .label("Preview")
+                .selected(f.rendered)
+                .tooltip("Toggle Preview (⇧⌘V)")
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_preview(&TogglePreview, window, cx)))
+        });
+        let path = path.split('/').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ›  ");
+        let tools = self.ws.tabs[active].diff().map(|diff| {
+            let file = diff.source.repo.join(&diff.source.path);
+            let mode = |id: &'static str, label: &'static str, split: bool| {
+                Button::new(id).ghost().xsmall().label(label).selected(workspace::side_by_side(self.ws.split, self.diff_width.get()) == split).on_click(cx.listener(move |this, _, _, cx| {
+                    this.ws.split = split;
+                    this.sync_diff(cx);
+                }))
+            };
+            let step = |id: &'static str, icon, tip_text: &'static str, forward: bool| {
+                Button::new(id).ghost().xsmall().icon(icon).tooltip(tip_text).on_click(cx.listener(move |this, _, w, cx| this.step_change(forward, w, cx)))
+            };
+            h_flex()
+                .flex_none()
+                .gap(px(8.))
+                .child(step("previous-change", IconName::ArrowUp, "Previous Change (⇧⌥F5)", false))
+                .child(step("next-change", IconName::ArrowDown, "Next Change (⌥F5)", true))
+                .child(
+                    Button::new("open-file")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ExternalLink)
+                        .label("Open File")
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_path(file.clone(), None, false, cx))),
+                )
+                .child(
+                    h_flex()
+                        .p(px(1.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(c(SIDE))
+                        .child(mode("inline", "Inline", false))
+                        .child(mode("split", "Side by side", true)),
+                )
+        });
+        h_flex()
+            .h(px(30.))
+            .flex_none()
+            .pl(px(14.))
+            .pr(px(10.))
+            .gap(px(4.))
+            .text_size(px(12.))
+            .text_color(c(FG_DIM))
+            .border_b_1()
+            .border_color(c(LINE_SOFT))
+            .child(div().flex_1().min_w_0().truncate().child(path))
+            .children(preview)
+            .children(tools)
+    }
+}
+
+/// An image tab: the picture fitted to the tab, never above 100%, over a checkerboard showing transparency.
+fn image_view(tab: &workspace::ImageTab) -> AnyElement {
+    let natural = tab.info.as_ref().and_then(|i| i.size);
+    let checker = canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let Some((w, h)) = natural.filter(|&(w, h)| w > 0 && h > 0) else { return };
+        // the rect `ObjectFit::ScaleDown` draws the image in
+        let (w, h) = (w as f32, h as f32);
+        let scale = (bounds.size.width.as_f32() / w).min(bounds.size.height.as_f32() / h).min(1.);
+        let (w, h) = (w * scale, h * scale);
+        let image = Bounds::new(bounds.center() - point(px(w / 2.), px(h / 2.)), size(px(w), px(h)));
+        window.paint_quad(fill(image, rgb(0x2a2a2a)));
+        let cell = 8.;
+        let (cols, rows) = ((w / cell).ceil() as usize, (h / cell).ceil() as usize);
+        for (x, y) in (0..rows).flat_map(|y| (0..cols).map(move |x| (x, y))).filter(|(x, y)| (x + y) % 2 == 0) {
+            let origin = image.origin + point(px(x as f32 * cell), px(y as f32 * cell));
+            let cell = size(px(cell).min(image.right() - origin.x), px(cell).min(image.bottom() - origin.y));
+            window.paint_quad(fill(Bounds::new(origin, cell), rgb(0x3a3a3a)));
+        }
+    });
+    let missing = || div().text_color(c(FG_FAINT)).child("Cannot show this image.").into_any_element();
+    div()
+        .flex_1()
+        .min_h_0()
+        .p(px(16.))
+        .child(
+            div()
+                .relative()
+                .size_full()
+                .child(checker.absolute().top_0().left_0().size_full())
+                .child(img(tab.path.clone()).size_full().object_fit(ObjectFit::ScaleDown).with_fallback(missing)),
+        )
+        .into_any_element()
+}
+
+/// A Markdown tab's preview: its current text, saved or not. Links open in the browser (TextView's default).
+fn markdown_view(f: &workspace::FileTab, active: usize) -> AnyElement {
+    let dir = f.path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+    let md = TextView::markdown(("markdown", active), f.text.clone())
+        .image_source(move |uri| local_image(&dir, uri))
+        .selectable(true)
+        .scrollable(true)
+        .size_full();
+    div().flex_1().min_h_0().px(px(24.)).py(px(16.)).child(md).into_any_element()
+}
+
+/// Where a Markdown preview finds an image: web and data URLs as they are, anything else relative to the file.
+fn local_image(dir: &std::path::Path, uri: &SharedUri) -> ImageSource {
+    let url = uri.as_ref();
+    match url.strip_prefix("file://") {
+        Some(path) => PathBuf::from(path).into(),
+        // shortcut: no percent-decoding (`my%20pic.png` is not found) and data: URLs do not load; handle them if they show up
+        None if url.contains("://") || url.starts_with("data:") => uri.clone().into(),
+        None => dir.join(url).into(),
+    }
+}
+
+/// A tab's right-click menu, as VS Code's; the keys shown are those of the same commands on the active tab.
+fn tab_menu(menu: PopupMenu, weak: &WeakEntity<Antler>, i: usize, preview: bool) -> PopupMenu {
+    let item = |label, action: Box<dyn Action>, f: fn(&mut Antler, usize, &mut Window, &mut Context<Antler>)| {
+        menu_item(weak, label, move |t, w, cx| f(t, i, w, cx)).action(action)
+    };
+    menu.item(item("Close", Box::new(CloseTab), |t, i, w, cx| t.request_close(i, w, cx)))
+        .item(item("Close Others", Box::new(CloseOtherTabs), |t, i, w, cx| t.close_scope(i, CloseScope::Others, w, cx)))
+        .item(item("Close to the Right", Box::new(CloseTabsToTheRight), |t, i, w, cx| t.close_scope(i, CloseScope::Right, w, cx)))
+        .item(item("Close Saved", Box::new(CloseSavedTabs), |t, i, w, cx| t.close_scope(i, CloseScope::Saved, w, cx)))
+        .item(item("Close All", Box::new(CloseAllTabs), |t, i, w, cx| t.close_scope(i, CloseScope::All, w, cx)))
+        .separator()
+        .item(item("Copy Path", Box::new(CopyTabPath), |t, i, _, cx| t.copy_tab_path(i, false, cx)))
+        .item(item("Copy Relative Path", Box::new(CopyRelativeTabPath), |t, i, _, cx| t.copy_tab_path(i, true, cx)))
+        .separator()
+        .item(item("Reveal in Finder", Box::new(RevealTabInFinder), |t, i, _, cx| cx.reveal_path(&t.tab_file(i))))
+        .item(item("Reveal in Explorer View", Box::new(RevealTabInExplorer), |t, i, w, cx| t.reveal_in_explorer(t.tab_file(i), w, cx)))
+        .separator()
+        .item(item("Keep Open", Box::new(KeepTabOpen), |t, i, _, cx| t.keep_tab_open(i, cx)).disabled(!preview))
+}
