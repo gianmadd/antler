@@ -90,7 +90,7 @@ pub struct Settings {
     /// Size of the UI text.
     #[serde(rename = "antler.uiFontSize")]
     pub ui_font_size: f32,
-    /// "all": a start without a folder reopens the last one.
+    /// "all": the windows open at the last quit come back; "none": a start opens one empty window.
     #[serde(rename = "window.restoreWindows")]
     pub restore_windows: RestoreWindows,
 }
