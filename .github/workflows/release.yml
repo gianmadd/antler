@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and upload the zip as an artifact only; no release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "${GITHUB_REF_NAME}" != "v$version" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Metal Toolchain
+        run: |
+          if ! xcrun metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Bundle
+        run: scripts/bundle.sh --zip
+
+      - name: Upload zip (dry run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: antler-zip
+          path: target/bundle/Antler-*-arm64.zip
+
+      - name: Create release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" target/bundle/Antler-*-arm64.zip --generate-notes

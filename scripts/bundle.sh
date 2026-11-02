@@ -1,16 +1,19 @@
 #!/bin/bash
 # Builds target/bundle/Antler.app (release binary, icon, ad-hoc signature).
 # --install: also copies it to /Applications and installs the `antler` command in ~/.local/bin.
+# --zip: also creates target/bundle/Antler-<version>-arm64.zip (ditto keeps signature and attributes).
 # --yes: replaces an existing /Applications/Antler.app without asking.
 set -euo pipefail
 
 install=false
 yes=false
+zip=false
 for arg in "$@"; do
     case $arg in
         --install) install=true ;;
         --yes) yes=true ;;
-        *) echo "usage: $0 [--install] [--yes]" >&2; exit 2 ;;
+        --zip) zip=true ;;
+        *) echo "usage: $0 [--install] [--zip] [--yes]" >&2; exit 2 ;;
     esac
 done
 
@@ -22,6 +25,7 @@ app=target/bundle/Antler.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/antler "$app/Contents/MacOS/antler"
+install -m 755 scripts/antler "$app/Contents/Resources/antler" # the cask installs it as the `antler` command
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -55,6 +59,11 @@ PLIST
 
 codesign --force --deep --sign - "$app"
 echo "Built $app ($version)"
+
+if $zip; then
+    ditto -c -k --keepParent "$app" "target/bundle/Antler-$version-arm64.zip"
+    echo "Zipped target/bundle/Antler-$version-arm64.zip"
+fi
 
 $install || exit 0
 
