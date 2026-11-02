@@ -12,10 +12,11 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::ports::ListeningPort;
 use crate::search::{FileMatches, LineMatch, Query, Results};
 
 /// Bumped on any change a different version could not read; the client refuses a server with another one.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 const MAX_HEADER: u32 = 64 << 20;
 const MAX_BODY: u32 = 1 << 30;
@@ -65,8 +66,15 @@ pub enum Req {
     Search { root: String, repos: Vec<String>, query: Query, limit: usize, exclude: Vec<String> },
     /// Answered by `Ok`, then `Event`s with this id.
     Watch { root: String },
+    /// Answered by `Ok`, then `Ports` (the whole list) with this id when it changes, once at the start; until the connection ends.
+    WatchPorts,
+    /// A stream to `host:port` as the host sees it (a forwarded port): answered by `Ok` or `Err`; then the server
+    /// sends `Data` and finally `Closed` with this id. `Cancel { target }` closes it.
+    Open { host: String, port: u16 },
+    /// Bytes (the body) for the stream `target`, not answered. Handled in order by the reader, like `Cancel`.
+    Data { target: u64 },
     Git { repo: String, args: Vec<String>, stdin: Option<String>, envs: Vec<(String, String)> },
-    /// Stops the `Search` or the `Watch` that was sent with id `target`. Not answered.
+    /// Stops the `Search`, the `Watch` or the stream that was sent with id `target`. Not answered.
     Cancel { target: u64 },
 }
 
@@ -86,6 +94,11 @@ pub enum Res {
     Results(WireResults),
     Text { text: String },
     Event { path: String },
+    Ports { ports: Vec<ListeningPort> },
+    /// Bytes of a stream (the body).
+    Data,
+    /// The host's side of a stream ended.
+    Closed,
     /// `kind` is an `io::ErrorKind` name (see `kind_name`), empty for the errors that are plain text.
     Err { kind: String, msg: String },
 }
@@ -193,6 +206,21 @@ mod tests {
         assert!(read_frame::<_, ReqFrame>(&mut r).unwrap().is_none());
         // the header is plain JSON a person can read in a captured stream
         assert!(String::from_utf8_lossy(&buf).contains(r#"{"id":7,"req":{"op":"write","path":"/a b"}}"#));
+    }
+
+    #[test]
+    fn stream_frames_round_trip() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &ReqFrame { id: 5, req: Req::Open { host: "localhost".into(), port: 3000 } }, &[]).unwrap();
+        write_frame(&mut buf, &ReqFrame { id: 6, req: Req::Data { target: 5 } }, b"GET /").unwrap();
+        write_frame(&mut buf, &ResFrame { id: 5, res: Res::Ports { ports: vec![ListeningPort { port: 3000, pid: Some(9), process: "node".into() }] } }, &[]).unwrap();
+        write_frame(&mut buf, &ResFrame { id: 5, res: Res::Closed }, &[]).unwrap();
+        let mut r = buf.as_slice();
+        assert!(matches!(read_frame::<_, ReqFrame>(&mut r).unwrap().unwrap().0.req, Req::Open { port: 3000, .. }));
+        let (f, body): (ReqFrame, _) = read_frame(&mut r).unwrap().unwrap();
+        assert!(matches!(f.req, Req::Data { target: 5 }) && body == b"GET /");
+        assert!(matches!(read_frame::<_, ResFrame>(&mut r).unwrap().unwrap().0.res, Res::Ports { ports } if ports[0].process == "node"));
+        assert!(matches!(read_frame::<_, ResFrame>(&mut r).unwrap().unwrap().0.res, Res::Closed));
     }
 
     #[test]

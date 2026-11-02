@@ -103,6 +103,12 @@ pub struct Settings {
     pub preferred_dark_color_theme: String,
     #[serde(rename = "workbench.preferredLightColorTheme")]
     pub preferred_light_color_theme: String,
+    /// Remote windows forward the ports the host starts listening on.
+    #[serde(rename = "remote.autoForwardPorts")]
+    pub remote_auto_forward_ports: bool,
+    /// Only `onAutoForward` is read of VS Code's attributes for the ports that are not configured.
+    #[serde(rename = "remote.otherPortsAttributes")]
+    pub remote_other_ports_attributes: OtherPortsAttributes,
     /// Id of a file icon theme (`vs-seti` or an installed one); `null` is no icons.
     #[serde(rename = "workbench.iconTheme")]
     pub icon_theme: Option<String>,
@@ -137,6 +143,25 @@ pub enum AutoSave {
 pub enum WordWrap {
     Off,
     On,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct OtherPortsAttributes {
+    #[serde(rename = "onAutoForward")]
+    pub on_auto_forward: OnAutoForward,
+}
+
+/// What an auto-forwarded port does (VS Code's values, `notify` by default).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OnAutoForward {
+    #[default]
+    Notify,
+    OpenBrowser,
+    Silent,
+    /// The port is not forwarded.
+    Ignore,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -178,6 +203,8 @@ impl Default for Settings {
             auto_detect_color_scheme: false,
             preferred_dark_color_theme: "Antler Dark".into(),
             preferred_light_color_theme: "Antler Light".into(),
+            remote_auto_forward_ports: true,
+            remote_other_ports_attributes: OtherPortsAttributes::default(),
             icon_theme: Some(crate::icon_themes::SETI.into()),
         }
     }
@@ -343,6 +370,15 @@ mod tests {
         assert_eq!((s.editor_font_size, s.editor_tab_size, s.editor_insert_spaces, s.editor_word_wrap), (13., 4, true, WordWrap::Off));
         assert_eq!((s.trim_trailing_whitespace, s.insert_final_newline, s.git_autofetch, s.explorer_exclude_git_ignore), (false, false, false, false));
         assert_eq!((s.git_autofetch_period, &s.restore_windows), (180, &RestoreWindows::All), "VS Code's defaults");
+    }
+
+    #[test]
+    fn port_forwarding_defaults_are_vs_codes_and_onautoforward_is_read() {
+        let (_, s, _) = run(&[], None);
+        assert!(s.remote_auto_forward_ports);
+        assert_eq!(s.remote_other_ports_attributes.on_auto_forward, OnAutoForward::Notify);
+        let (_, s, e) = run(&[], Some(r#"{"remote.autoForwardPorts": false, "remote.otherPortsAttributes": {"onAutoForward": "openBrowser", "protocol": "https"}}"#));
+        assert_eq!((e, s.remote_auto_forward_ports, s.remote_other_ports_attributes.on_auto_forward), (None, false, OnAutoForward::OpenBrowser));
     }
 
     #[test]

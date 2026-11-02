@@ -16,6 +16,7 @@ use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
+use crate::ports_view::{ForwardPort, ShowPorts, StopForwardingPort};
 use crate::remote_view::{CloseRemoteConnection, ConnectToHost};
 use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleSidebar, set_menus};
 
@@ -137,6 +138,9 @@ cmds![
     ("workbench.action.closeFolder", "Close Folder", "cmd-k f", Global, CloseFolder),
     ("remote.ssh.connect", "Connect to Host…", "", Global, ConnectToHost),
     ("workbench.action.remote.close", "Close Remote Connection", "", Global, CloseRemoteConnection),
+    ("remote.tunnel.forwardCommandPalette", "Forward a Port", "", Global, ForwardPort),
+    ("remote.tunnel.closeCommandPalette", "Stop Forwarding Port", "", Global, StopForwardingPort),
+    ("~remote.forwardedPorts.focus", "Ports: Focus on Ports View", "", Global, ShowPorts),
     ("workbench.action.closeWindow", "Close Window", "shift-cmd-w", Global, CloseWindow),
     ("antler.minimizeWindow", "Minimize", "cmd-m", Global, MinimizeWindow),
     ("antler.focusNextWindow", "Next Window", "cmd-`", Global, FocusNextWindow),

@@ -11,6 +11,7 @@ mod goto;
 mod host;
 mod goto_view;
 mod palette;
+mod ports_view;
 mod graph;
 mod graph_view;
 mod icon_themes;
@@ -320,6 +321,7 @@ impl Antler {
             // a restored Remote window that never connected still has the layout it was given
             layout: self.ws.layout_state().or_else(|| self.remote.as_ref().and_then(|r| r.layout.clone())),
             untitled: self.ws.untitled_state(),
+            forwarded: self.remote.as_ref().map(|r| r.ports.user_targets()).unwrap_or_default(),
         }
     }
 
@@ -684,6 +686,7 @@ impl Render for Antler {
             }
             Some(View::Explorer) => Some(self.explorer(cx).into_any_element()),
             Some(View::Search) => Some(self.search_view(cx).into_any_element()),
+            Some(View::Ports) => Some(self.ports_view(cx).into_any_element()),
             None => None,
         };
         let content = match side {
@@ -722,6 +725,9 @@ impl Render for Antler {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::show_search))
+            .on_action(cx.listener(Self::show_ports))
+            .on_action(cx.listener(Self::forward_a_port))
+            .on_action(cx.listener(Self::stop_forwarding_port))
             .on_action(cx.listener(Self::go_to_file))
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::go_to_line))
@@ -777,7 +783,7 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
             let c = std::sync::Arc::new(ssh::SshConnector::new(t));
             std::sync::Arc::new(antler_host::remote::Remote::lazy(std::sync::Arc::new(move || c.connect())))
         })) {
-            Ok(remote) => link = Some(RemoteWin { host, remote, status: antler_host::remote::Status::Connected, started: false, layout: None }),
+            Ok(remote) => link = Some(RemoteWin { host, remote, status: antler_host::remote::Status::Connected, started: false, layout: None, ports: Default::default(), restore: std::mem::take(&mut save.forwarded) }),
             Err(e) => {
                 error = Some(format!("Cannot reopen the window on {host}: {e}"));
                 save = WindowSave::default();

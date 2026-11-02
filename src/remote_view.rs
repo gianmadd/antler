@@ -29,6 +29,9 @@ pub(crate) struct RemoteWin {
     pub started: bool,
     /// The saved editor layout, read once the first connection is there.
     pub layout: Option<serde_json::Value>,
+    pub ports: crate::ports_view::Ports,
+    /// The ports the user had forwarded (`host:port`), forwarded again at the first connection.
+    pub restore: Vec<String>,
 }
 
 enum Stage {
@@ -36,6 +39,10 @@ enum Stage {
     /// Connecting to the host: the text says what is going on.
     Busy(String),
     Folder { remote: Arc<Remote>, host: String, dir: PathBuf, folders: Vec<String> },
+    /// Forward a Port…: the typed port or `host:port` is the one row.
+    Forward,
+    /// Stop Forwarding Port: the forwarded ports are the rows.
+    Stop,
 }
 
 /// The picker popup while it is open; `token` tells a stale answer from the current one.
@@ -84,6 +91,20 @@ impl Antler {
     pub(crate) fn close_remote_connection(&mut self, _: &CloseRemoteConnection, window: &mut Window, cx: &mut Context<Self>) {
         if self.remote.is_some() && self.request_window_close(window, cx) {
             window.remove_window();
+        }
+    }
+
+    /// Forward a Port…: asks for a port or `host:port` of the host.
+    pub(crate) fn forward_a_port(&mut self, _: &crate::ports_view::ForwardPort, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            self.open_picker(Stage::Forward, window, cx);
+        }
+    }
+
+    /// Stop Forwarding Port: pick one of the forwarded ports.
+    pub(crate) fn stop_forwarding_port(&mut self, _: &crate::ports_view::StopForwardingPort, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote.as_ref().is_some_and(|r| !r.ports.entries.is_empty()) {
+            self.open_picker(Stage::Stop, window, cx);
         }
     }
 
@@ -174,6 +195,16 @@ impl Antler {
         let query = p.state.read(cx).query(cx).to_string();
         match &p.stage {
             Stage::Busy(_) => {}
+            Stage::Forward => {
+                if let Some((host, port)) = crate::ports_view::parse_target(&query) {
+                    self.close_picker(window, cx);
+                    self.forward_port(&host, port, true, window, cx);
+                }
+            }
+            Stage::Stop => {
+                self.close_picker(window, cx);
+                self.stop_forwarding(row, cx);
+            }
             Stage::Hosts(hosts) => {
                 if let Some((Row::Host(h), _)) = host_rows(hosts, &query).into_iter().nth(row) {
                     self.begin_connect(h, window, cx);
@@ -216,6 +247,11 @@ impl Antler {
         let (placeholder, items): (&str, Vec<CommandItem>) = match &p.stage {
             Stage::Hosts(hosts) => ("Select a host from ssh_config or type user@host[:port]", host_rows(hosts, &query).into_iter().map(|(_, l)| CommandItem::new().label(l)).collect()),
             Stage::Busy(text) => ("", vec![CommandItem::new().label(text.clone())]),
+            Stage::Forward => {
+                let label = crate::ports_view::parse_target(&query).map_or("Type a port or host:port, then press Enter".to_string(), |(h, p)| format!("Forward {h}:{p}"));
+                ("Port number or address (e.g. 3000 or 10.0.0.5:3000)", vec![CommandItem::new().label(label)])
+            }
+            Stage::Stop => ("Select the port to stop forwarding", self.remote.iter().flat_map(|r| r.ports.entries.iter()).map(|e| CommandItem::new().label(format!("{}:{} → localhost:{}", e.host, e.port, e.local))).collect()),
             Stage::Folder { dir, folders, .. } => ("Select the folder to open", folder_rows(dir, folders, &query).into_iter().map(|(_, l)| CommandItem::new().label(l)).collect()),
         };
         let this = cx.entity().downgrade();
@@ -273,6 +309,7 @@ impl Antler {
                         self.load_tab(ix, cx);
                     }
                     self.watch(window, cx);
+                    self.start_ports(window, cx);
                 }
                 self.refresh(window, cx); // anything may have changed while it was away; the watches are back
             }
