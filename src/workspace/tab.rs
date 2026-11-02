@@ -772,6 +772,20 @@ impl Workspace {
             }
             Op::Rename { from, to } => {
                 for tab in &mut self.tabs {
+                    // Changes/Staged diffs follow the working file; a commit's or Compare's snapshot stays
+                    if let TabKind::Diff(d) = &mut tab.kind {
+                        let src = &mut d.source;
+                        if !src.read_only() {
+                            if let Ok(rest) = src.repo.strip_prefix(&from) {
+                                src.repo = to.join(rest); // the repo folder itself was renamed
+                            } else if let Ok(rest) = src.repo.join(&src.path).strip_prefix(&from) {
+                                // shortcut: a file moved into another repo is not re-homed, only moves within its repo
+                                if let Ok(rel) = to.join(rest).strip_prefix(&src.repo) {
+                                    src.path = rel.to_string_lossy().into_owned();
+                                }
+                            }
+                        }
+                    }
                     let path = match &mut tab.kind {
                         TabKind::Image(ImageTab { path, .. }) => path,
                         _ => match tab.file_mut() {
@@ -1340,6 +1354,23 @@ mod tests {
         ws.edit(0, "new\n".into());
         assert!(ws.save_now(0), "{:?}", ws.last_error);
         assert!(!root.join("a.txt").exists(), "the old path is not written again");
+    }
+
+    #[test]
+    fn renaming_a_file_or_its_folder_moves_its_changes_and_staged_diffs_but_not_a_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (mut ws, _) = editable_diff(root);
+        git(root, &["add", "a.txt"]);
+        ws.refresh();
+        let staged = ws.open_file(0, true, "a.txt", true);
+        ws.set_diff(&staged, staged.load());
+        let commit = DiffSource { commit: Some("abc1234".into()), ..staged.clone() };
+        ws.show_tab(None, || TabKind::Diff(DiffTab::new(commit.clone())), true);
+        ws.perform(Op::Rename { from: root.join("a.txt"), to: root.join("c.txt") });
+        assert_eq!(ws.tabs[0].diff().unwrap().source.path, "c.txt");
+        assert_eq!(ws.tabs[1].diff().unwrap().source.path, "c.txt");
+        assert_eq!(ws.tabs[2].diff().unwrap().source.path, "a.txt");
     }
 
     #[test]
