@@ -201,13 +201,13 @@ fn paint(
     let slider = Bounds::new(point(bounds.left(), bounds.top() + px(slider_top)), size(bounds.size.width, px(slider_h)));
     let pointer = window.mouse_position();
     let color = match (grab.get(), slider.contains(&pointer)) {
-        (Some(_), _) => Some(0xbfbfbf33),
+        (Some(_), _) => Some(0.2),
         _ if !hitbox.is_hovered(window) => None,
-        (None, true) => Some(0x64646459),
-        (None, false) => Some(0x79797933),
+        (None, true) => Some(0.35),
+        (None, false) => Some(0.2),
     };
-    if let Some(color) = color {
-        window.paint_quad(fill(slider, rgba(color)));
+    if let Some(alpha) = color {
+        window.paint_quad(fill(slider, c(FG).opacity(alpha)));
     }
 
     let (editor2, grab2, lines2) = (editor.clone(), grab.clone(), lines.clone());

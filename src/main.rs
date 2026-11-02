@@ -30,6 +30,8 @@ mod state;
 mod style;
 mod sync_view;
 mod tabs;
+mod theme_view;
+mod themes;
 mod update;
 mod windows;
 #[cfg(test)]
@@ -188,6 +190,8 @@ struct Antler {
     git_picked: Option<(String, PathBuf, String)>,
     /// The Cmd+P popup while it is open.
     goto: Option<goto_view::GoToPopup>,
+    /// The Color Theme picker while it is open.
+    theme_popup: Option<theme_view::ThemePopup>,
     /// The ids of the commands run from the Command palette, newest first.
     palette_recent: Vec<String>,
     /// The stash message box or picker while it is open.
@@ -209,6 +213,8 @@ struct Antler {
     /// The Keyboard Shortcuts tab: its search field, the chosen row and the key capture.
     shortcuts: keybindings_view::State,
     _settings_sub: Subscription,
+    /// With `window.autoDetectColorScheme`, the theme follows the macOS appearance.
+    _appearance_sub: Subscription,
 }
 
 impl Antler {
@@ -260,6 +266,7 @@ impl Antler {
             git_focus: cx.focus_handle(),
             git_picked: None,
             goto: None,
+            theme_popup: None,
             palette_recent: ws_recent,
             stash: None,
             switcher: None,
@@ -271,6 +278,7 @@ impl Antler {
             applied: initial,
             shortcuts: keybindings_view::State::new(window, cx),
             _settings_sub: cx.observe_global_in::<settings::Current>(window, |this, window, cx| this.apply_settings(window, cx)),
+            _appearance_sub: window.observe_window_appearance(|window, cx| style::apply(window.appearance() == WindowAppearance::Dark, cx)),
         };
         this.sync_diff(cx); // the first group's diff view
         if this.ws.has_folder() {
@@ -676,6 +684,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::go_to_file))
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::go_to_line))
+            .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::toggle_minimap))
             .on_action(cx.listener(Self::toggle_render_characters))
             .map(|el| Self::tab_actions(el, cx))
@@ -697,6 +706,7 @@ impl Render for Antler {
             })
             .child(status)
             .children(self.go_to_popup(cx))
+            .children(self.theme_popup(cx))
             .children(self.stash_popup(cx))
             .children(self.recent_popup(cx))
             .children(self.branch_popup(cx))
@@ -807,9 +817,10 @@ fn main() {
     });
     app.run(move |cx| {
         gpui_kit::init(cx);
-        style::apply(cx);
-        gpui_kit::component::Theme::update(cx, |t| t.font_size = px(s.ui_font_size));
         cx.set_global(settings::Current(s));
+        style::apply(cx.window_appearance() == WindowAppearance::Dark, cx);
+        // a theme change in settings.json (or the picker's write) reaches every window at once; the system appearance matters with autoDetectColorScheme
+        cx.observe_global::<settings::Current>(|cx| style::apply(cx.window_appearance() == WindowAppearance::Dark, cx)).detach();
         if !file.as_os_str().is_empty() {
             settings::watch(cx, file);
         }

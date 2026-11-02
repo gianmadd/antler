@@ -93,6 +93,16 @@ pub struct Settings {
     /// "all": the windows open at the last quit come back; "none": a start opens one empty window.
     #[serde(rename = "window.restoreWindows")]
     pub restore_windows: RestoreWindows,
+    /// Name of a built-in theme (see `themes`); an unknown name gives Antler Dark.
+    #[serde(rename = "workbench.colorTheme")]
+    pub color_theme: String,
+    /// Follow the macOS appearance with the two preferred themes below.
+    #[serde(rename = "window.autoDetectColorScheme")]
+    pub auto_detect_color_scheme: bool,
+    #[serde(rename = "workbench.preferredDarkColorTheme")]
+    pub preferred_dark_color_theme: String,
+    #[serde(rename = "workbench.preferredLightColorTheme")]
+    pub preferred_light_color_theme: String,
 }
 
 fn exclude<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<String, bool>, D::Error> {
@@ -161,6 +171,10 @@ impl Default for Settings {
             confirm_discard: true,
             ui_font_size: 14.,
             restore_windows: RestoreWindows::All,
+            color_theme: crate::themes::DEFAULT.into(),
+            auto_detect_color_scheme: false,
+            preferred_dark_color_theme: "Antler Dark".into(),
+            preferred_light_color_theme: "Antler Light".into(),
         }
     }
 }
@@ -379,6 +393,16 @@ mod tests {
         assert_eq!(run(&[], None).1.update_mode, UpdateMode::Default);
         assert_eq!(run(&[], Some(r#"{"update.mode": "none"}"#)).1.update_mode, UpdateMode::None);
         assert!(run(&[], Some(r#"{"update.mode": "manual"}"#)).2.is_some(), "unknown modes are an error, defaults apply");
+    }
+
+    #[test]
+    fn theme_settings_are_read() {
+        let (_, s, _) = run(&[], None);
+        assert_eq!((s.color_theme.as_str(), s.auto_detect_color_scheme), ("Antler Dark", false), "VS Code's defaults");
+        let json = r#"{"workbench.colorTheme": "Antler Light", "window.autoDetectColorScheme": true, "workbench.preferredDarkColorTheme": "Antler Dark Classic"}"#;
+        let (_, s, e) = run(&[], Some(json));
+        assert_eq!(e, None);
+        assert_eq!((s.color_theme.as_str(), s.auto_detect_color_scheme, s.preferred_dark_color_theme.as_str()), ("Antler Light", true, "Antler Dark Classic"));
     }
 
     #[test]

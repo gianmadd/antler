@@ -20,7 +20,7 @@ const META_SIZE: f32 = 12.5;
 
 /// Lane colours (accent, purple, green), then a few more.
 fn lane_color(lane: usize) -> Hsla {
-    c([ACCENT, 0xb585e0, 0x7cc68f, 0x5b9be0, 0xe07b53, 0x6fc2d6][lane % 6])
+    c([ACCENT, style::LANE1, style::LANE2, style::LANE3, style::LANE4, style::LANE5][lane % 6])
 }
 
 /// The lane lines of one list line: `row`'s segments (curves where a lane moves) and its dot, or (`dot = false`)
