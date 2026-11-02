@@ -191,13 +191,14 @@ impl Antler {
     /// Cmd+D, Cmd+Shift+L, Shift+Alt+I: extra cursors through `add_selection` (the editor has no getter for them all,
     /// so `self.cursors` remembers what Cmd+D added). `f` gets the text, the session so far and the editor's
     /// selection, and returns the selections to set (`true`: the first one replaces all) or to add.
-    fn multi_cursor(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&str, &[std::ops::Range<usize>], std::ops::Range<usize>) -> (bool, Vec<std::ops::Range<usize>>)) {
+    fn multi_cursor(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&str, &[std::ops::Range<usize>], std::ops::Range<usize>, &mut bool) -> (bool, Vec<std::ops::Range<usize>>)) {
         let Some((editor, _)) = self.active_editor() else { return };
         let cursors = std::mem::take(&mut self.cursors);
+        let mut word = self.cursors_word;
         self.cursors = editor.update(cx, |e, cx| {
             let sel = e.selected_range();
-            let session = if cursors.contains(&sel) { cursors } else { vec![] };
-            let (replace, new) = f(&e.value(), &session, sel);
+            let session = if cursors.contains(&sel) { cursors } else { word = false; vec![] };
+            let (replace, new) = f(&e.value(), &session, sel, &mut word);
             let mut all = if replace { vec![] } else { session };
             for r in new {
                 if all.is_empty() {
@@ -211,6 +212,7 @@ impl Antler {
             }
             all
         });
+        self.cursors_word = word;
     }
 
     /// Cmd+= / Cmd+- / Cmd+0: the editors' font size, one pixel a step; not saved.
@@ -244,16 +246,19 @@ impl Antler {
                 }
             }))
             .on_action(cx.listener(|this, _: &AddNextMatch, _, cx| {
-                this.multi_cursor(cx, |t, session, sel| match session.last() {
-                    Some(last) => (false, editing::next_occurrence(t, last.clone(), last.end).into_iter().collect()),
+                this.multi_cursor(cx, |t, session, sel, word| match session.last() {
+                    Some(last) => (false, editing::next_occurrence(t, last.clone(), last.end, *word).into_iter().collect()),
                     // first press: an empty selection becomes its word; a selection stays and gets the next match
-                    None if sel.is_empty() => (true, editing::next_occurrence(t, sel.clone(), 0).into_iter().collect()),
-                    None => (true, std::iter::once(sel.clone()).chain(editing::next_occurrence(t, sel.clone(), sel.end)).collect()),
+                    None if sel.is_empty() => {
+                        *word = true;
+                        (true, editing::next_occurrence(t, sel.clone(), 0, true).into_iter().collect())
+                    }
+                    None => (true, std::iter::once(sel.clone()).chain(editing::next_occurrence(t, sel.clone(), sel.end, false)).collect()),
                 })
             }))
-            .on_action(cx.listener(|this, _: &SelectAllMatches, _, cx| this.multi_cursor(cx, |t, _, sel| (true, editing::all_occurrences(t, sel)))))
+            .on_action(cx.listener(|this, _: &SelectAllMatches, _, cx| this.multi_cursor(cx, |t, _, sel, _| (true, editing::all_occurrences(t, sel)))))
             .on_action(cx.listener(|this, _: &CursorsAtLineEnds, _, cx| {
-                this.multi_cursor(cx, |t, _, sel| (true, editing::line_end_cursors(t, sel).into_iter().map(|o| o..o).collect()))
+                this.multi_cursor(cx, |t, _, sel, _| (true, editing::line_end_cursors(t, sel).into_iter().map(|o| o..o).collect()))
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(1.), cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-1.), cx)))

@@ -344,13 +344,14 @@ fn word_at(t: &str, o: usize) -> Option<Range<usize>> {
 /// Matches of the text selected by `s`, in order. VS Code's rules: an empty selection searches its word, whole word
 /// and case-sensitive; a selection searches its text anywhere, ignoring case (the Find widget's defaults).
 /// shortcut: case folding is ASCII only, to keep byte offsets; upgrade if non-ASCII matches matter.
-fn matches(t: &str, s: &Range<usize>) -> Vec<Range<usize>> {
+/// `word` forces the whole-word, case-sensitive search on a non-empty selection (Cmd+D after it started on a word).
+fn matches(t: &str, s: &Range<usize>, word: bool) -> Vec<Range<usize>> {
     let (needle, whole) = match s.is_empty() {
         true => match word_at(t, s.start) {
             Some(w) => (t[w].to_string(), true),
             None => return vec![],
         },
-        false => (t[s.clone()].to_string(), false),
+        false => (t[s.clone()].to_string(), word),
     };
     let (hay, needle) = if whole { (t.to_string(), needle) } else { (t.to_ascii_lowercase(), needle.to_ascii_lowercase()) };
     let ok = |m: &Range<usize>| !whole || (!t[..m.start].ends_with(is_word) && !t[m.end..].starts_with(is_word));
@@ -366,17 +367,18 @@ fn matches(t: &str, s: &Range<usize>) -> Vec<Range<usize>> {
 
 /// Cmd+D: what to add. An empty selection first becomes its word; otherwise the first match starting at or after
 /// `from` (the end of the last added selection), wrapping around to the top. `None`: no word or no match.
-pub fn next_occurrence(t: &str, s: Range<usize>, from: usize) -> Option<Range<usize>> {
+/// `word`: the session started on a word, so matches stay whole words with the case.
+pub fn next_occurrence(t: &str, s: Range<usize>, from: usize, word: bool) -> Option<Range<usize>> {
     if s.is_empty() {
         return word_at(t, s.start);
     }
-    let all = matches(t, &s);
+    let all = matches(t, &s, word);
     all.iter().find(|m| m.start >= from).or(all.first()).cloned()
 }
 
 /// Cmd+Shift+L: every match of the selection (or of the word at an empty one).
 pub fn all_occurrences(t: &str, s: Range<usize>) -> Vec<Range<usize>> {
-    matches(t, &s)
+    matches(t, &s, false)
 }
 
 /// Shift+Alt+I: a cursor at the end of every line of a selection; the last line's at the selection's end, unless
@@ -585,17 +587,19 @@ mod tests {
     fn next_occurrence_rules() {
         let t = "foo bar Foo foobar foo";
         // empty selection: the word under (or touching) the cursor
-        assert_eq!(next_occurrence(t, 1..1, 0), Some(0..3));
-        assert_eq!(next_occurrence(t, 3..3, 0), Some(0..3));
-        assert_eq!(next_occurrence("a  b", 2..2, 0), None);
+        assert_eq!(next_occurrence(t, 1..1, 0, false), Some(0..3));
+        assert_eq!(next_occurrence(t, 3..3, 0, false), Some(0..3));
+        assert_eq!(next_occurrence("a  b", 2..2, 0, false), None);
         // selection: next match after `from`, ignoring case, inside words too
-        assert_eq!(next_occurrence(t, 0..3, 3), Some(8..11));
-        assert_eq!(next_occurrence(t, 0..3, 11), Some(12..15));
-        assert_eq!(next_occurrence(t, 0..3, 15), Some(19..22));
+        assert_eq!(next_occurrence(t, 0..3, 3, false), Some(8..11));
+        assert_eq!(next_occurrence(t, 0..3, 11, false), Some(12..15));
+        assert_eq!(next_occurrence(t, 0..3, 15, false), Some(19..22));
         // wrap around
-        assert_eq!(next_occurrence(t, 19..22, 22), Some(0..3));
-        assert_eq!(next_occurrence("é x é", 0..2, 2), Some(5..7));
-        assert_eq!(next_occurrence("abc", 0..3, 3), Some(0..3)); // only match: itself
+        assert_eq!(next_occurrence(t, 19..22, 22, false), Some(0..3));
+        assert_eq!(next_occurrence("é x é", 0..2, 2, false), Some(5..7));
+        assert_eq!(next_occurrence("abc", 0..3, 3, false), Some(0..3)); // only match: itself
+        // a session that started on a word: whole words, case-sensitive
+        assert_eq!(next_occurrence(t, 0..3, 3, true), Some(19..22));
     }
 
     #[test]
