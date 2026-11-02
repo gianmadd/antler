@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: [issue-12-release] # TEMP: test run before the workflow exists on main
   workflow_dispatch:
     inputs:
       dry_run:
@@ -50,14 +51,14 @@ jobs:
         run: scripts/bundle.sh --zip
 
       - name: Upload zip (dry run)
-        if: github.event_name == 'workflow_dispatch'
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: antler-zip
           path: target/bundle/Antler-*-arm64.zip
 
       - name: Create release
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release create "$GITHUB_REF_NAME" target/bundle/Antler-*-arm64.zip --generate-notes
