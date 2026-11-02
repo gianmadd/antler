@@ -156,8 +156,17 @@ impl Antler {
                 (editor, [sub, moved])
             });
             if editor.read(cx).value().as_ref() != f.text {
-                let text = f.text.clone();
-                editor.update(cx, |e, cx| e.set_value(text, window, cx));
+                let (text, dirty) = (f.text.clone(), f.is_dirty());
+                editor.update(cx, |e, cx| {
+                    if dirty {
+                        // an edit of the model (Search replace) on unsaved text: undoable, like VS Code
+                        let scroll = e.scroll_offset();
+                        e.replace_all(text, window, cx);
+                        e.set_scroll_offset(scroll, cx);
+                    } else {
+                        e.set_value(text, window, cx);
+                    }
+                });
                 self.minimaps.entry(f.path.clone()).or_default().version += 1;
             }
             if let Some(line) = f.goto.take() {
