@@ -26,7 +26,8 @@ cargo test
 # the first `version = ` line of Cargo.toml is the package's
 run sed -i '' "1,/^version = /s/^version = .*/version = \"$version\"/" Cargo.toml
 run cargo update -p antler --precise "$version"
-run git commit -am "Release $tag"
+# the first release can already carry this version: nothing to commit then
+git diff --quiet || run git commit -am "Release $tag"
 run git tag "$tag"
 run git push origin main "$tag"
 

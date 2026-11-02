@@ -5,7 +5,7 @@ set -euo pipefail
 
 app=/Applications/Antler.app
 if [[ ! -d $app ]]; then
-    echo "antler: $app is not installed; run scripts/bundle.sh --install from the Antler repo" >&2
+    echo "antler: $app is not installed; install it with `brew install --cask gianmadd/tap/antler`" >&2
     exit 1
 fi
 
