@@ -42,6 +42,14 @@ _Avoid_: Search panel, find in files
 The side panel with the Repository sections of all Nested repositories.
 _Avoid_: Source Control, SCM, git panel
 
+**Untitled file**:
+A file opened with no path yet ("Untitled-1"); it gets one on its first save.
+_Avoid_: New file, scratch buffer
+
+**Command palette**:
+The list of every Antler command, opened from Quick Open with `>`.
+_Avoid_: Command menu, actions list
+
 ## Changes
 
 **Hunk**:
