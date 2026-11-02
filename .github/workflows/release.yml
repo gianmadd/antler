@@ -3,7 +3,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-    branches: [issue-12-release] # TEMP: test run before the workflow exists on main
   workflow_dispatch:
     inputs:
       dry_run:
