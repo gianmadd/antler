@@ -47,6 +47,7 @@ fn exclude_json(typed: &str) -> serde_json::Value {
 }
 
 fn pages() -> Vec<SettingPage> {
+    let themes: Vec<(&'static str, &'static str)> = crate::themes::THEMES.iter().map(|t| (t.name, t.name)).collect();
     let page = |title: &'static str, items: Vec<SettingItem>| SettingPage::new(title).default_open(true).group(SettingGroup::new().items(items));
     vec![
         page(
@@ -93,9 +94,15 @@ fn pages() -> Vec<SettingPage> {
         ),
         page(
             "Window",
-            vec![choice("Restore Windows", "On start without a folder, reopen the last one.", "window.restoreWindows", &[("all", "Reopen the last folder"), ("none", "Start empty")], |s| {
+            vec![
+                choice("Color Theme", "The theme of the whole window (Cmd+K Cmd+T previews them).", "workbench.colorTheme", &themes, |s| s.color_theme.clone()),
+                on_off("Auto Detect Color Scheme", "Follow the macOS appearance with the two preferred themes below.", "window.autoDetectColorScheme", |s| s.auto_detect_color_scheme),
+                choice("Preferred Dark Color Theme", "Used with Auto Detect Color Scheme when macOS is dark.", "workbench.preferredDarkColorTheme", &themes, |s| s.preferred_dark_color_theme.clone()),
+                choice("Preferred Light Color Theme", "Used with Auto Detect Color Scheme when macOS is light.", "workbench.preferredLightColorTheme", &themes, |s| s.preferred_light_color_theme.clone()),
+                choice("Restore Windows", "On start without a folder, reopen the last one.", "window.restoreWindows", &[("all", "Reopen the last folder"), ("none", "Start empty")], |s| {
                 (if s.restore_windows == settings::RestoreWindows::All { "all" } else { "none" }).into()
-            })],
+            }),
+            ],
         ),
     ]
 }

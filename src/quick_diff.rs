@@ -14,11 +14,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::git::{self, ChangeKind};
-use crate::style::{DANGER, FG_DIM, GIT_A, LINE, RAISE, c};
+use crate::style::{DANGER, FG_DIM, GIT_A, LINE, MODIFIED, RAISE, c};
 use crate::workspace::{FileTab, TabKind};
 use crate::Antler;
 
-const MODIFIED: u32 = 0x4aa3e0;
 
 #[derive(Default)]
 pub(crate) struct QuickDiff {

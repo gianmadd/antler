@@ -1146,13 +1146,13 @@ fn image_view(tab: &workspace::ImageTab) -> AnyElement {
         let scale = (bounds.size.width.as_f32() / w).min(bounds.size.height.as_f32() / h).min(1.);
         let (w, h) = (w * scale, h * scale);
         let image = Bounds::new(bounds.center() - point(px(w / 2.), px(h / 2.)), size(px(w), px(h)));
-        window.paint_quad(fill(image, rgb(0x2a2a2a)));
+        window.paint_quad(fill(image, c(style::CHECK_A)));
         let cell = 8.;
         let (cols, rows) = ((w / cell).ceil() as usize, (h / cell).ceil() as usize);
         for (x, y) in (0..rows).flat_map(|y| (0..cols).map(move |x| (x, y))).filter(|(x, y)| (x + y) % 2 == 0) {
             let origin = image.origin + point(px(x as f32 * cell), px(y as f32 * cell));
             let cell = size(px(cell).min(image.right() - origin.x), px(cell).min(image.bottom() - origin.y));
-            window.paint_quad(fill(Bounds::new(origin, cell), rgb(0x3a3a3a)));
+            window.paint_quad(fill(Bounds::new(origin, cell), c(style::CHECK_B)));
         }
     });
     let missing = || div().text_color(c(FG_FAINT)).child("Cannot show this image.").into_any_element();
