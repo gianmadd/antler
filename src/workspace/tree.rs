@@ -347,7 +347,7 @@ impl Workspace {
             let Some(name) = from.file_name() else { continue };
             if copy {
                 let taken: Vec<_> = ops.iter().filter_map(|op| if let Op::Copy { to, .. } = op { Some(to.clone()) } else { None }).collect();
-                ops.push(Op::Copy { from: from.clone(), to: copy_target(dir, name, from.is_dir(), &taken) });
+                ops.push(Op::Copy { from: from.clone(), to: copy_target(dir, name, crate::host::at(from).metadata(from).is_ok_and(|m| m.is_dir), &taken) });
             } else if from.parent() != Some(dir) {
                 ops.push(Op::Rename { from: from.clone(), to: dir.join(name) });
             }

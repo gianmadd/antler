@@ -23,7 +23,7 @@ use crate::discovery::Repo;
 use crate::search::{Query, Results};
 
 /// What `metadata` reports; `size` and `mtime` are those of the target of a link.
-#[allow(dead_code)] // the contract has them; no caller needs is_dir or mtime yet
+#[allow(dead_code)] // the contract has them; no caller needs mtime yet
 #[derive(Debug, Clone)]
 pub struct Meta {
     pub is_dir: bool,
