@@ -137,6 +137,8 @@ pub enum View {
     Explorer,
     Git,
     Search,
+    /// Forwarded ports: Remote windows only.
+    Ports,
 }
 
 impl Workspace {

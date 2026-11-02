@@ -111,6 +111,8 @@ impl Antler {
     /// The commands the palette lists for what follows the `>`, best first, with the matched bytes of each title.
     fn palette_rows(&self, query: &str) -> Vec<(&'static keys::Cmd, Vec<Range<usize>>)> {
         let cmds = keys::palette_commands(self.active_editor().is_some());
+        let remote = self.remote.is_some();
+        let cmds: Vec<_> = cmds.into_iter().filter(|c| remote || !(c.id.starts_with("remote.tunnel.") || c.id.starts_with("~remote.") || c.id == "workbench.action.remote.close")).collect();
         let items: Vec<(&str, &str)> = cmds.iter().map(|c| (c.id, c.title)).collect();
         palette::rank(&items, query, &self.palette_recent).into_iter().map(|(i, r)| (cmds[i], r)).collect()
     }

@@ -65,6 +65,7 @@ impl Antler {
             .child(item(View::Explorer, style::files_icon(), "Explorer", "workbench.view.explorer", 0))
             .child(item(View::Git, style::git_icon(), "Git", "workbench.view.scm", count))
             .child(item(View::Search, Icon::new(IconName::Search), "Search", "workbench.view.search", 0))
+            .when(self.remote.is_some(), |el| el.child(item(View::Ports, Icon::new(IconName::Globe), "Ports", "~remote.forwardedPorts.focus", 0)))
             .child(div().flex_1())
             .child(self.manage_button(cx))
     }
@@ -157,6 +158,7 @@ impl Antler {
             .text_color(c(FG_DIM))
             .text_size(px(11.5))
             .children(self.remote_indicator(cx))
+            .children(self.ports_indicator(cx))
             .when_some(section, |el, s| {
                 let sync = self.sync_button("status-sync", s, cx);
                 let repo = s.repo.path.clone();

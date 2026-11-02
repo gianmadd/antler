@@ -17,6 +17,9 @@ pub struct WindowSave {
     pub root: PathBuf,
     #[serde(default)]
     pub layout: Option<serde_json::Value>,
+    /// A Remote window: the ports the user forwarded (`host:port`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwarded: Vec<String>,
     #[serde(default)]
     pub untitled: Vec<(String, String)>,
 }

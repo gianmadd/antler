@@ -58,6 +58,22 @@ fn icon_theme_item() -> SettingItem {
     SettingItem::new("File Icon Theme", field).description("The icons of files and folders (File Icon Theme in the Command Palette previews them).").keywords(["workbench.iconTheme"])
 }
 
+/// `remote.otherPortsAttributes`: only `onAutoForward`, kept inside the object the file has.
+fn on_auto_forward_item() -> SettingItem {
+    let options = [("notify", "Notify"), ("openBrowser", "Open Browser"), ("silent", "Silent"), ("ignore", "Ignore")].map(|(v, l)| (v.into(), l.into())).to_vec();
+    let get = |s: &Values| -> SharedString {
+        match s.remote_other_ports_attributes.on_auto_forward {
+            settings::OnAutoForward::Notify => "notify",
+            settings::OnAutoForward::OpenBrowser => "openBrowser",
+            settings::OnAutoForward::Silent => "silent",
+            settings::OnAutoForward::Ignore => "ignore",
+        }
+        .into()
+    };
+    let field = SettingField::dropdown(options, move |cx| get(&cx.global::<Current>().0), |v: SharedString, cx| put(cx, "remote.otherPortsAttributes", json!({"onAutoForward": v.as_ref() as &str}))).default_value(get(&Values::default()));
+    SettingItem::new("Other Ports: On Auto Forward", field).description("What happens to a port that was forwarded by itself: show a notification, open the browser, nothing, or do not forward it.").keywords(["remote.otherPortsAttributes", "onAutoForward"])
+}
+
 fn pages() -> Vec<SettingPage> {
     let themes: Vec<(&'static str, &'static str)> = crate::themes::all().into_iter().map(|t| (t.name, t.name)).collect();
     let page = |title: &'static str, items: Vec<SettingItem>| SettingPage::new(title).default_open(true).group(SettingGroup::new().items(items));
@@ -115,6 +131,13 @@ fn pages() -> Vec<SettingPage> {
                 choice("Restore Windows", "On start without a folder, reopen the last one.", "window.restoreWindows", &[("all", "Reopen the last folder"), ("none", "Start empty")], |s| {
                 (if s.restore_windows == settings::RestoreWindows::All { "all" } else { "none" }).into()
             }),
+            ],
+        ),
+        page(
+            "Remote",
+            vec![
+                on_off("Auto Forward Ports", "In a Remote window, forward the ports the host starts listening on to this Mac's localhost.", "remote.autoForwardPorts", |s| s.remote_auto_forward_ports),
+                on_auto_forward_item(),
             ],
         ),
     ]
