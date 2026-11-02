@@ -16,13 +16,23 @@ Built in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/g
 
 ## Install
 
-There is no downloadable release yet; build from source (requirements below):
+With Homebrew (installs `Antler.app` and the `antler` command):
+
+```sh
+brew install --cask gianmadd/tap/antler
+```
+
+Or download `Antler-<version>-arm64.zip` from the [Releases](https://github.com/gianmadd/antler/releases) page and move `Antler.app` to `/Applications`.
+
+Or build from source (requirements below):
 
 ```sh
 scripts/bundle.sh --install
 ```
 
-This builds in release mode, creates an ad-hoc signed `Antler.app`, copies it to `/Applications` (asking first if it exists; `--yes` skips the question) and installs the `antler` command in `~/.local/bin`. Re-run it to update. Without `--install` it only creates `target/bundle/Antler.app`.
+This builds in release mode, creates an ad-hoc signed `Antler.app`, copies it to `/Applications` (asking first if it exists; `--yes` skips the question) and installs the `antler` command in `~/.local/bin`. Re-run it to update. Without `--install` it only creates `target/bundle/Antler.app`; `--zip` also makes the release zip.
+
+**First launch:** Antler is not notarized yet, so macOS blocks it the first time. Open System Settings, Privacy & Security, and click "Open Anyway", or run `xattr -dr com.apple.quarantine /Applications/Antler.app`.
 
 ## Usage
 
@@ -45,7 +55,7 @@ cargo test
 
 ## Project status
 
-Young and moving fast. macOS only, for now.
+Young and moving fast. macOS on Apple Silicon only, for now. Releases are published on GitHub (`v0.x`) and are ad-hoc signed.
 
 ## Contributing
 
