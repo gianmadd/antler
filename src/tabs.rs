@@ -968,12 +968,46 @@ fn markdown_view(f: &workspace::FileTab, active: usize) -> AnyElement {
 
 /// Where a Markdown preview finds an image: web and data URLs as they are, anything else relative to the file.
 fn local_image(dir: &std::path::Path, uri: &SharedUri) -> ImageSource {
-    let url = uri.as_ref();
-    match url.strip_prefix("file://") {
-        Some(path) => PathBuf::from(path).into(),
-        // shortcut: no percent-decoding (`my%20pic.png` is not found) and data: URLs do not load; handle them if they show up
-        None if url.contains("://") || url.starts_with("data:") => uri.clone().into(),
-        None => dir.join(url).into(),
+    match local_image_path(dir, uri.as_ref()) {
+        Some(path) => path.into(),
+        // shortcut: data: URLs do not load; handle them if they show up
+        None => uri.clone().into(),
+    }
+}
+
+/// The file a local image URL points to (`%20` and the like decoded), or `None` for web and data URLs.
+fn local_image_path(dir: &std::path::Path, url: &str) -> Option<PathBuf> {
+    let path = match url.strip_prefix("file://") {
+        Some(path) => path,
+        None if url.contains("://") || url.starts_with("data:") => return None,
+        None => url,
+    };
+    let (bytes, mut out) = (path.as_bytes(), Vec::new());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => (out.push(b), i += 3),
+            (b, _) => (out.push(b), i += 1),
+        };
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&out).into_owned());
+    Some(if url.starts_with("file://") { path } else { dir.join(path) })
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::local_image_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn local_image_urls_are_percent_decoded() {
+        let dir = std::path::Path::new("/docs");
+        assert_eq!(local_image_path(dir, "my%20image.png"), Some(PathBuf::from("/docs/my image.png")));
+        assert_eq!(local_image_path(dir, "file:///a/b%20c.png"), Some(PathBuf::from("/a/b c.png")));
+        assert_eq!(local_image_path(dir, "100%.png"), Some(PathBuf::from("/docs/100%.png")), "a lone % stays");
+        assert_eq!(local_image_path(dir, "https://x/a%20b.png"), None);
+        assert_eq!(local_image_path(dir, "data:image/png;base64,AA"), None);
     }
 }
 
