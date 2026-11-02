@@ -20,6 +20,12 @@ pub fn untitled(file: &Path) -> Vec<(String, String)> {
     json.get("untitled").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
 }
 
+/// The ids of the commands run from the Command palette, newest first; a missing or broken file is none.
+pub fn recent_commands(file: &Path) -> Vec<String> {
+    let json: serde_json::Value = std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    json.get("recent_commands").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -30,5 +36,13 @@ mod tests {
         assert!(untitled(&file).is_empty());
         crate::settings::set(&file, "untitled", serde_json::json!([("Untitled-2", "x\ny")])).unwrap();
         assert_eq!(untitled(&file), [("Untitled-2".to_string(), "x\ny".to_string())]);
+    }
+
+    #[test]
+    fn recent_commands_roundtrip_through_the_state_file() {
+        let file = tempfile::tempdir().unwrap().keep().join("state.json");
+        assert!(recent_commands(&file).is_empty());
+        crate::settings::set(&file, "recent_commands", serde_json::json!(["a", "b"])).unwrap();
+        assert_eq!(recent_commands(&file), ["a", "b"]);
     }
 }

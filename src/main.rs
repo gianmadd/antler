@@ -9,6 +9,7 @@ mod git;
 mod git_panel;
 mod goto;
 mod goto_view;
+mod palette;
 mod graph;
 mod graph_view;
 mod icons;
@@ -159,6 +160,8 @@ struct Antler {
     git_picked: Option<(String, PathBuf, String)>,
     /// The Cmd+P popup while it is open.
     goto: Option<goto_view::GoToPopup>,
+    /// The ids of the commands run from the Command palette, newest first.
+    palette_recent: Vec<String>,
     /// The stash message box or picker while it is open.
     stash: Option<stash_view::StashPopup>,
     /// Ctrl+Tab's popup while Ctrl is held: the chosen row of `ws.recent_tabs()`.
@@ -202,6 +205,7 @@ impl Antler {
                 this.run_search(window, cx); // search as you type: each keystroke cancels the previous search
             }
         });
+        let ws_recent = ws.state_file.as_deref().map(state::recent_commands).unwrap_or_default();
         let mut this = Antler {
             ws,
             loading: false,
@@ -229,6 +233,7 @@ impl Antler {
             git_focus: cx.focus_handle(),
             git_picked: None,
             goto: None,
+            palette_recent: ws_recent,
             stash: None,
             switcher: None,
             branch: None,
@@ -552,6 +557,8 @@ impl Render for Antler {
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::show_search))
             .on_action(cx.listener(Self::go_to_file))
+            .on_action(cx.listener(Self::command_palette))
+            .on_action(cx.listener(Self::go_to_line))
             .on_action(cx.listener(Self::toggle_minimap))
             .on_action(cx.listener(Self::toggle_render_characters))
             .map(|el| Self::tab_actions(el, cx))

@@ -11,7 +11,7 @@ use gpui_kit::*;
 
 use crate::branch_view::CloseBranch;
 use crate::explorer::*;
-use crate::goto_view::{CloseGoToFile, GoToFile};
+use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
@@ -75,6 +75,25 @@ pub(crate) struct Cmd {
     action: fn() -> Box<dyn Action>,
 }
 
+impl Cmd {
+    pub fn action(&self) -> Box<dyn Action> {
+        (self.action)()
+    }
+}
+
+/// What the Command palette lists: each command once, minus those that cannot run from it. Commands of a
+/// text field need an active editor; the ones of the Explorer, Git view and pickers act on a selection or
+/// an open popup, so they are left out (VS Code hides commands whose precondition fails).
+pub(crate) fn palette_commands(has_editor: bool) -> Vec<&'static Cmd> {
+    let mut seen = std::collections::HashSet::new();
+    let ok = |c: &Cmd| match c.ctx {
+        Ctx::Global => true,
+        Ctx::Input | Ctx::Editor => has_editor,
+        _ => false,
+    };
+    COMMANDS.iter().filter(|c| ok(c) && seen.insert(c.id)).collect()
+}
+
 macro_rules! cmds {
     ($(($id:literal, $title:literal, $key:literal, $ctx:ident, $action:expr)),* $(,)?) => {
         pub(crate) static COMMANDS: &[Cmd] = &[$(Cmd { id: $id, title: $title, key: $key, ctx: Ctx::$ctx, action: || Box::new($action) }),*];
@@ -130,6 +149,7 @@ cmds![
     ("editor.action.moveLinesUpAction", "Move Line Up", "alt-up", Editor, MoveLineUp),
     ("editor.action.moveLinesDownAction", "Move Line Down", "alt-down", Editor, MoveLineDown),
     // View
+    ("workbench.action.showCommands", "Command Palette…", "shift-cmd-p", Global, CommandPalette),
     ("workbench.view.explorer", "Explorer", "shift-cmd-e", Global, ShowExplorer),
     ("workbench.view.scm", "Git", "ctrl-shift-g", Global, ShowGit),
     ("workbench.action.toggleSidebarVisibility", "Toggle Sidebar", "cmd-b", Global, ToggleSidebar),
@@ -143,6 +163,7 @@ cmds![
     ("antler.toggleMinimapCharacters", "Render Characters", "", Global, ToggleRenderCharacters),
     // Go
     ("workbench.action.quickOpen", "Go to File…", "cmd-p", Global, GoToFile),
+    ("workbench.action.gotoLine", "Go to Line…", "ctrl-g", Global, GoToLine),
     ("workbench.action.nextEditor", "Next Editor", "alt-cmd-right", Global, NextTab),
     ("workbench.action.previousEditor", "Previous Editor", "alt-cmd-left", Global, PreviousTab),
     ("workbench.action.openNextRecentlyUsedEditor", "Next Used Editor", "ctrl-tab", Global, NextRecentTab),
@@ -438,6 +459,8 @@ pub(crate) const MENUS: &[(&str, &[&str])] = &[
     (
         "View",
         &[
+            "workbench.action.showCommands",
+            "-",
             "workbench.view.explorer",
             "workbench.view.search",
             "workbench.view.scm",
@@ -456,6 +479,7 @@ pub(crate) const MENUS: &[(&str, &[&str])] = &[
         "Go",
         &[
             "workbench.action.quickOpen",
+            "workbench.action.gotoLine",
             "-",
             "workbench.action.nextEditor",
             "workbench.action.previousEditor",

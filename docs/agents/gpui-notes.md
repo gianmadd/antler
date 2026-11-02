@@ -315,3 +315,10 @@ window.open_alert_dialog(cx, move |alert, _, _| {
 - `use gpui_kit::*` in a test module brings gpui's `#[test]` macro and breaks `#[test]` ("recursion limit"): add `use core::prelude::v1::test;`.
 - Folding: `EditorState` has no way to fold, only `unfold_at(position, cx)` and the read-only `display_map().folded_ranges()` (gpui-base 0.8.1; `set_folded` needs `&mut DisplayMap`, which is private). Unfold All is a loop of `unfold_at`; Fold and Fold All are not possible.
 - Buttons: `Button::tooltip(String)`; the key text comes from `keys::label(cx, "Commit", "git.commit")`, which follows the user's keybindings.json.
+
+## Quick Open modes and the Command palette (`goto_view.rs`, `palette.rs`)
+
+- One popup, three modes read from the query text each frame (`palette::mode`): files, `>` commands, `:` line. Deleting the symbol returns to files; `open_quick(prefix)` prefills with `CommandState::set_query`. Rows and Enter both go through `Antler::confirm`, which recomputes the rows from the query (the list is never stored for the palette).
+- The palette lists `keys::palette_commands`: each id once, Global commands always, Input/Editor commands only with an active editor tab (Enter focuses that editor, then `window.dispatch_action`, which runs deferred so the focus lands first). Explorer, Git, Commit and picker commands are left out: they act on a selection or an open popup. Editor actions are handled on the element around the editor, so they only arrive with the editor focused.
+- Recent command ids (50) are in `state.json` under `recent_commands`, written on every run.
+

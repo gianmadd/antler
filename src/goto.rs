@@ -151,7 +151,7 @@ impl MatchJob {
 
 /// Matches the lowercase `query` letters in order in `text`, not necessarily next to each other. Returns the
 /// score (higher for runs of letters, word starts and letters in the file name) and the matched byte ranges.
-fn fuzzy(query: &[char], text: &str) -> Option<(i32, Vec<Range<usize>>)> {
+pub(crate) fn fuzzy(query: &[char], text: &str) -> Option<(i32, Vec<Range<usize>>)> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let name_start = text.rfind('/').map_or(0, |i| i + 1);
     let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
