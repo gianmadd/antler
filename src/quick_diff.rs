@@ -39,8 +39,9 @@ impl Antler {
 
     pub(crate) fn load_quick(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(source) = self.ws.quick_source(&path) else { return };
+        let host = self.ws.host.clone();
         cx.spawn(async move |this, cx| {
-            let index = cx.background_spawn(async move { source.load_index() }).await;
+            let index = cx.background_spawn(async move { crate::host::scoped(&host, || source.load_index()) }).await;
             this.update(cx, |this, cx| {
                 if this.ws.set_quick(&path, index) {
                     this.quick.open = None; // its Hunk index may mean another one now

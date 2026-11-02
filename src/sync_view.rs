@@ -87,9 +87,10 @@ impl Antler {
         if branch == DETACHED {
             return;
         }
+        let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             let dir = repo.clone();
-            let remotes = cx.background_spawn(async move { crate::git::remotes(&dir) }).await;
+            let remotes = cx.background_spawn(async move { crate::host::scoped(&host, || crate::git::remotes(&dir)) }).await;
             this.update_in(cx, |t, window, cx| match remotes {
                 Err(e) => window.push_notification(Notification::error(e).title("git"), cx),
                 Ok(r) if r.is_empty() => {
@@ -164,6 +165,7 @@ impl Antler {
     /// never ask for credentials (the auto-fetch has no dialog). The watcher sees the new refs and rescans, so the
     /// ↓/↑ counters follow.
     pub(crate) fn auto_fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 let Ok(period) = this.update(cx, |_, cx| Duration::from_secs(cx.global::<Current>().0.git_autofetch_period.max(5))) else { return };
@@ -172,7 +174,10 @@ impl Antler {
                 for repo in repos {
                     // an op may have been queued on it while the previous repo fetched
                     match this.update(cx, |t, _| t.fetchable().contains(&repo)) {
-                        Ok(true) => cx.background_spawn(async move { crate::git::fetch(&repo, false, false) }).await.ok(),
+                        Ok(true) => {
+                            let host = host.clone();
+                            cx.background_spawn(async move { crate::host::scoped(&host, || crate::git::fetch(&repo, false, false)) }).await.ok()
+                        }
                         Ok(false) => None,
                         Err(_) => return,
                     };

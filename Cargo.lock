@@ -185,19 +185,37 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 name = "antler"
 version = "0.2.0"
 dependencies = [
+ "antler-host",
  "async-channel",
  "gpui-kit",
- "grep",
- "ignore",
  "image",
- "notify",
- "objc2-foundation 0.3.2",
  "rust-embed",
  "serde",
  "serde_json",
  "similar",
  "tempfile",
  "usvg 0.46.0",
+]
+
+[[package]]
+name = "antler-host"
+version = "0.2.0"
+dependencies = [
+ "grep",
+ "ignore",
+ "notify",
+ "objc2-foundation 0.3.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "antler-server"
+version = "0.2.0"
+dependencies = [
+ "antler-host",
+ "tempfile",
 ]
 
 [[package]]

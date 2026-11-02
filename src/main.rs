@@ -2,7 +2,7 @@ mod bars;
 mod branch_view;
 mod conflict_view;
 mod dialogs;
-mod discovery;
+use antler_host::discovery;
 mod editing;
 mod explorer;
 mod git;
@@ -362,7 +362,7 @@ impl Antler {
     /// once the model's debounce has passed.
     fn watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (tx, rx) = async_channel::unbounded();
-        let watcher = host::at(&self.ws.root).watch(&self.ws.root, Box::new(move |path| drop(tx.send_blocking(path))));
+        let watcher = self.ws.host.watch(&self.ws.root, Box::new(move |path| drop(tx.send_blocking(path))));
         // replacing the old watcher drops its sender, which ends its loop below
         self.watcher = match watcher {
             Ok(w) => Some(w),

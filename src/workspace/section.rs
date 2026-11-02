@@ -117,7 +117,7 @@ impl Workspace {
     /// Stage of files of Section `i`'s "Merge Changes": the op notes which still hold conflict markers on disk.
     pub fn resolve(&self, i: usize, paths: Vec<String>) -> Op {
         let repo = self.sections[i].repo.path.clone();
-        let marked = |p: &String| crate::host::at(&repo).read_to_string(&repo.join(p)).is_ok_and(|t| !crate::editing::conflicts(&t).is_empty());
+        let marked = |p: &String| self.host.read_to_string(&repo.join(p)).is_ok_and(|t| !crate::editing::conflicts(&t).is_empty());
         let conflicted = paths.iter().filter(|p| marked(p)).cloned().collect();
         Op::Resolve { repo, paths, conflicted }
     }

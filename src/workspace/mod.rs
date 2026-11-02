@@ -2,12 +2,13 @@
 //! Blocking git work is split out (`scan`) so the UI can run it on a background thread and `apply` the result.
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::discovery::{self, Repo};
 use crate::git;
 use crate::graph;
-use crate::host;
+use crate::host::{self, Host};
 use crate::search::{self, Query, Results, SearchJob};
 
 mod groups;
@@ -38,6 +39,8 @@ pub const DEFAULT_DEPTH: usize = 3;
 pub const DEBOUNCE: Duration = Duration::from_millis(200);
 
 pub struct Workspace {
+    /// Where the Root lives: this machine, or a Remote host. Jobs carry it to their background thread.
+    pub host: Arc<dyn Host>,
     pub root: PathBuf,
     pub depth: usize,
     pub sections: Vec<Section>,
@@ -151,6 +154,7 @@ impl Workspace {
     /// An empty workspace on `root`; nothing is loaded until `apply(scan(..))`.
     pub fn new(root: PathBuf) -> Self {
         Workspace {
+            host: crate::host::local(),
             root,
             depth: DEFAULT_DEPTH,
             sections: Vec::new(),
@@ -310,6 +314,7 @@ impl Workspace {
     pub fn start_scan(&mut self, ops: Vec<Op>) -> ScanJob {
         let dirs = self.tree.keys().filter(|d| **d != self.root).cloned().chain([self.root.clone()]).collect();
         ScanJob {
+            host: self.host.clone(),
             root: self.root.clone(),
             depth: self.depth,
             ops,

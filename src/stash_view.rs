@@ -106,9 +106,10 @@ impl Antler {
 
     /// Lists the stashes off the UI thread, then runs the latest, asks to drop all, or opens the picker.
     fn pick_stash(&mut self, repo: PathBuf, pick: Pick, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             let dir = repo.clone();
-            let stashes = cx.background_spawn(async move { crate::git::stashes(&dir) }).await;
+            let stashes = cx.background_spawn(async move { crate::host::scoped(&host, || crate::git::stashes(&dir)) }).await;
             this.update_in(cx, |this, window, cx| match stashes {
                 Err(e) => window.push_notification(Notification::error(e).title("git"), cx),
                 Ok(s) if s.is_empty() => window.push_notification(Notification::info("There are no stashes in the repository."), cx),

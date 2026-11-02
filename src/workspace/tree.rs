@@ -339,6 +339,10 @@ impl Workspace {
     /// VS Code, for a folder into itself. A taken name: a copy gets `x copy.ts`, a move fails when it runs.
     /// shortcut: VS Code asks to replace on a move over a taken name; add that question if users want it.
     pub fn drop_entries(&self, paths: &[PathBuf], dir: &Path, copy: bool) -> Result<Option<Op>, String> {
+        crate::host::scoped(&self.host, || self.drop_entries_on_host(paths, dir, copy))
+    }
+
+    fn drop_entries_on_host(&self, paths: &[PathBuf], dir: &Path, copy: bool) -> Result<Option<Op>, String> {
         if paths.iter().any(|p| dir.starts_with(p)) {
             return Err("File to paste is an ancestor of the destination folder".into());
         }
@@ -347,7 +351,7 @@ impl Workspace {
             let Some(name) = from.file_name() else { continue };
             if copy {
                 let taken: Vec<_> = ops.iter().filter_map(|op| if let Op::Copy { to, .. } = op { Some(to.clone()) } else { None }).collect();
-                ops.push(Op::Copy { from: from.clone(), to: copy_target(dir, name, crate::host::at(from).metadata(from).is_ok_and(|m| m.is_dir), &taken) });
+                ops.push(Op::Copy { from: from.clone(), to: copy_target(dir, name, self.host.metadata(from).is_ok_and(|m| m.is_dir), &taken) });
             } else if from.parent() != Some(dir) {
                 ops.push(Op::Rename { from: from.clone(), to: dir.join(name) });
             }
@@ -393,11 +397,11 @@ impl Workspace {
     pub fn finish_naming(&mut self, name: &str) -> Result<Option<Op>, String> {
         let op = match self.naming.clone() {
             None => None,
-            Some(Naming::New { dir, folder }) => Some(Op::Create { path: check_name(&dir, name, None)?, folder }),
+            Some(Naming::New { dir, folder }) => Some(Op::Create { path: check_name(&*self.host, &dir, name, None)?, folder }),
             Some(Naming::Rename(from)) => {
                 let old = from.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 let dir = from.parent().unwrap_or(&self.root);
-                (name != old).then(|| check_name(dir, name, Some(&old))).transpose()?.map(|to| Op::Rename { from, to })
+                (name != old).then(|| check_name(&*self.host, dir, name, Some(&old))).transpose()?.map(|to| Op::Rename { from, to })
             }
         };
         self.cancel_naming();
@@ -419,7 +423,7 @@ impl Workspace {
 
 /// `dir/name` if `name` can be a new file or folder there; `current` is the name being renamed (a change of case
 /// only is allowed on a case-insensitive disk).
-fn check_name(dir: &Path, name: &str, current: Option<&str>) -> Result<PathBuf, String> {
+fn check_name(host: &dyn Host, dir: &Path, name: &str, current: Option<&str>) -> Result<PathBuf, String> {
     if name.trim().is_empty() {
         return Err("A file or folder name must be provided.".into());
     }
@@ -430,7 +434,7 @@ fn check_name(dir: &Path, name: &str, current: Option<&str>) -> Result<PathBuf, 
     }
     let path = dir.join(name);
     let same = current.is_some_and(|c| c.to_lowercase() == name.to_lowercase());
-    if !same && crate::host::at(dir).exists(&path) {
+    if !same && host.exists(&path) {
         return Err(format!("A file or folder {name} already exists at this location."));
     }
     Ok(path)

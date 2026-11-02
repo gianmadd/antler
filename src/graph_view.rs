@@ -132,9 +132,10 @@ impl Antler {
     /// Loads a graph page on a background thread into the model.
     pub(crate) fn load_graph(&mut self, page: Option<graph::Page>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(page) = page else { return };
+        let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             let p = page.clone();
-            let result = cx.background_spawn(async move { p.load() }).await;
+            let result = cx.background_spawn(async move { crate::host::scoped(&host, || p.load()) }).await;
             this.update_in(cx, |this, window, cx| {
                 this.ws.set_graph_page(&page, result);
                 if let Some(e) = this.ws.last_error.take() {
@@ -150,9 +151,10 @@ impl Antler {
     fn toggle_commit(&mut self, sha: &str, window: &mut Window, cx: &mut Context<Self>) {
         cx.notify();
         let Some(req) = self.ws.toggle_commit(sha) else { return };
+        let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             let r = req.clone();
-            let result = cx.background_spawn(async move { r.load() }).await;
+            let result = cx.background_spawn(async move { crate::host::scoped(&host, || r.load()) }).await;
             this.update_in(cx, |this, window, cx| {
                 this.ws.set_commit_files(&req, result);
                 if let Some(e) = this.ws.last_error.take() {

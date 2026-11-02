@@ -297,9 +297,10 @@ impl Antler {
     pub(crate) fn load_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(path) = self.ws.tabs[ix].path().map(std::path::Path::to_path_buf) else { return };
         if self.ws.tabs[ix].image().is_some_and(|i| i.info.is_none()) {
+            let host = self.ws.host.clone();
             cx.spawn(async move |this, cx| {
                 let p = path.clone();
-                let info = cx.background_spawn(async move { workspace::ImageTab::load(&p) }).await;
+                let info = cx.background_spawn(async move { crate::host::scoped(&host, || workspace::ImageTab::load(&p)) }).await;
                 this.update(cx, |this, cx| {
                     this.ws.set_image(&path, info);
                     cx.notify();
@@ -308,9 +309,10 @@ impl Antler {
             })
             .detach();
         } else if self.ws.tabs[ix].file().is_some_and(|f| f.loading) {
+            let host = self.ws.host.clone();
             cx.spawn(async move |this, cx| {
                 let p = path.clone();
-                let text = cx.background_spawn(async move { workspace::FileTab::load(&p) }).await;
+                let text = cx.background_spawn(async move { crate::host::scoped(&host, || workspace::FileTab::load(&p)) }).await;
                 this.update(cx, |this, cx| {
                     this.ws.set_file(&path, text);
                     this.load_quick(path, cx);
@@ -495,9 +497,10 @@ impl Antler {
 
     /// Loads `source`'s diff on a background thread into its tab.
     pub(crate) fn load_diff(&mut self, source: workspace::DiffSource, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             let src = source.clone();
-            let patch = cx.background_spawn(async move { src.load() }).await;
+            let patch = cx.background_spawn(async move { crate::host::scoped(&host, || src.load()) }).await;
             this.update_in(cx, |this, window, cx| {
                 this.ws.set_diff(&source, patch);
                 if let Some(e) = this.ws.last_error.take() {
