@@ -17,6 +17,7 @@ Antler copies VS Code's Explorer and Source Control; for git, ADR 0003 applies (
 | Moving onto an existing name (drag, Cut/Paste) | asks whether to replace | refuses with an error, both files stay |
 | Windows | one app, several windows, reopening | one window per process; Open Folder replaces the folder |
 | Theme | light/dark and themes | dark only, Amber accent, font 14 |
+| Zoom keys | ⌘= / ⌘- zoom the whole window, ⌘0 focuses the side bar | ⌘= / ⌘- / ⌘0 change and reset the editor font size, like Zed |
 | Staged/Changes groups | collapsible | not collapsible (to be aligned) |
 
 Excluded by choice: integrated terminal, extensions, AI-generated commit messages.
