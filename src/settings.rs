@@ -23,6 +23,15 @@ pub struct Settings {
     pub editor_minimap_enabled: bool,
     /// VS Code's `editor.minimap.renderCharacters`: false draws blocks; View → Minimap → Render Characters saves it.
     pub editor_minimap_render_characters: bool,
+    /// VS Code's `update.mode`, "default" or "none" only: with "none" no automatic check and no Check for Updates… in the menu.
+    pub update_mode: UpdateMode,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    Default,
+    None,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -45,6 +54,7 @@ impl Default for Settings {
             explorer_confirm_drag_and_drop: true,
             editor_minimap_enabled: true,
             editor_minimap_render_characters: true,
+            update_mode: UpdateMode::Default,
         }
     }
 }
@@ -128,6 +138,13 @@ mod tests {
         assert_eq!((s.git_enable_smart_commit, s.git_suggest_smart_commit), (false, true), "VS Code's defaults");
         assert!(s.editor_minimap_enabled && s.editor_minimap_render_characters, "VS Code's defaults");
         assert!(s.explorer_confirm_drag_and_drop);
+    }
+
+    #[test]
+    fn update_mode_is_read() {
+        assert_eq!(run(&[], None).1.update_mode, UpdateMode::Default);
+        assert_eq!(run(&[], Some(r#"{"update_mode": "none"}"#)).1.update_mode, UpdateMode::None);
+        assert!(run(&[], Some(r#"{"update_mode": "manual"}"#)).2.is_some(), "unknown modes are an error, defaults apply");
     }
 
     #[test]

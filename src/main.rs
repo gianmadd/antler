@@ -25,6 +25,7 @@ mod state;
 mod style;
 mod sync_view;
 mod tabs;
+mod update;
 #[cfg(test)]
 mod testing;
 mod workspace;
@@ -39,6 +40,7 @@ use gpui_kit::component::{
     TitleBar, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex,
     diff::DiffState,
     input::{EditorState, InputEvent, InputState, Replace, TextareaState},
+    button::{Button, ButtonVariants as _},
     menu::PopupMenuItem,
     notification::Notification,
     tooltip::Tooltip,
@@ -50,7 +52,7 @@ use workspace::{GitRow, Op, View, Workspace};
 use tabs::TogglePreview;
 
 actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch]);
-actions!(antler, [ClearRecent, CloseFolder]);
+actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates]);
 
 /// File → Open Recent → a folder.
 #[derive(Clone, PartialEq, Action)]
@@ -64,7 +66,10 @@ fn set_menus(cx: &mut App) {
     let open_recent = Menu::new("Open Recent").items(recent.chain([MenuItem::separator(), MenuItem::action("Clear Recently Opened", ClearRecent)]));
     // the first menu is the macOS app menu
     cx.set_menus([
-        Menu::new("Antler").items([MenuItem::action("Quit Antler", Quit)]),
+        Menu::new("Antler").items(
+            (cx.global::<update::Enabled>().0.then(|| [MenuItem::action("Check for Updates…", CheckForUpdates), MenuItem::separator()]).into_iter().flatten())
+                .chain([MenuItem::action("Quit Antler", Quit)]),
+        ),
         Menu::new("File").items([MenuItem::action("Save", Save), MenuItem::action("Open Folder…", OpenFolder), MenuItem::submenu(open_recent), MenuItem::action("Close Folder", CloseFolder)]),
         Menu::new("View").items([MenuItem::submenu(Menu::new("Minimap").items([
             MenuItem::Action {
@@ -169,6 +174,8 @@ struct Antler {
     diff_width: std::rc::Rc<std::cell::Cell<f32>>,
     /// The editable diffs' left halves and colours.
     side: side_diff::SideDiff,
+    /// Versions the update toast already showed this session.
+    update_notified: std::collections::HashSet<String>,
 }
 
 impl Antler {
@@ -225,12 +232,16 @@ impl Antler {
             quick: Default::default(),
             diff_width: Default::default(),
             side: Default::default(),
+            update_notified: Default::default(),
         };
         if this.ws.has_folder() {
             this.watch(window, cx);
             this.refresh(window, cx);
         }
         this.auto_fetch(window, cx);
+        if cx.global::<update::Enabled>().0 {
+            this.auto_update_check(window, cx);
+        }
         this
     }
 
@@ -345,6 +356,53 @@ impl Antler {
         })
         .detach();
         cx.notify();
+    }
+
+    /// 30 s after startup, then hourly; silent on errors.
+    fn auto_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(update::FIRST_CHECK).await;
+            loop {
+                if this.update_in(cx, |t, window, cx| t.check_for_updates(false, window, cx)).is_err() {
+                    return;
+                }
+                cx.background_executor().timer(update::EVERY).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Antler → Check for Updates… (`manual`: says "no updates" and shows errors) or the hourly check (silent, and one toast per version).
+    fn check_for_updates(&mut self, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let (result, brew) = cx.background_spawn(async { (update::check(), update::brew()) }).await;
+            this.update_in(cx, |this, window, cx| match result {
+                update::Check::Available(r) if manual || this.update_notified.insert(r.version.clone()) => {
+                    let (text, url) = (update::message(&r, brew), r.url);
+                    window.push_notification(
+                        Notification::info("").title("Update available").autohide(false).content(move |_, _, _| {
+                            let (u1, u2) = (url.clone(), url.clone());
+                            v_flex()
+                                .gap_2()
+                                .child(text.clone())
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(Button::new("update-download").primary().label("Download").on_click(move |_, _, cx| cx.open_url(&u1)))
+                                        .child(Button::new("update-notes").label("Release Notes").on_click(move |_, _, cx| cx.open_url(&u2))),
+                                )
+                                .into_any_element()
+                        }),
+                        cx,
+                    );
+                }
+                update::Check::UpToDate if manual => window.push_notification(Notification::info("There are currently no updates available."), cx),
+                update::Check::Failed(e) if manual => window.push_notification(Notification::error(e).title("Update"), cx),
+                _ => {}
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Cmd+O / File → Open Folder…: the chosen folder replaces the Root in this window.
@@ -465,6 +523,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::quit))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| this.check_for_updates(true, window, cx)))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_recent))
             // only with a folder open: File → Close Folder is greyed out otherwise (the menu asks if the action is available)
@@ -522,6 +581,7 @@ fn main() {
     if let Some(f) = &ws.state_file {
         ws.graph.load_filters(&state::graph_filters(f));
     }
+    let update_on = s.update_mode == settings::UpdateMode::Default;
     let (minimap, minimap_chars) = (s.editor_minimap_enabled, s.editor_minimap_render_characters);
     gpui_kit::application().with_assets(icons::Assets).run(move |cx| {
         gpui_kit::init(cx);
@@ -554,6 +614,7 @@ fn main() {
             recent::clear(&recent::default_path());
             set_menus(cx);
         });
+        cx.set_global(update::Enabled(update_on));
         cx.set_global(minimap_view::Enabled(minimap));
         cx.set_global(minimap_view::RenderCharacters(minimap_chars));
         set_menus(cx);
