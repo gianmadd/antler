@@ -708,16 +708,23 @@ pub const ASKPASS_ENV: &str = "ANTLER_ASKPASS";
 /// (the Keychain) answers first, as always; then, with `interactive`, the antler binary asks with a dialog
 /// (`askpass`), like VS Code's `GIT_ASKPASS`; without it (auto-fetch) the question fails at once.
 fn network(repo: &Path, args: &[&str], interactive: bool) -> Result<String> {
-    let exe = std::env::current_exe().map(|p| p.into_os_string()).unwrap_or_default();
-    let helper: &std::ffi::OsStr = if interactive && !exe.is_empty() { &exe } else { "/usr/bin/false".as_ref() };
-    let envs = [
-        ("GIT_TERMINAL_PROMPT", "0".as_ref()),
-        ("GIT_ASKPASS", helper),
-        ("SSH_ASKPASS", helper),
-        ("SSH_ASKPASS_REQUIRE", "force".as_ref()), // ssh would otherwise read the passphrase from the tty, if any
-        (ASKPASS_ENV, "1".as_ref()),
-    ];
+    let envs = askpass_envs(interactive);
+    let envs: Vec<(&str, &std::ffi::OsStr)> = envs.iter().map(|(k, v)| (*k, v.as_os_str())).collect();
     run_env(repo, args, None, &envs)
+}
+
+/// The environment that makes git and ssh ask through the antler binary (see `askpass`); without `interactive`
+/// the helper is `false`, so a question fails at once.
+pub fn askpass_envs(interactive: bool) -> Vec<(&'static str, std::ffi::OsString)> {
+    let exe = std::env::current_exe().map(|p| p.into_os_string()).unwrap_or_default();
+    let helper = if interactive && !exe.is_empty() { exe } else { "/usr/bin/false".into() };
+    vec![
+        ("GIT_TERMINAL_PROMPT", "0".into()),
+        ("GIT_ASKPASS", helper.clone()),
+        ("SSH_ASKPASS", helper),
+        ("SSH_ASKPASS_REQUIRE", "force".into()), // ssh would otherwise read the passphrase from the tty, if any
+        (ASKPASS_ENV, "1".into()),
+    ]
 }
 
 /// osascript's arguments for a native input dialog showing `prompt`; passwords and passphrases are hidden.

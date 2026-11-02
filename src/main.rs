@@ -25,6 +25,7 @@ mod search_view;
 mod recent;
 mod settings;
 mod settings_view;
+mod ssh;
 mod side_diff;
 mod stash_view;
 mod state;

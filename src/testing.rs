@@ -57,14 +57,19 @@ pub fn host() -> std::sync::Arc<dyn crate::host::Host> {
     REMOTE.get_or_init(|| Arc::new(antler_remote(&mut Command::new("cargo"))) as _).clone()
 }
 
-/// A `Remote` to the server binary next to the test executable, built first if it is not there.
-pub fn antler_remote(cargo: &mut Command) -> antler_host::remote::Remote {
+/// The server binary next to the test executable, built first if it is not there.
+pub fn server_binary(cargo: &mut Command) -> std::path::PathBuf {
     let exe = std::env::current_exe().unwrap();
     let server = exe.parent().and_then(Path::parent).unwrap().join(format!("antler-server{}", std::env::consts::EXE_SUFFIX));
     if !server.exists() {
         assert!(cargo.args(["build", "-q", "-p", "antler-server"]).status().unwrap().success(), "cannot build antler-server");
     }
-    antler_host::remote::Remote::spawn(Command::new(server)).unwrap()
+    server
+}
+
+/// A `Remote` to the server binary next to the test executable, built first if it is not there.
+pub fn antler_remote(cargo: &mut Command) -> antler_host::remote::Remote {
+    antler_host::remote::Remote::spawn(Command::new(server_binary(cargo))).unwrap()
 }
 
 /// Whether the model tests run through `Remote` (`ANTLER_TEST_REMOTE`): a remote has no Trash, so the tests of
