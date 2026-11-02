@@ -35,3 +35,11 @@ antler-host = { path = "crates/antler-host", features = ["test-trash"] }
 
 [profile.release]
 strip = true
+
+# antler-server only (`cargo build --profile server -p antler-server`): small static binary; the app keeps `release`
+[profile.server]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

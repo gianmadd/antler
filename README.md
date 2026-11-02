@@ -56,7 +56,7 @@ cargo test
 
 ## Project status
 
-Young and moving fast. macOS on Apple Silicon only, for now. Releases are published on GitHub (`v0.x`) and are ad-hoc signed.
+Young and moving fast. macOS on Apple Silicon only, for now. Releases are published on GitHub (`v0.x`) and are ad-hoc signed; each also carries `antler-server` for Linux, macOS and Windows (x86_64 and aarch64), which the app installs on a Remote host.
 
 ## Contributing
 
