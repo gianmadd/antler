@@ -315,3 +315,11 @@ window.open_alert_dialog(cx, move |alert, _, _| {
 - `use gpui_kit::*` in a test module brings gpui's `#[test]` macro and breaks `#[test]` ("recursion limit"): add `use core::prelude::v1::test;`.
 - Folding: `EditorState` has no way to fold, only `unfold_at(position, cx)` and the read-only `display_map().folded_ranges()` (gpui-base 0.8.1; `set_folded` needs `&mut DisplayMap`, which is private). Unfold All is a loop of `unfold_at`; Fold and Fold All are not possible.
 - Buttons: `Button::tooltip(String)`; the key text comes from `keys::label(cx, "Commit", "git.commit")`, which follows the user's keybindings.json.
+
+## Settings tab (`src/settings_view.rs`)
+
+- `gpui_kit::component::setting::{Settings, SettingPage, SettingGroup, SettingItem, SettingField, NumberFieldOptions}` is a ready-made settings editor: a sidebar with a search field and the pages as categories, one control per item (`SettingField::switch`, `number_input`, `dropdown((value, label) pairs)`, `input`), and a reset button when `.default_value(..)` is set. Fields read and write through `Fn(&App) -> T` / `Fn(T, &mut App)`, so there is no entity to hand in: Antler reads `settings::Current` (a Global) and writes with `settings::put` (file, then reload, which sets the Global).
+- `cx.observe_global_in::<settings::Current>(window, ..)` in `Antler::new` is how a window follows a change (`Antler::apply_settings`); `settings::watch` polls the file once a second, like `keys::watch`, so a hand edit takes the same road.
+- A Button's popup (the Activity bar gear): `Button::new(..).dropdown_menu_with_anchor(Anchor::BottomLeft, |menu, window, cx| ..)` needs `menu::DropdownMenu as _` in scope.
+- Editors: `EditorState::tab_size(TabSize { tab_size, hard_tabs })` (builder) and `set_tab_size(tab, cx)`; `TabSize` is `gpui_kit::component::input::TabSize`.
+- The theme's `font_size` is the UI font size: `Root` copies it to the window's rem size each frame, so `Theme::update(cx, |t| t.font_size = ..)` resizes everything that does not set its own `text_size`.

@@ -1,5 +1,5 @@
 //! The Activity bar on the left and the status bar at the bottom.
-use gpui_kit::component::{Icon, IconName, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName, button::{Button, ButtonVariants as _}, h_flex, menu::{DropdownMenu as _, PopupMenuItem}, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -65,6 +65,32 @@ impl Antler {
             .child(item(View::Explorer, style::files_icon(), "Explorer", "workbench.view.explorer", 0))
             .child(item(View::Git, style::git_icon(), "Git", "workbench.view.scm", count))
             .child(item(View::Search, Icon::new(IconName::Search), "Search", "workbench.view.search", 0))
+            .child(div().flex_1())
+            .child(self.manage_button(cx))
+    }
+
+    /// The gear at the bottom of the Activity bar: VS Code's Manage menu with the commands Antler has, each with its key.
+    fn manage_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let this = cx.entity().downgrade();
+        let updates = cx.global::<crate::update::Enabled>().0;
+        let (settings, check) = (crate::keys::label(cx, "Settings", "workbench.action.openSettings"), "Check for Updates…");
+        div().w(px(48.)).h(px(44.)).flex().items_center().justify_center().child(
+            Button::new("manage")
+                .ghost()
+                .icon(IconName::Settings)
+                .tooltip("Manage")
+                .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                    let (a, b) = (this.clone(), this.clone());
+                    let menu = menu.item(PopupMenuItem::new(settings.clone()).on_click(move |_, window, cx| {
+                        a.update(cx, |t, cx| t.open_settings(&crate::OpenSettings, window, cx)).ok();
+                    }));
+                    menu.when(updates, |menu| {
+                        menu.item(PopupMenuItem::new(check).on_click(move |_, window, cx| {
+                            b.update(cx, |t, cx| t.check_for_updates(true, window, cx)).ok();
+                        }))
+                    })
+                }),
+        )
     }
 
     /// The status bar: branch of the active tab's repo; the editor's line, column and language, or the diff's facts.
@@ -92,7 +118,7 @@ impl Antler {
                 Some(info) => info.size.map(|(w, h)| format!("{w} × {h}")).into_iter().chain([bytes(info.bytes)]).collect(),
                 None => Vec::new(),
             },
-            None => Vec::new(),
+            Some(TabKind::Settings) | None => Vec::new(),
         };
         let section = self.ws.active_section();
         h_flex()

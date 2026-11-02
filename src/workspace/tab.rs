@@ -76,6 +76,7 @@ pub struct Tab {
 pub enum Reopen {
     Path(PathBuf),
     Diff(DiffSource),
+    Settings,
 }
 
 /// Which tabs a tab's menu (or ⌥⌘T, ⌘K U, ⌘K ⌘W) closes, from the tab it was opened on.
@@ -91,6 +92,8 @@ pub enum TabKind {
     Diff(DiffTab),
     File(FileTab),
     Image(ImageTab),
+    /// The Settings editor; its content lives in the view.
+    Settings,
 }
 
 impl TabKind {
@@ -108,6 +111,7 @@ impl Tab {
     fn reopen(&self) -> Reopen {
         match (&self.kind, self.path()) {
             (TabKind::Diff(d), _) => Reopen::Diff(d.source.clone()),
+            (TabKind::Settings, _) => Reopen::Settings,
             (_, path) => Reopen::Path(path.unwrap_or(Path::new("")).to_path_buf()),
         }
     }
@@ -126,6 +130,7 @@ impl Tab {
                 }
             }
             TabKind::File(FileTab { path, .. }) | TabKind::Image(ImageTab { path, .. }) => file_name(path),
+            TabKind::Settings => "Settings".into(),
         }
     }
 
@@ -133,7 +138,7 @@ impl Tab {
     pub fn path(&self) -> Option<&Path> {
         match &self.kind {
             TabKind::File(FileTab { path, .. }) | TabKind::Image(ImageTab { path, .. }) => Some(path),
-            TabKind::Diff(_) => None,
+            TabKind::Diff(_) | TabKind::Settings => None,
         }
     }
 
@@ -264,6 +269,15 @@ impl ImageTab {
         };
         ImageInfo { size, bytes: std::fs::metadata(path).map_or(0, |m| m.len()) }
     }
+}
+
+/// `text` as `files.trimTrailingWhitespace` and `files.insertFinalNewline` leave it on save.
+fn on_save(text: &str, trim: bool, final_newline: bool) -> String {
+    let mut out = if trim { text.split('\n').map(|l| l.trim_end_matches([' ', '\t'])).collect::<Vec<_>>().join("\n") } else { text.to_string() };
+    if final_newline && !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// A save to run off the UI thread, from `Workspace::save` or `auto_save`; `Send`.
@@ -411,6 +425,12 @@ impl Workspace {
         source
     }
 
+    /// Cmd+, : the Settings tab (the existing one if open), pinned.
+    pub fn open_settings(&mut self) {
+        let existing = self.tabs.iter().position(|t| matches!(t.kind, TabKind::Settings));
+        self.show_tab(existing, || TabKind::Settings, true);
+    }
+
     /// Compare Changes on a conflict block of file `path` (absolute): a preview tab of `current` against `incoming`.
     /// Load the returned source.
     pub fn open_compare(&mut self, path: &Path, current: String, incoming: String) -> DiffSource {
@@ -488,6 +508,7 @@ impl Workspace {
             let kind = match what {
                 Reopen::Path(path) => TabKind::loading(&path),
                 Reopen::Diff(source) => TabKind::Diff(DiffTab::new(source)),
+                Reopen::Settings => TabKind::Settings,
             };
             let ix = ix.min(self.tabs.len());
             self.tabs.insert(ix, Tab { preview: false, kind, used: 0 });
@@ -661,6 +682,13 @@ impl Workspace {
 
     /// The write that saves file tab `ix`, or the file on the right of a diff (`None` for a diff without one): run it off the UI thread, then `saved`.
     pub fn save(&mut self, ix: usize) -> Option<SaveJob> {
+        let (trim, newline) = (self.trim_trailing_whitespace, self.insert_final_newline);
+        if let Some(f) = self.tabs[ix].file().filter(|f| !f.untitled) {
+            let text = on_save(&f.text, trim, newline);
+            if text != f.text {
+                self.edit(ix, text); // the editor takes the new text, as in VS Code
+            }
+        }
         let f = self.tabs[ix].file_mut().filter(|f| !f.untitled)?; // an Untitled file needs a path first: `save_untitled_as`
         f.saving = Some(f.text.clone());
         Some(SaveJob { path: f.path.clone(), text: f.text.clone(), auto: false })
@@ -1096,6 +1124,30 @@ mod tests {
         ws.edit(0, "a\n".into()); // undo back to the disk text
         assert!(!ws.tabs[0].is_dirty());
         assert_eq!(fs::read_to_string(tmp.path().join("a.txt")).unwrap(), "a\n", "editing does not write");
+    }
+
+    #[test]
+    fn on_save_trims_trailing_whitespace_and_adds_a_final_newline_only_when_asked() {
+        assert_eq!(on_save("a  \n\tb\t\n  \nc", false, false), "a  \n\tb\t\n  \nc");
+        assert_eq!(on_save("a  \n\tb\t\n  \nc", true, false), "a\n\tb\n\nc");
+        assert_eq!(on_save("c", false, true), "c\n");
+        assert_eq!(on_save("c\n", false, true), "c\n", "already there");
+        assert_eq!(on_save("", false, true), "", "an empty file stays empty");
+        assert_eq!(on_save("x \n", true, true), "x\n");
+    }
+
+    #[test]
+    fn save_applies_trim_and_final_newline_to_the_tab_and_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), "a\n").unwrap();
+        let mut ws = Workspace::open(tmp.path());
+        (ws.trim_trailing_whitespace, ws.insert_final_newline) = (true, true);
+        ws.open_path_now(&tmp.path().join("a.txt"), None, true);
+        ws.edit(0, "b   ".into());
+        assert!(ws.save_now(0));
+        assert_eq!(fs::read_to_string(tmp.path().join("a.txt")).unwrap(), "b\n");
+        assert_eq!(ws.tabs[0].file().unwrap().text, "b\n", "the editor shows what was saved");
+        assert!(!ws.tabs[0].is_dirty());
     }
 
     #[test]

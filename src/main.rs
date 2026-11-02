@@ -20,6 +20,7 @@ mod search;
 mod search_view;
 mod recent;
 mod settings;
+mod settings_view;
 mod side_diff;
 mod stash_view;
 mod state;
@@ -52,7 +53,7 @@ use style::{ACT, FG, FG_DIM, LINE_SOFT, MAIN, SIDE, c};
 use workspace::{GitRow, Op, View, Workspace};
 
 actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch]);
-actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar]);
+actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings]);
 
 /// File → Open Recent → a folder.
 #[derive(Clone, PartialEq, Action)]
@@ -71,7 +72,8 @@ fn set_menus(cx: &mut App) {
     let (mut recent, mut minimap) = (Some(open_recent), Some(minimap));
     // the first menu is the macOS app menu
     let app = Menu::new("Antler").items(
-        (cx.global::<update::Enabled>().0.then(|| [keys::item("antler.checkForUpdates"), MenuItem::separator()]).into_iter().flatten()).chain([keys::item("workbench.action.quit")]),
+        (cx.global::<update::Enabled>().0.then(|| keys::item("antler.checkForUpdates")).into_iter())
+            .chain([keys::item("workbench.action.openSettings"), MenuItem::separator(), keys::item("workbench.action.quit")]),
     );
     let menus = keys::MENUS.iter().map(|(name, ids)| {
         Menu::new(*name).items(ids.iter().filter_map(|id| match *id {
@@ -177,6 +179,9 @@ struct Antler {
     side: side_diff::SideDiff,
     /// Versions the update toast already showed this session.
     update_notified: std::collections::HashSet<String>,
+    /// The settings last applied (`apply_settings` compares the new ones with them), and the subscription to changes.
+    applied: settings::Settings,
+    _settings_sub: Subscription,
 }
 
 impl Antler {
@@ -202,6 +207,7 @@ impl Antler {
                 this.run_search(window, cx); // search as you type: each keystroke cancels the previous search
             }
         });
+        let initial = cx.global::<settings::Current>().0.clone();
         let mut this = Antler {
             ws,
             loading: false,
@@ -214,8 +220,8 @@ impl Antler {
             editors: HashMap::new(),
             minimaps: HashMap::new(),
             cursor: (0, 0),
-            wrap: false,
-            font_size: None,
+            wrap: initial.editor_word_wrap == settings::WordWrap::On,
+            font_size: Some(px(initial.editor_font_size)),
             cursors: vec![],
             cursors_word: false,
             query: (input, sub),
@@ -238,6 +244,8 @@ impl Antler {
             diff_width: Default::default(),
             side: Default::default(),
             update_notified: Default::default(),
+            applied: initial,
+            _settings_sub: cx.observe_global_in::<settings::Current>(window, |this, window, cx| this.apply_settings(window, cx)),
         };
         // hot exit: the Untitled files and their text go into the state file on quit and come back at the next start
         cx.on_app_quit(|this, _| {
@@ -256,6 +264,47 @@ impl Antler {
             this.auto_update_check(window, cx);
         }
         this
+    }
+
+    /// The settings in `settings::Current` took effect: the model and the open editors follow now, no restart.
+    fn apply_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let new = cx.global::<settings::Current>().0.clone();
+        let old = std::mem::replace(&mut self.applied, new.clone());
+        self.ws.apply_settings(&new);
+        workspace::set_excluded(new.excluded());
+        if (old.editor_minimap_enabled, old.editor_minimap_render_characters) != (new.editor_minimap_enabled, new.editor_minimap_render_characters) {
+            cx.set_global(minimap_view::Enabled(new.editor_minimap_enabled));
+            cx.set_global(minimap_view::RenderCharacters(new.editor_minimap_render_characters));
+            self.minimaps.values_mut().for_each(|m| m.version += 1);
+            set_menus(cx);
+        }
+        if old.editor_font_size != new.editor_font_size {
+            self.font_size = Some(px(new.editor_font_size));
+        }
+        if old.ui_font_size != new.ui_font_size {
+            gpui_kit::component::Theme::update(cx, |t| t.font_size = px(new.ui_font_size));
+        }
+        if old.editor_word_wrap != new.editor_word_wrap {
+            self.wrap = new.editor_word_wrap == settings::WordWrap::On;
+        }
+        let tab = self.tab_size();
+        for (editor, _) in self.editors.values() {
+            editor.update(cx, |e, cx| {
+                e.set_soft_wrap(self.wrap, window, cx);
+                e.set_tab_size(tab, cx);
+            });
+        }
+        let scan_changed = (old.scan_depth, old.hide_clean_repos, old.explorer_exclude_git_ignore, &old.files_exclude)
+            != (new.scan_depth, new.hide_clean_repos, new.explorer_exclude_git_ignore, &new.files_exclude);
+        if scan_changed && self.ws.has_folder() {
+            self.refresh_all(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// `editor.tabSize` and `editor.insertSpaces`.
+    fn tab_size(&self) -> gpui_kit::component::input::TabSize {
+        gpui_kit::component::input::TabSize { tab_size: self.applied.editor_tab_size, hard_tabs: !self.applied.editor_insert_spaces }
     }
 
     /// Watches the Root, `.git` folders included: a burst of disk events becomes one `refresh`
@@ -487,6 +536,13 @@ impl Antler {
     }
 
 
+    /// Cmd+, / Antler → Settings… / the gear: the Settings tab.
+    fn open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
+        self.ws.open_settings();
+        self.sync_diff(cx);
+        cx.notify();
+    }
+
     fn show_explorer(&mut self, _: &ShowExplorer, _: &mut Window, cx: &mut Context<Self>) {
         self.ws.view = Some(View::Explorer);
         cx.notify();
@@ -542,6 +598,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| this.check_for_updates(true, window, cx)))
+            .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_recent))
             // only with a folder open: File → Close Folder is greyed out otherwise (the menu asks if the action is available)
@@ -567,7 +624,8 @@ impl Render for Antler {
                 if self.ws.has_folder() {
                     el.child(h_flex().flex_1().min_h_0().child(self.activity_bar(cx)).child(div().flex_1().h_full().min_w_0().child(content)))
                 } else {
-                    el.child(div().flex_1().min_h_0().child(self.empty_state(cx)))
+                    // Settings opens without a folder, too
+                    el.child(div().flex_1().min_h_0().child(if self.ws.active.is_some() { self.tabs(cx) } else { self.empty_state(cx).into_any_element() }))
                 }
             })
             .child(status)
@@ -584,19 +642,20 @@ fn main() {
         std::process::exit(git::askpass(&std::env::args().nth(1).unwrap_or_default()));
     }
     let file = settings::default_path().unwrap_or_default(); // no HOME: an empty path reads as a missing file
+    settings::migrate(&file); // keys of an older version get the new names
     let (root, s, error) = settings::startup(std::env::args().skip(1), &file);
+    // window.restoreWindows: without a folder to open, the last one comes back
+    let root = root.or_else(|| (s.restore_windows == settings::RestoreWindows::All).then(|| recent::list(&recent::default_path()).into_iter().find(|p| p.is_dir())).flatten());
     // no folder (Finder, Dock, Spotlight give no args and a cwd of `/`): the window offers Open Folder…; the `antler` command passes `$PWD`
     let root = root.map(|root| std::fs::canonicalize(&root).unwrap_or(root)).unwrap_or_default();
     if !root.as_os_str().is_empty() {
         recent::add(&recent::default_path(), &root);
     }
     let mut ws = Workspace::new(root);
-    (ws.depth, ws.hide_clean, ws.last_error) = (s.scan_depth, s.hide_clean_repos, error); // shown after the first scan
-    ws.auto_save = (s.auto_save == settings::AutoSave::AfterDelay).then(|| std::time::Duration::from_millis(s.auto_save_delay));
-    (ws.enable_smart_commit, ws.suggest_smart_commit) = (s.git_enable_smart_commit, s.git_suggest_smart_commit);
-    ws.confirm_sync = s.git_confirm_sync;
+    ws.apply_settings(&s);
+    ws.last_error = error; // shown after the first scan
+    workspace::set_excluded(s.excluded());
     ws.settings_file = settings::default_path();
-    ws.confirm_drag_and_drop = s.explorer_confirm_drag_and_drop;
     ws.state_file = state::default_path();
     if let Some(f) = &ws.state_file {
         ws.graph.load_filters(&state::graph_filters(f));
@@ -607,6 +666,11 @@ fn main() {
     gpui_kit::application().with_assets(icons::Assets).run(move |cx| {
         gpui_kit::init(cx);
         style::apply(cx);
+        gpui_kit::component::Theme::update(cx, |t| t.font_size = px(s.ui_font_size));
+        cx.set_global(settings::Current(s));
+        if !file.as_os_str().is_empty() {
+            settings::watch(cx, file);
+        }
         // after gpui_kit::init, so they win over the editor's own keys at the same depth
         let keybindings = keys::default_path();
         let warnings = keys::load(cx, keybindings.as_deref());

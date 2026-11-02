@@ -12,12 +12,10 @@ use gpui_kit::component::{
 use gpui_kit::*;
 
 use crate::git::DETACHED;
+use crate::settings::Current;
 use crate::style::{FG, c};
 use crate::workspace::{Op, Section};
 use crate::{Antler, menu_item, tip};
-
-/// VS Code's `git.autofetchPeriod`.
-const AUTO_FETCH: Duration = Duration::from_secs(180);
 
 /// Adds the "Pull, Push" submenu to a Section's ⋯ menu, with VS Code's commands and groups.
 pub(crate) fn sync_submenu(menu: PopupMenu, this: &WeakEntity<Antler>, repo: &Path, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
@@ -161,15 +159,16 @@ impl Antler {
         });
     }
 
-    /// VS Code's `git.autofetch`: every 180 s, `git fetch` each repo in turn, in the background, skipping one with
+    /// VS Code's `git.autofetch` (off by default), every `git.autofetchPeriod` seconds (read again each round): `git fetch` each repo in turn, in the background, skipping one with
     /// an op queued or running and skipping the round while the window is not focused. Failures stay silent and
     /// never ask for credentials (the auto-fetch has no dialog). The watcher sees the new refs and rescans, so the
     /// ↓/↑ counters follow.
     pub(crate) fn auto_fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
             loop {
-                cx.background_executor().timer(AUTO_FETCH).await;
-                let Ok(repos) = this.update_in(cx, |t, window, _| if window.is_window_active() { t.fetchable() } else { Vec::new() }) else { return };
+                let Ok(period) = this.update(cx, |_, cx| Duration::from_secs(cx.global::<Current>().0.git_autofetch_period.max(5))) else { return };
+                cx.background_executor().timer(period).await;
+                let Ok(repos) = this.update_in(cx, |t, window, cx| if cx.global::<Current>().0.git_autofetch && window.is_window_active() { t.fetchable() } else { Vec::new() }) else { return };
                 for repo in repos {
                     // an op may have been queued on it while the previous repo fetched
                     match this.update(cx, |t, _| t.fetchable().contains(&repo)) {

@@ -455,12 +455,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut ws = nothing_staged(tmp.path());
         fs::create_dir_all(tmp.path().join("antler")).unwrap();
-        fs::write(tmp.path().join("antler/settings.json"), r#"{"scan_depth": 5}"#).unwrap();
+        fs::write(tmp.path().join("antler/settings.json"), r#"{"antler.scanDepth": 5}"#).unwrap();
 
         ws.smart_commit(SmartCommit::Always);
 
         assert_eq!(ws.last_error, None);
-        assert_eq!(saved_settings(tmp.path()), serde_json::json!({"scan_depth": 5, "git_enable_smart_commit": true}), "other settings are kept");
+        assert_eq!(saved_settings(tmp.path()), serde_json::json!({"antler.scanDepth": 5, "git.enableSmartCommit": true}), "other settings are kept");
         let op = ws.commit(0, false).expect("commits everything");
         assert!(op.confirmation().is_none());
         ws.perform(op);
@@ -475,7 +475,7 @@ mod tests {
         ws.smart_commit(SmartCommit::Never);
 
         assert_eq!(ws.last_error, None);
-        assert_eq!(saved_settings(tmp.path()), serde_json::json!({"git_suggest_smart_commit": false}));
+        assert_eq!(saved_settings(tmp.path()), serde_json::json!({"git.suggestSmartCommit": false}));
         assert!(ws.commit(0, false).is_none());
         assert_eq!(ws.last_error.as_deref(), Some("There are no staged changes to commit."));
         ws.set_root(tmp.path().join("one"));

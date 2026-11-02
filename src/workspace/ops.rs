@@ -598,8 +598,8 @@ impl Workspace {
     /// (`last_error` if that fails; the choice still holds until quit).
     pub fn smart_commit(&mut self, choice: SmartCommit) {
         let (key, value) = match choice {
-            SmartCommit::Always => ("git_enable_smart_commit", &mut self.enable_smart_commit),
-            SmartCommit::Never => ("git_suggest_smart_commit", &mut self.suggest_smart_commit),
+            SmartCommit::Always => ("git.enableSmartCommit", &mut self.enable_smart_commit),
+            SmartCommit::Never => ("git.suggestSmartCommit", &mut self.suggest_smart_commit),
         };
         *value = matches!(choice, SmartCommit::Always);
         let on = *value;
@@ -616,7 +616,7 @@ impl Workspace {
     /// "OK, Don't Show Again" in the Sync question: saved in the settings file (`last_error` if that fails).
     pub fn dont_confirm_sync(&mut self) {
         self.confirm_sync = false;
-        self.save_setting("git_confirm_sync", false);
+        self.save_setting("git.confirmSync", false);
     }
 
     /// The repos the auto-fetch may fetch now: every Section but those with an op in `busy` (queued or running).
@@ -1657,7 +1657,7 @@ mod transfer_tests {
         ws.dont_confirm_drag_and_drop();
         assert_eq!(ws.last_error, None);
         let saved: serde_json::Value = serde_json::from_str(&fs::read_to_string(tmp.path().join("antler/settings.json")).unwrap()).unwrap();
-        assert_eq!(saved, serde_json::json!({"explorer_confirm_drag_and_drop": false}));
+        assert_eq!(saved, serde_json::json!({"explorer.confirmDragAndDrop": false}));
         assert_eq!(ws.drag_confirmation(&one), None);
     }
 }

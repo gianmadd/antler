@@ -55,11 +55,18 @@ pub struct Workspace {
     pub split: bool,
     /// Salvataggio automatico: `afterDelay` with this delay since the last edit; `None` is `off`.
     pub auto_save: Option<Duration>,
-    /// `git_enable_smart_commit` / `git_suggest_smart_commit` of the settings (VS Code's Always / Never).
+    /// `git.enableSmartCommit` / `git.suggestSmartCommit` of the settings (VS Code's Always / Never).
     pub enable_smart_commit: bool,
     pub suggest_smart_commit: bool,
-    /// `git_confirm_sync` of the settings: ask before Sync.
+    /// `git.confirmSync` of the settings: ask before Sync.
     pub confirm_sync: bool,
+    /// `files.trimTrailingWhitespace` and `files.insertFinalNewline`: applied to the text when it is saved.
+    pub trim_trailing_whitespace: bool,
+    pub insert_final_newline: bool,
+    /// `explorer.excludeGitIgnore`: the Explorer leaves out what `.gitignore` ignores.
+    pub hide_ignored: bool,
+    /// `antler.confirmDiscard`: ask before discarding changes.
+    pub confirm_discard: bool,
     /// Where Always / Never are saved; `None` (tests) saves nothing.
     pub settings_file: Option<PathBuf>,
     /// Where the app's own state is saved (`state.rs`); `None` (tests) saves nothing.
@@ -120,6 +127,19 @@ pub enum View {
 }
 
 impl Workspace {
+    /// Takes the settings the model reads; the view rescans when one that shapes the scan or the tree changed.
+    pub fn apply_settings(&mut self, s: &crate::settings::Settings) {
+        self.depth = s.scan_depth;
+        self.hide_clean = s.hide_clean_repos;
+        self.auto_save = (s.auto_save == crate::settings::AutoSave::AfterDelay).then(|| Duration::from_millis(s.auto_save_delay));
+        (self.enable_smart_commit, self.suggest_smart_commit) = (s.git_enable_smart_commit, s.git_suggest_smart_commit);
+        self.confirm_sync = s.git_confirm_sync;
+        self.confirm_drag_and_drop = s.explorer_confirm_drag_and_drop;
+        (self.trim_trailing_whitespace, self.insert_final_newline) = (s.trim_trailing_whitespace, s.insert_final_newline);
+        self.hide_ignored = s.explorer_exclude_git_ignore;
+        self.confirm_discard = s.confirm_discard;
+    }
+
     /// An empty workspace on `root`; nothing is loaded until `apply(scan(..))`.
     pub fn new(root: PathBuf) -> Self {
         Workspace {
@@ -138,6 +158,10 @@ impl Workspace {
             enable_smart_commit: false,
             suggest_smart_commit: true,
             confirm_sync: true,
+            trim_trailing_whitespace: false,
+            insert_final_newline: false,
+            hide_ignored: false,
+            confirm_discard: true,
             settings_file: None,
             state_file: None,
             confirm_drag_and_drop: true,
@@ -431,6 +455,15 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apply_settings_sets_every_field_the_model_reads() {
+        let mut ws = Workspace::new("/r".into());
+        let s = crate::settings::Settings { scan_depth: 7, hide_clean_repos: true, trim_trailing_whitespace: true, insert_final_newline: true, explorer_exclude_git_ignore: true, confirm_discard: false, auto_save: crate::settings::AutoSave::Off, ..Default::default() };
+        ws.apply_settings(&s);
+        assert_eq!((ws.depth, ws.hide_clean, ws.trim_trailing_whitespace, ws.insert_final_newline), (7, true, true, true));
+        assert_eq!((ws.hide_ignored, ws.confirm_discard, ws.auto_save), (true, false, None));
+    }
+
     use super::*;
     use crate::workspace::tests_common::*;
     use std::fs;
