@@ -39,7 +39,7 @@ fi
 # the run for the tag may take a moment to appear
 run_id=
 for _ in $(seq 30); do
-    run_id=$(gh run list -R $repo --workflow release.yml --branch "$tag" --limit 1 --json databaseId -q '.[0].databaseId')
+    run_id=$(gh run list -R $repo --workflow release.yml --commit "$(git rev-parse HEAD)" --limit 1 --json databaseId -q '.[0].databaseId')
     [[ -n $run_id ]] && break
     sleep 5
 done
