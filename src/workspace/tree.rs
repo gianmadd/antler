@@ -629,6 +629,50 @@ mod tests {
     }
 
     #[test]
+    fn renaming_a_folder_leaves_no_trailing_slash_in_the_tree_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("old/sub")).unwrap();
+        fs::write(root.join("old/sub/a.txt"), "a\n").unwrap();
+        fs::write(root.join("old/b.txt"), "b\n").unwrap();
+        let mut ws = Workspace::open(root);
+        ws.toggle_dir_now(&root.join("old"));
+
+        ws.start_rename(&root.join("old"));
+        let op = ws.finish_naming("new").unwrap().unwrap();
+        ws.perform(op);
+
+        // `Path` equality ignores a trailing slash, so compare the text
+        assert!(ws.tree.keys().any(|k| k.to_str() == root.join("new").to_str()));
+        assert!(ws.tree.keys().all(|k| !k.to_string_lossy().ends_with('/')));
+    }
+
+    #[test]
+    fn trashing_a_file_closes_its_diff_tabs_but_not_a_commit_diff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        repo(root);
+        fs::write(root.join("a.txt"), "a2\n").unwrap();
+        fs::write(root.join("b.txt"), "b2\n").unwrap();
+        git(root, &["add", "b.txt"]);
+        let mut ws = Workspace::open(root);
+        ws.show(0, false, "a.txt", true);
+        ws.show(0, true, "b.txt", true);
+        let sha = last_commit(root);
+        let mut commit = DiffSource::working(root.to_path_buf(), "a.txt".into(), false, false);
+        commit.commit = Some(sha);
+        ws.open_diff(commit, true);
+
+        let op = ws.trash(&root.join("a.txt"));
+        ws.perform(op);
+        let op = ws.trash(&root.join("b.txt"));
+        ws.perform(op);
+
+        assert_eq!(ws.tabs.len(), 1, "the commit's diff shows history, not the file");
+        assert!(ws.tabs[0].diff().unwrap().source.commit.is_some());
+    }
+
+    #[test]
     fn a_case_only_rename_is_allowed() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
