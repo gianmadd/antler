@@ -1,6 +1,6 @@
 #!/bin/bash
 # Compares Antler, VS Code (no extensions) and Zed on the same Root: startup, idle memory, idle CPU,
-# memory with 10 files open, disk size. Each app runs in a throwaway profile, so the user's own windows
+# memory with 10 files open, disk size. Each app runs in a throwaway profile (Antler: an empty HOME, so ~/.config/antler is never read or written), so the user's own windows
 # and settings are untouched; it only quits the processes it started. Results: target/bench/results.tsv.
 #
 # usage: scripts/benchmark.sh [ROOT] [RUNS]     (default ROOT: the current folder, RUNS 3)
@@ -56,7 +56,8 @@ stop() { # quits the tree started by this script
 launch() { # app, profile dir, extra args...; prints the PID
     local app=$1 prof=$2; shift 2
     case $app in
-        antler) "$ANTLER" "$@" >/dev/null 2>&1 & ;;
+        # Antler reads its config from $HOME/.config/antler: an empty HOME per launch = no settings, recent.json or state
+        antler) rm -rf "$prof/home"; mkdir -p "$prof/home"; HOME="$prof/home" "$ANTLER" "$@" >/dev/null 2>&1 & ;;
         vscode) "$CODE" --user-data-dir "$prof/user" --extensions-dir "$prof/ext" --disable-extensions \
                     --new-window --skip-welcome --skip-release-notes --disable-workspace-trust "$@" >/dev/null 2>&1 & ;;
         zed) "$ZED" --user-data-dir "$prof" "$@" >/dev/null 2>&1 & ;;
