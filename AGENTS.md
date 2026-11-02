@@ -20,4 +20,11 @@ Single-context: `GLOSSARY.md` + `docs/adr/` at the root. See `docs/agents/domain
 
 - Verified notes on the GPUI / gpui-component APIs the project uses: `docs/agents/gpui-notes.md` (read them before writing UI code; add what you discover).
 - Git: every feature behaves like VS Code with default settings (`docs/adr/0003-behave-like-vscode.md`); the same principle applies to the Explorer, the editor and tabs. Deliberate differences: `docs/vscode-differences.md`.
-- Tests cover the model (`src/workspace/` and the pure modules); the GPUI interface is checked by hand.
+- Tests cover the model (`src/workspace/` and the pure modules); the GPUI interface is checked by running the app.
+
+<!-- agents-repo-setup -->
+## Personal instructions
+
+Before your first reply or action, read `AGENTS.local.md` next to this file, if it exists, and follow it as part of these instructions: @AGENTS.local.md
+It holds this checkout's personal rules; it is not committed and not every agent loads it on its own. In a worktree, read it from the main checkout root, `$(git rev-parse --path-format=absolute --git-common-dir)/..`.
+<!-- /agents-repo-setup -->
