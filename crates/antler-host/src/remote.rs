@@ -111,16 +111,15 @@ impl Inner {
         self.send(id, req, body).inspect_err(|_| drop(self.shared.pending.lock().unwrap_or_else(|e| e.into_inner()).1.remove(&id)))?;
         let mut cancelled = false;
         loop {
+            if !cancelled && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                cancelled = true;
+                self.send(self.next.fetch_add(1, Ordering::Relaxed), Req::Cancel { target: id }, &[]).ok();
+            }
             match rx.recv_timeout(Duration::from_millis(25)) {
                 Ok((Res::Err { kind, msg }, _)) => return Err(io::Error::new(kind_from_name(&kind), msg)),
                 Ok(answer) => return Ok(answer),
                 Err(RecvTimeoutError::Disconnected) => return Err(lost()),
-                Err(RecvTimeoutError::Timeout) => {
-                    if !cancelled && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-                        cancelled = true;
-                        self.send(self.next.fetch_add(1, Ordering::Relaxed), Req::Cancel { target: id }, &[]).ok();
-                    }
-                }
+                Err(RecvTimeoutError::Timeout) => {}
             }
         }
     }
@@ -227,6 +226,9 @@ impl Host for Remote {
     }
 
     fn search(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool) -> Results {
+        if cancel.load(Ordering::Relaxed) {
+            return Results::default(); // like the walk that stops before its first file
+        }
         let req = Req::Search { root: wire_path(root), repos: strings(repos), query: query.clone(), limit, exclude: exclude() };
         match self.inner.call(req, &[], Some(cancel)) {
             Ok((Res::Results(r), _)) => r.into(),

@@ -20,6 +20,8 @@ mod tab;
 mod tree;
 #[cfg(test)]
 mod tests_common;
+#[cfg(test)]
+mod tests_remote;
 
 pub use groups::*;
 pub use ops::*;
@@ -154,7 +156,10 @@ impl Workspace {
     /// An empty workspace on `root`; nothing is loaded until `apply(scan(..))`.
     pub fn new(root: PathBuf) -> Self {
         Workspace {
+            #[cfg(not(test))]
             host: crate::host::local(),
+            #[cfg(test)]
+            host: crate::testing::host(),
             root,
             depth: DEFAULT_DEPTH,
             sections: Vec::new(),

@@ -1521,6 +1521,9 @@ mod transfer_tests {
 
     #[test]
     fn deleting_several_entries_asks_once_and_one_undo_brings_them_all_back() {
+        if crate::testing::over_remote() {
+            return; // the Trash is local: a remote deletes for good
+        }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let mut ws = four(root);

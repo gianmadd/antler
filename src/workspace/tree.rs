@@ -661,6 +661,9 @@ mod tests {
 
     #[test]
     fn trashing_a_file_closes_its_diff_tabs_but_not_a_commit_diff() {
+        if crate::testing::over_remote() {
+            return; // the Trash is local: a remote deletes for good
+        }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         repo(root);
@@ -698,6 +701,9 @@ mod tests {
 
     #[test]
     fn delete_asks_first_warns_about_unsaved_tabs_and_closes_the_tabs_of_what_it_trashed() {
+        if crate::testing::over_remote() {
+            return; // the Trash is local: a remote deletes for good
+        }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         fs::create_dir(root.join("dir")).unwrap();
@@ -916,6 +922,9 @@ mod tests {
 
     #[test]
     fn undo_and_redo_reverse_create_rename_and_delete_which_comes_back_from_the_trash() {
+        if crate::testing::over_remote() {
+            return; // the Trash is local: a remote deletes for good
+        }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         fs::create_dir(root.join("dir")).unwrap();
@@ -964,7 +973,7 @@ mod tests {
 
     impl Workspace {
         /// start_new + finish_naming, read synchronously.
-        fn finish_naming_in(&mut self, dir: &Path, folder: bool, name: &str) -> Op {
+        pub(in crate::workspace) fn finish_naming_in(&mut self, dir: &Path, folder: bool, name: &str) -> Op {
             if let Some(dir) = self.start_new(dir, folder) {
                 self.set_dir_now(dir);
             }
