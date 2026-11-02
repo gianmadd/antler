@@ -137,6 +137,14 @@ impl Tab {
         }
     }
 
+    /// The file on disk this tab shows or diffs: a diff's working file, not a commit's or a Compare Changes'.
+    pub fn disk_path(&self) -> Option<PathBuf> {
+        match &self.kind {
+            TabKind::Diff(d) if !d.source.read_only() => Some(d.source.repo.join(&d.source.path)),
+            _ => self.path().map(Path::to_path_buf),
+        }
+    }
+
     pub fn image(&self) -> Option<&ImageTab> {
         match &self.kind {
             TabKind::Image(i) => Some(i),
@@ -776,7 +784,7 @@ impl Workspace {
                     }
                 }
                 // a renamed folder stays open, like VS Code: its expanded folders move under the new name
-                let rename = |p: &Path| p.strip_prefix(&from).map_or(p.to_path_buf(), |rest| to.join(rest));
+                let rename = |p: &Path| p.strip_prefix(&from).map_or(p.to_path_buf(), |rest| if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) });
                 self.tree = std::mem::take(&mut self.tree)
                     .into_iter()
                     .map(|(d, entries)| (rename(&d), entries.into_iter().map(|(p, dir)| (rename(&p), dir)).collect()))
@@ -786,7 +794,7 @@ impl Workspace {
                 }
             }
             Op::Trash { path, .. } => {
-                while let Some(ix) = self.tabs.iter().position(|t| t.path().is_some_and(|p| p.starts_with(&path))) {
+                while let Some(ix) = self.tabs.iter().position(|t| t.disk_path().is_some_and(|p| p.starts_with(&path))) {
                     self.close_tab(ix);
                 }
                 self.tree.retain(|d, _| !d.starts_with(&path));
