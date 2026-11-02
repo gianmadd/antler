@@ -46,8 +46,20 @@ fn exclude_json(typed: &str) -> serde_json::Value {
     map.into()
 }
 
+/// `workbench.iconTheme`: the themes on offer and None, which the file stores as `null`.
+fn icon_theme_item() -> SettingItem {
+    let options = [("none".into(), "None".into())].into_iter().chain(crate::icons::themes().into_iter().map(|e| (e.id.into(), e.label.into()))).collect();
+    let field = SettingField::dropdown(
+        options,
+        |cx| cx.global::<Current>().0.icon_theme.clone().unwrap_or_else(|| "none".into()).into(),
+        |v: SharedString, cx| put(cx, "workbench.iconTheme", if v.as_ref() == "none" { serde_json::Value::Null } else { json!(v.as_ref() as &str) }),
+    )
+    .default_value(crate::icon_themes::SETI.to_string());
+    SettingItem::new("File Icon Theme", field).description("The icons of files and folders (File Icon Theme in the Command Palette previews them).").keywords(["workbench.iconTheme"])
+}
+
 fn pages() -> Vec<SettingPage> {
-    let themes: Vec<(&'static str, &'static str)> = crate::themes::THEMES.iter().map(|t| (t.name, t.name)).collect();
+    let themes: Vec<(&'static str, &'static str)> = crate::themes::all().into_iter().map(|t| (t.name, t.name)).collect();
     let page = |title: &'static str, items: Vec<SettingItem>| SettingPage::new(title).default_open(true).group(SettingGroup::new().items(items));
     vec![
         page(
@@ -96,6 +108,7 @@ fn pages() -> Vec<SettingPage> {
             "Window",
             vec![
                 choice("Color Theme", "The theme of the whole window (Cmd+K Cmd+T previews them).", "workbench.colorTheme", &themes, |s| s.color_theme.clone()),
+                icon_theme_item(),
                 on_off("Auto Detect Color Scheme", "Follow the macOS appearance with the two preferred themes below.", "window.autoDetectColorScheme", |s| s.auto_detect_color_scheme),
                 choice("Preferred Dark Color Theme", "Used with Auto Detect Color Scheme when macOS is dark.", "workbench.preferredDarkColorTheme", &themes, |s| s.preferred_dark_color_theme.clone()),
                 choice("Preferred Light Color Theme", "Used with Auto Detect Color Scheme when macOS is light.", "workbench.preferredLightColorTheme", &themes, |s| s.preferred_light_color_theme.clone()),
@@ -118,6 +131,8 @@ impl Antler {
             }
             this.open_path(file, None, true, cx);
         }));
-        v_flex().size_full().child(h_flex().px_4().py_2().child(link)).child(div().flex_1().min_h_0().child(Settings::new("settings").pages(pages()))).into_any_element()
+        let more = Button::new("more-themes").link().label("Get more themes").on_click(|_, _, cx| cx.open_url("https://open-vsx.org/?category=Themes"));
+        let install = Button::new("install-vsix").link().label("Install Theme from VSIX…").on_click(cx.listener(|this, _, window, cx| this.install_theme(&crate::theme_view::InstallThemeFromVsix, window, cx)));
+        v_flex().size_full().child(h_flex().px_4().py_2().gap_4().child(link).child(more).child(install)).child(div().flex_1().min_h_0().child(Settings::new("settings").pages(pages()))).into_any_element()
     }
 }

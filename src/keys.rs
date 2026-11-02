@@ -11,7 +11,7 @@ use gpui_kit::*;
 
 use crate::branch_view::CloseBranch;
 use crate::explorer::*;
-use crate::theme_view::SelectTheme;
+use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
 use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
@@ -150,6 +150,8 @@ cmds![
     ("workbench.action.openSettings", "Settings…", "cmd-,", Global, OpenSettings),
     ("workbench.action.openGlobalKeybindings", "Keyboard Shortcuts", "cmd-k cmd-s", Global, OpenKeyboardShortcuts),
     ("workbench.action.selectTheme", "Color Theme", "cmd-k cmd-t", Global, SelectTheme),
+    ("workbench.action.selectIconTheme", "File Icon Theme", "", Global, SelectIconTheme),
+    ("antler.installThemeFromVsix", "Install Theme from VSIX…", "", Global, InstallThemeFromVsix),
     // Edit (the first five belong to the focused text field)
     ("undo", "Undo", "", Input, Undo),
     ("redo", "Redo", "", Input, Redo),

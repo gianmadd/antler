@@ -18,6 +18,7 @@ pub fn c(key: usize) -> Hsla {
 pub fn activate(theme: &crate::themes::ThemeDef, cx: &mut App) {
     use gpui_kit::component::highlighter::{HighlightTheme, SyntaxColors};
     crate::themes::set_current(&theme.palette);
+    apply_icons(!theme.dark, cx);
     let mode = if theme.dark { ThemeMode::Dark } else { ThemeMode::Light };
     Theme::change(mode, None, cx);
     let font_size = cx.try_global::<crate::settings::Current>().map(|s| s.0.ui_font_size);
@@ -58,12 +59,19 @@ pub fn activate(theme: &crate::themes::ThemeDef, cx: &mut App) {
     });
 }
 
+/// The icon theme `workbench.iconTheme` names, for a light or dark colour theme.
+fn apply_icons(light: bool, cx: &mut App) {
+    let setting = cx.try_global::<crate::settings::Current>().map_or(Some(crate::icon_themes::SETI.to_string()), |s| s.0.icon_theme.clone());
+    crate::icons::apply(setting.as_deref(), light, cx);
+}
+
 /// The theme the settings ask for under the given system appearance.
 pub fn apply(system_dark: bool, cx: &mut App) {
     let theme = crate::themes::resolve(&cx.global::<crate::settings::Current>().0, system_dark);
     if cx.try_global::<Theme>().is_none_or(|t| t.highlight_theme.name != theme.name) {
         activate(theme, cx); // other settings change often: no need to rebuild the theme for them
     }
+    apply_icons(!theme.dark, cx);
 }
 
 /// Badge colour, shared by every list that shows git state.
@@ -90,14 +98,9 @@ pub fn badge(badge: char, cx: &App) -> Div {
         .child(badge.to_string())
 }
 
-/// A Material icon at 16px; `img`, not `svg`: `svg` draws an alpha mask in the text colour, `img` keeps the SVG's colours.
-fn material(icon: &str) -> Img {
-    img(crate::icons::path(icon)).size(px(16.)).flex_none()
-}
-
-/// The file-type icon of a path (or bare file name).
-pub fn file_icon(path: &str) -> Img {
-    material(crate::icons::file_icon(path.rsplit('/').next().unwrap_or(path)))
+/// The file-type icon of a path (or bare file name); an empty box when the icon theme has none.
+pub fn file_icon(path: &str) -> Div {
+    crate::icons::file(path.rsplit('/').next().unwrap_or(path))
 }
 
 /// Background of a list row: `--sel` when it is the selected row, the hover colour otherwise.
@@ -106,8 +109,8 @@ pub fn row<E: InteractiveElement + Styled>(el: E, selected: bool) -> E {
 }
 
 /// The folder icon of a path, open when the folder is expanded.
-pub fn folder_icon(path: &str, open: bool) -> Img {
-    material(crate::icons::folder_icon(path, open, false))
+pub fn folder_icon(path: &str, open: bool) -> Div {
+    crate::icons::folder(path.rsplit('/').next().unwrap_or(path), open)
 }
 
 /// Header of a side panel: small uppercase title, optional dim subtitle, buttons on the right.

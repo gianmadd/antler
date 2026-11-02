@@ -1,6 +1,7 @@
 //! Colour themes as data: a palette of named colours per theme, the syntax colours, and the pure choices around
 //! them (which theme a name or the system appearance gives, what the Color Theme picker previews and restores).
 //! `style::c(KEY)` reads the active palette; `style::activate` puts a theme into gpui-component's theme.
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 macro_rules! keys {
@@ -90,9 +91,33 @@ pub static THEMES: [ThemeDef; 3] = [
     },
 ];
 
+/// The themes of installed extensions (see `vsix`); leaked: they live as long as the app and are few.
+static INSTALLED: RwLock<Vec<&'static ThemeDef>> = RwLock::new(Vec::new());
+
+/// Every theme, the built-in ones first: what the pickers and the Settings dropdowns list.
+pub fn all() -> Vec<&'static ThemeDef> {
+    THEMES.iter().chain(INSTALLED.read().map(|l| l.clone()).unwrap_or_default()).collect()
+}
+
 /// The theme called `name`; an unknown name (a theme that was removed, a typo) gives Antler Dark.
 pub fn find(name: &str) -> &'static ThemeDef {
-    THEMES.iter().find(|t| t.name == name).unwrap_or(&THEMES[0])
+    all().into_iter().find(|t| t.name == name).unwrap_or(&THEMES[0])
+}
+
+/// Reads the extensions in `~/.config/antler/themes`: their colour themes join [`all`], their icon themes join `icons::themes`.
+/// shortcut: every call leaks the imported themes again (a few KB per install); upgrade if installs become frequent.
+pub fn reload_installed() {
+    let Some(root) = crate::vsix::default_root() else { return };
+    let (mut colors, mut icons) = (Vec::new(), Vec::new());
+    for ext in crate::vsix::scan(&root) {
+        let dir = root.join(&ext.id);
+        colors.extend(ext.color_themes.iter().filter_map(|t| crate::theme_import::load(&t.label, &t.ui_theme, &t.file, &dir).ok()));
+        icons.extend(ext.icon_themes);
+    }
+    if let Ok(mut list) = INSTALLED.write() {
+        *list = colors;
+    }
+    crate::icons::set_installed(icons);
 }
 
 /// The theme in force: with `window.autoDetectColorScheme` the preferred one for the system appearance, else `workbench.colorTheme`.
@@ -123,15 +148,16 @@ pub struct Picker {
 impl Picker {
     /// Opens on the theme in force.
     pub fn new(current: &'static ThemeDef) -> Self {
-        Picker { original: current, selected: THEMES.iter().position(|t| t.name == current.name).unwrap_or(0) }
+        Picker { original: current, selected: all().iter().position(|t| t.name == current.name).unwrap_or(0) }
     }
     /// The theme to preview now that row `ix` is selected; `None` when nothing changes.
     pub fn select(&mut self, ix: usize) -> Option<&'static ThemeDef> {
-        (ix < THEMES.len() && ix != std::mem::replace(&mut self.selected, ix)).then(|| &THEMES[ix])
+        let theme = *all().get(ix)?;
+        (ix != std::mem::replace(&mut self.selected, ix)).then_some(theme)
     }
     /// Enter: the theme to keep and write.
     pub fn confirm(&self) -> &'static ThemeDef {
-        &THEMES[self.selected]
+        all().get(self.selected).copied().unwrap_or(self.original)
     }
     /// Escape: the theme to put back.
     pub fn cancel(&self) -> &'static ThemeDef {

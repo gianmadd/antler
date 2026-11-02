@@ -13,6 +13,7 @@ mod goto_view;
 mod palette;
 mod graph;
 mod graph_view;
+mod icon_themes;
 mod icons;
 mod keybindings_view;
 mod keys;
@@ -30,10 +31,13 @@ mod state;
 mod style;
 mod sync_view;
 mod tabs;
+mod theme_import;
 mod theme_view;
 mod themes;
 mod update;
+mod vsix;
 mod windows;
+mod woff;
 #[cfg(test)]
 mod testing;
 mod workspace;
@@ -192,6 +196,7 @@ struct Antler {
     goto: Option<goto_view::GoToPopup>,
     /// The Color Theme picker while it is open.
     theme_popup: Option<theme_view::ThemePopup>,
+    icon_popup: Option<theme_view::IconPopup>,
     /// The ids of the commands run from the Command palette, newest first.
     palette_recent: Vec<String>,
     /// The stash message box or picker while it is open.
@@ -267,6 +272,7 @@ impl Antler {
             git_picked: None,
             goto: None,
             theme_popup: None,
+            icon_popup: None,
             palette_recent: ws_recent,
             stash: None,
             switcher: None,
@@ -685,6 +691,8 @@ impl Render for Antler {
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::go_to_line))
             .on_action(cx.listener(Self::select_theme))
+            .on_action(cx.listener(Self::select_icon_theme))
+            .on_action(cx.listener(Self::install_theme))
             .on_action(cx.listener(Self::toggle_minimap))
             .on_action(cx.listener(Self::toggle_render_characters))
             .map(|el| Self::tab_actions(el, cx))
@@ -707,6 +715,7 @@ impl Render for Antler {
             .child(status)
             .children(self.go_to_popup(cx))
             .children(self.theme_popup(cx))
+            .children(self.icon_popup(cx))
             .children(self.stash_popup(cx))
             .children(self.recent_popup(cx))
             .children(self.branch_popup(cx))
@@ -818,6 +827,7 @@ fn main() {
     app.run(move |cx| {
         gpui_kit::init(cx);
         cx.set_global(settings::Current(s));
+        themes::reload_installed();
         style::apply(cx.window_appearance() == WindowAppearance::Dark, cx);
         // a theme change in settings.json (or the picker's write) reaches every window at once; the system appearance matters with autoDetectColorScheme
         cx.observe_global::<settings::Current>(|cx| style::apply(cx.window_appearance() == WindowAppearance::Dark, cx)).detach();

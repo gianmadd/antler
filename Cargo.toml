@@ -24,6 +24,8 @@ image = { version = "0.25", default-features = false }
 usvg = { version = "0.46", default-features = false }
 # already built for gpui-component: the diff of text being typed, no git process per keystroke
 similar = "2.7"
+zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2", "deflate-flate2-zlib-rs"] }
+flate2 = "1.1.10"
 
 # Explorer's Delete: NSFileManager trashItemAtURL (already in the tree through gpui)
 [target.'cfg(target_os = "macos")'.dependencies]

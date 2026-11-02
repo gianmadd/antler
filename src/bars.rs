@@ -77,6 +77,8 @@ impl Antler {
         let (settings, check) = (crate::keys::label(cx, "Settings", "workbench.action.openSettings"), "Check for Updates…");
         let shortcuts = crate::keys::label(cx, "Keyboard Shortcuts", "workbench.action.openGlobalKeybindings");
         let theme = crate::keys::label(cx, "Color Theme", "workbench.action.selectTheme");
+        let icon_theme = crate::keys::label(cx, "File Icon Theme", "workbench.action.selectIconTheme");
+        let install = crate::keys::label(cx, "Install Theme from VSIX…", "antler.installThemeFromVsix");
         div().w(px(48.)).h(px(44.)).flex().items_center().justify_center().child(
             Button::new("manage")
                 .ghost()
@@ -84,6 +86,7 @@ impl Antler {
                 .tooltip("Manage")
                 .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                     let (a, b, p, k, th) = (this.clone(), this.clone(), this.clone(), this.clone(), this.clone());
+                    let (ic, vs) = (this.clone(), this.clone());
                     let menu = menu.item(PopupMenuItem::new(palette.clone()).on_click(move |_, window, cx| {
                         p.update(cx, |t, cx| t.command_palette(&crate::goto_view::CommandPalette, window, cx)).ok();
                     }));
@@ -95,6 +98,12 @@ impl Antler {
                     }));
                     let menu = menu.item(PopupMenuItem::new(theme.clone()).on_click(move |_, window, cx| {
                         th.update(cx, |t, cx| t.select_theme(&crate::theme_view::SelectTheme, window, cx)).ok();
+                    }));
+                    let menu = menu.item(PopupMenuItem::new(icon_theme.clone()).on_click(move |_, window, cx| {
+                        ic.update(cx, |t, cx| t.select_icon_theme(&crate::theme_view::SelectIconTheme, window, cx)).ok();
+                    }));
+                    let menu = menu.item(PopupMenuItem::new(install.clone()).on_click(move |_, window, cx| {
+                        vs.update(cx, |t, cx| t.install_theme(&crate::theme_view::InstallThemeFromVsix, window, cx)).ok();
                     }));
                     menu.when(updates, |menu| {
                         menu.item(PopupMenuItem::new(check).on_click(move |_, window, cx| {

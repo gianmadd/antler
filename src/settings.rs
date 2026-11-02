@@ -103,6 +103,9 @@ pub struct Settings {
     pub preferred_dark_color_theme: String,
     #[serde(rename = "workbench.preferredLightColorTheme")]
     pub preferred_light_color_theme: String,
+    /// Id of a file icon theme (`vs-seti` or an installed one); `null` is no icons.
+    #[serde(rename = "workbench.iconTheme")]
+    pub icon_theme: Option<String>,
 }
 
 fn exclude<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<String, bool>, D::Error> {
@@ -175,6 +178,7 @@ impl Default for Settings {
             auto_detect_color_scheme: false,
             preferred_dark_color_theme: "Antler Dark".into(),
             preferred_light_color_theme: "Antler Light".into(),
+            icon_theme: Some(crate::icon_themes::SETI.into()),
         }
     }
 }
