@@ -20,7 +20,7 @@ use crate::style::{self, ACCENT, FG, FG_DIM, FG_FAINT, HOVER, LINE, LINE_SOFT, M
 use crate::workspace::{self, CloseScope, TabKind};
 use crate::{Antler, CloseTab, Quit, Save, menu_item};
 
-actions!(antler, [TogglePreview]);
+actions!(antler, [TogglePreview, NewUntitledFile]);
 actions!(antler, [ToggleLineComment, ToggleBlockComment, MoveLineUp, MoveLineDown, CopyLineUp, CopyLineDown, DeleteLine]);
 actions!(antler, [InsertLineBelow, InsertLineAbove, Unfold, ToggleWordWrap, ZoomIn, ZoomOut, ZoomReset]);
 actions!(antler, [AddNextMatch, SelectAllMatches, CursorsAtLineEnds]);
@@ -73,6 +73,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
     // the tab commands, VS Code's macOS defaults; for Copy Path and Reveal in Finder, VS Code's "active file" cmd-k
     // chords, which work anywhere. Close to the Right and Reveal in Explorer View have no default key.
     cx.bind_keys([
+        KeyBinding::new("cmd-n", NewUntitledFile, None),
         KeyBinding::new("alt-cmd-t", CloseOtherTabs, None),
         KeyBinding::new("cmd-k u", CloseSavedTabs, None),
         KeyBinding::new("alt-cmd-w", CloseAllTabs, None),
@@ -324,8 +325,34 @@ impl Antler {
     /// Cmd+S: writes the active file tab, then rescans so the Git view and open diffs follow.
     pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
         let Some(a) = self.ws.active else { return };
+        if self.ws.tabs[a].file().is_some_and(|f| f.untitled) {
+            return self.save_untitled(a, window, cx, |_, _, _| {});
+        }
         let jobs = self.ws.save(a).into_iter().collect();
         self.write(jobs, window, cx, |_, _, _| {});
+    }
+
+    /// ⌘N: a new Untitled file.
+    pub(crate) fn new_untitled(&mut self, _: &NewUntitledFile, _: &mut Window, cx: &mut Context<Self>) {
+        self.ws.new_untitled();
+        self.sync_diff(cx);
+        cx.notify();
+    }
+
+    /// Save As for Untitled file `ix`: the native dialog at the Root, then the write; `then` runs once it is on disk.
+    pub(crate) fn save_untitled(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>, then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static) {
+        let (dir, name) = (self.ws.root.clone(), self.ws.tabs[ix].title());
+        let picked = cx.prompt_for_new_path(&dir, Some(&name));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = picked.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                if let Some(job) = this.ws.save_untitled_as(ix, &path) {
+                    this.write(vec![job], window, cx, then);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Writes `jobs` off the UI thread, after any earlier write so the disk ends with the newest text; then
@@ -392,7 +419,7 @@ impl Antler {
 
     /// Cmd+Q or closing the window: asks about every unsaved tab, then quits.
     pub(crate) fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_unsaved(self.ws.dirty_tabs(), window, cx, |_, _, cx| cx.quit());
+        self.confirm_unsaved(self.ws.quit_dirty_tabs(), window, cx, |_, _, cx| cx.quit());
     }
 
     /// Opens a file's diff in a tab (preview unless `pin`) and loads it on a background thread.
@@ -531,6 +558,7 @@ impl Antler {
             .on_action(cx.listener(|this, _: &CloseAllTabs, w, cx| on_active(this, |t, a| t.close_scope(a, CloseScope::All, w, cx))))
             .on_action(cx.listener(|this, _: &CopyTabPath, _, cx| on_active(this, |t, a| t.copy_tab_path(a, false, cx))))
             .on_action(cx.listener(|this, _: &CopyRelativeTabPath, _, cx| on_active(this, |t, a| t.copy_tab_path(a, true, cx))))
+            .on_action(cx.listener(Self::new_untitled))
             .on_action(cx.listener(|this, _: &RevealTabInFinder, _, cx| on_active(this, |t, a| cx.reveal_path(&t.tab_file(a)))))
             .on_action(cx.listener(|this, _: &RevealTabInExplorer, w, cx| on_active(this, |t, a| t.reveal_in_explorer(t.tab_file(a), w, cx))))
             .on_action(cx.listener(|this, _: &KeepTabOpen, _, cx| on_active(this, |t, a| t.keep_tab_open(a, cx))))

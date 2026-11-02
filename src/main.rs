@@ -49,7 +49,7 @@ use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use style::{ACT, FG, FG_DIM, LINE_SOFT, MAIN, SIDE, c};
 use workspace::{GitRow, Op, View, Workspace};
-use tabs::TogglePreview;
+use tabs::{NewUntitledFile, TogglePreview};
 
 actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch]);
 actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates]);
@@ -70,7 +70,7 @@ fn set_menus(cx: &mut App) {
             (cx.global::<update::Enabled>().0.then(|| [MenuItem::action("Check for Updates…", CheckForUpdates), MenuItem::separator()]).into_iter().flatten())
                 .chain([MenuItem::action("Quit Antler", Quit)]),
         ),
-        Menu::new("File").items([MenuItem::action("Save", Save), MenuItem::action("Open Folder…", OpenFolder), MenuItem::submenu(open_recent), MenuItem::action("Close Folder", CloseFolder)]),
+        Menu::new("File").items([MenuItem::action("New File", NewUntitledFile), MenuItem::action("Save", Save), MenuItem::action("Open Folder…", OpenFolder), MenuItem::submenu(open_recent), MenuItem::action("Close Folder", CloseFolder)]),
         Menu::new("View").items([MenuItem::submenu(Menu::new("Minimap").items([
             MenuItem::Action {
                 name: "Show Minimap".into(),
@@ -191,7 +191,7 @@ impl Antler {
         window.on_window_should_close(cx, move |window, cx| {
             // unsaved tabs: ask first, and quit from the dialog
             this.update(cx, |t, cx| {
-                let clean = t.ws.dirty_tabs().is_empty();
+                let clean = t.ws.quit_dirty_tabs().is_empty();
                 if !clean {
                     t.quit(&Quit, window, cx);
                 }
@@ -240,6 +240,14 @@ impl Antler {
             side: Default::default(),
             update_notified: Default::default(),
         };
+        // hot exit: the Untitled files and their text go into the state file on quit and come back at the next start
+        cx.on_app_quit(|this, _| {
+            if let Some(f) = &this.ws.state_file {
+                crate::settings::set(f, "untitled", serde_json::json!(this.ws.untitled_state())).ok();
+            }
+            async {}
+        })
+        .detach();
         if this.ws.has_folder() {
             this.watch(window, cx);
             this.refresh(window, cx);
@@ -586,6 +594,7 @@ fn main() {
     ws.state_file = state::default_path();
     if let Some(f) = &ws.state_file {
         ws.graph.load_filters(&state::graph_filters(f));
+        ws.restore_untitled(state::untitled(f));
     }
     let update_on = s.update_mode == settings::UpdateMode::Default;
     let (minimap, minimap_chars) = (s.editor_minimap_enabled, s.editor_minimap_render_characters);

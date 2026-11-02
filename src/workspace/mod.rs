@@ -278,7 +278,7 @@ impl Workspace {
             changed: self.changed.drain().collect(),
             graph: self.graph.repo.clone(),
             files: (self.tabs.iter())
-                .filter(|t| t.file().is_some_and(|f| !f.loading))
+                .filter(|t| t.file().is_some_and(|f| !f.loading && !f.untitled))
                 .filter_map(|t| t.file().map(|f| f.path.clone()))
                 .collect(),
         }

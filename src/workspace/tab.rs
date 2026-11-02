@@ -217,6 +217,8 @@ pub struct FileTab {
     pub quick: Option<DiffTab>,
     /// A Markdown file showing its rendered `text` in place of the editor (which stays alive, keeping cursor and scroll).
     pub rendered: bool,
+    /// An Untitled file: `path` is only its name ("Untitled-1"), there is nothing on disk until Save As.
+    pub untitled: bool,
     /// The last failed save's error: auto-save shows it again only once it changes or a save succeeds.
     save_error: Option<String>,
     /// The text the last save not yet installed is writing: a rescan finding it on disk saw no outside change.
@@ -307,7 +309,7 @@ impl FileTab {
 
     /// An empty file tab, `loading` until `set`.
     fn new(path: &Path) -> FileTab {
-        FileTab { path: path.to_path_buf(), text: String::new(), disk: String::new(), error: None, goto: None, edited: None, conflict: None, loading: true, quick: None, rendered: false, save_error: None, saving: None }
+        FileTab { path: path.to_path_buf(), text: String::new(), disk: String::new(), error: None, goto: None, edited: None, conflict: None, loading: true, quick: None, rendered: false, untitled: false, save_error: None, saving: None }
     }
 
     /// Blocking: the file's text, or why it cannot be opened: "Binary file" (a NUL byte or not UTF-8), or the read error.
@@ -659,7 +661,7 @@ impl Workspace {
 
     /// The write that saves file tab `ix`, or the file on the right of a diff (`None` for a diff without one): run it off the UI thread, then `saved`.
     pub fn save(&mut self, ix: usize) -> Option<SaveJob> {
-        let f = self.tabs[ix].file_mut()?;
+        let f = self.tabs[ix].file_mut().filter(|f| !f.untitled)?; // an Untitled file needs a path first: `save_untitled_as`
         f.saving = Some(f.text.clone());
         Some(SaveJob { path: f.path.clone(), text: f.text.clone(), auto: false })
     }
@@ -817,9 +819,49 @@ impl Workspace {
         }
     }
 
-    /// Tabs with unsaved edits, to ask about before quitting.
+    /// Tabs with unsaved edits, to ask about before they are lost.
     pub fn dirty_tabs(&self) -> Vec<usize> {
         (0..self.tabs.len()).filter(|&i| self.tabs[i].is_dirty()).collect()
+    }
+
+    /// Like `dirty_tabs` for quitting: Untitled files are kept by hot exit (`untitled_state`), so nothing asks.
+    pub fn quit_dirty_tabs(&self) -> Vec<usize> {
+        self.dirty_tabs().into_iter().filter(|&i| self.tabs[i].file().is_some_and(|f| !f.untitled)).collect()
+    }
+
+    /// ⌘N: a new empty Untitled file, named with the lowest free number, in a pinned active tab.
+    pub fn new_untitled(&mut self) -> usize {
+        let used = |n: usize| self.tabs.iter().any(|t| t.file().is_some_and(|f| f.untitled && f.path == Path::new(&format!("Untitled-{n}"))));
+        let n = (1..).find(|&n| !used(n)).unwrap_or(1);
+        self.add_untitled(format!("Untitled-{n}"), String::new())
+    }
+
+    fn add_untitled(&mut self, name: String, text: String) -> usize {
+        let mut f = FileTab::new(Path::new(&name));
+        (f.loading, f.untitled, f.text) = (false, true, text);
+        self.tabs.push(Tab { preview: false, kind: TabKind::File(f), used: 0 });
+        let ix = self.tabs.len() - 1;
+        self.activate(ix);
+        ix
+    }
+
+    /// The (name, text) of every Untitled file, for the session state saved on quit.
+    pub fn untitled_state(&self) -> Vec<(String, String)> {
+        self.tabs.iter().filter_map(Tab::file).filter(|f| f.untitled).map(|f| (file_name(&f.path), f.text.clone())).collect()
+    }
+
+    /// Hot exit's other half: reopens what `untitled_state` saved.
+    pub fn restore_untitled(&mut self, items: Vec<(String, String)>) {
+        for (name, text) in items {
+            self.add_untitled(name, text);
+        }
+    }
+
+    /// Save As on Untitled file `ix`: the tab becomes a normal file tab on `path` and its write is returned (run, then `saved`).
+    pub fn save_untitled_as(&mut self, ix: usize, path: &Path) -> Option<SaveJob> {
+        let f = self.tabs[ix].file_mut().filter(|f| f.untitled)?;
+        (f.path, f.untitled) = (path.to_path_buf(), false);
+        self.save(ix)
     }
 
     pub fn pin_tab(&mut self, ix: usize) {
@@ -831,7 +873,9 @@ impl Workspace {
     /// the most recently used one, like VS Code's `focusRecentEditorAfterClose`.
     pub fn close_tab(&mut self, ix: usize) {
         let tab = self.tabs.remove(ix);
-        self.closed.push((ix, tab.reopen()));
+        if !tab.file().is_some_and(|f| f.untitled) {
+            self.closed.push((ix, tab.reopen())); // an Untitled file has nothing to reopen
+        }
         self.active = match self.active {
             _ if self.tabs.is_empty() => None,
             Some(a) if a == ix => (0..self.tabs.len()).max_by_key(|&i| self.tabs[i].used),
@@ -1171,7 +1215,7 @@ mod tests {
 
     #[test]
     fn the_language_comes_from_the_extension() {
-        let lang = |p: &str| FileTab { path: p.into(), text: String::new(), disk: String::new(), error: None, goto: None, edited: None, conflict: None, loading: false, quick: None, rendered: false, save_error: None, saving: None }.language();
+        let lang = |p: &str| FileTab { path: p.into(), text: String::new(), disk: String::new(), error: None, goto: None, edited: None, conflict: None, loading: false, quick: None, rendered: false, untitled: false, save_error: None, saving: None }.language();
         assert_eq!(lang("/r/src/main.rs"), "rs");
         assert_eq!(lang("/r/x.H"), "c");
         assert_eq!(lang("/r/App.jsx"), "javascript");
@@ -1400,5 +1444,46 @@ mod tests {
         let (index, file) = gone.load_right();
         ws.set_right(&gone, index, file);
         assert!(!ws.tabs.last().unwrap().diff().unwrap().is_editable(), "a deleted file has no right side");
+    }
+
+    #[test]
+    fn untitled_files_are_numbered_dirty_with_content_and_become_a_file_on_save_as() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::open(tmp.path());
+        let (a, b) = (ws.new_untitled(), ws.new_untitled());
+        assert_eq!((ws.tabs[a].title(), ws.tabs[b].title()), ("Untitled-1".into(), "Untitled-2".into()));
+        ws.close_tab(a);
+        let c = ws.new_untitled();
+        assert_eq!(ws.tabs[c].title(), "Untitled-1", "the lowest free number");
+        assert!(ws.closed.is_empty(), "nothing to reopen");
+
+        assert!(ws.dirty_tabs().is_empty(), "empty: closing does not ask");
+        ws.edit(1, "hello\n".into());
+        assert_eq!(ws.dirty_tabs(), [1]);
+        assert!(ws.quit_dirty_tabs().is_empty(), "hot exit keeps it: quitting does not ask");
+        assert!(ws.save(1).is_none(), "no path yet");
+        ws.refresh();
+        assert_eq!(ws.tabs[1].file().unwrap().text, "hello\n", "a rescan leaves it alone");
+
+        let path = tmp.path().join("new.txt");
+        let job = ws.save_untitled_as(1, &path).unwrap();
+        let result = job.run();
+        assert!(ws.saved(&job, result));
+        assert_eq!((ws.tabs[1].title(), ws.tabs[1].is_dirty()), ("new.txt".into(), false));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn untitled_files_survive_a_restart_as_name_and_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::open(tmp.path());
+        ws.new_untitled();
+        let b = ws.new_untitled();
+        ws.edit(b, "draft".into());
+        let state = ws.untitled_state();
+        let mut again = Workspace::open(tmp.path());
+        again.restore_untitled(state);
+        assert_eq!(again.untitled_state(), [("Untitled-1".into(), String::new()), ("Untitled-2".into(), "draft".into())]);
+        assert_eq!(again.dirty_tabs(), [1]);
     }
 }
