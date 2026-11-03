@@ -128,9 +128,9 @@ pub fn relative_time(time: i64, now: i64) -> String {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum RefFilter {
     /// HEAD and its upstream.
-    #[default]
     Auto,
-    /// Every branch, remote and tag.
+    /// Every branch, remote and tag: the default (VS Code's is Auto).
+    #[default]
     All,
     /// These branches (full ref names), at least one.
     Branches(Vec<String>),
@@ -216,18 +216,18 @@ pub struct Graph {
     /// Branches, tags and HEAD of `repo` at the last rescan; `stale` when they moved since the history was read.
     pub(crate) refs: Option<String>,
     pub(crate) stale: bool,
-    /// The branch choice of each repo that has one; the others follow `RefFilter::Auto`. Saved in the state file.
+    /// The branch choice of each repo that has one; the others show All. Saved in the state file.
     filters: HashMap<PathBuf, RefFilter>,
     /// Full names of `repo`'s local and remote branches, from its last first page: the picker's list.
     pub branches: Vec<String>,
 }
 
 impl RefFilter {
-    /// VS Code's `scm.graphView.referencesFilter` form: `"all"` or the list of refs; Auto is not saved.
+    /// VS Code's `scm.graphView.referencesFilter` form: `"auto"`, `"all"` or the list of refs; the default (All) is not saved.
     fn to_json(&self) -> Option<serde_json::Value> {
         match self {
-            RefFilter::Auto => None,
-            RefFilter::All => Some("all".into()),
+            RefFilter::Auto => Some("auto".into()),
+            RefFilter::All => None,
             RefFilter::Branches(b) => Some(b.clone().into()),
         }
     }
@@ -235,6 +235,7 @@ impl RefFilter {
     fn from_json(v: &serde_json::Value) -> Option<RefFilter> {
         match v {
             serde_json::Value::String(s) if s == "all" => Some(RefFilter::All),
+            serde_json::Value::String(s) if s == "auto" => Some(RefFilter::Auto),
             serde_json::Value::Array(a) if !a.is_empty() => {
                 Some(RefFilter::Branches(a.iter().map(|r| r.as_str().map(String::from)).collect::<Option<_>>()?))
             }
@@ -364,7 +365,7 @@ impl Workspace {
             return None;
         }
         let repo = g.repo.clone()?;
-        if filter == RefFilter::Auto {
+        if filter == RefFilter::default() {
             g.filters.remove(&repo);
         } else {
             g.filters.insert(repo, filter);
@@ -378,7 +379,7 @@ impl Workspace {
         self.graph.more()
     }
 
-    /// Ticks or unticks one branch in the picker; unticking the last one goes back to Auto.
+    /// Ticks or unticks one branch in the picker; unticking the last one goes back to the default (All).
     pub fn toggle_graph_branch(&mut self, branch: &str) -> Option<Page> {
         let mut chosen = match self.graph.filter() {
             RefFilter::Branches(b) => b,
@@ -388,7 +389,7 @@ impl Workspace {
             Some(i) => _ = chosen.remove(i),
             None => chosen.push(branch.into()),
         }
-        self.set_graph_filter(if chosen.is_empty() { RefFilter::Auto } else { RefFilter::Branches(chosen) })
+        self.set_graph_filter(if chosen.is_empty() { RefFilter::default() } else { RefFilter::Branches(chosen) })
     }
 
     /// Installs a loaded page; ignored if the graph moved to another repo or branch choice meanwhile.
@@ -730,13 +731,15 @@ mod tests {
     }
 
     #[test]
-    fn by_default_the_graph_shows_head_and_its_upstream_with_their_tags() {
+    fn by_default_the_graph_shows_every_branch_and_auto_shows_head_and_its_upstream_with_their_tags() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         repo_with_upstream(p);
         let mut ws = Workspace::open(p);
         let page = ws.sync_graph().unwrap();
-        assert_eq!(page.filter, RefFilter::Auto);
+        assert_eq!(page.filter, RefFilter::All);
+        assert_eq!(page.revs(), ["--all"]);
+        let page = ws.set_graph_filter(RefFilter::Auto).unwrap();
         assert_eq!(page.revs(), ["HEAD", "refs/remotes/origin/main"]);
         load_all(&mut ws, Some(page));
         assert_eq!(sorted(&ws), ["init", "local work", "upstream work"], "no feature branch");
@@ -763,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn all_or_chosen_branches_replace_auto_for_that_repo_and_stay_after_a_restart() {
+    fn auto_or_chosen_branches_replace_all_for_that_repo_and_stay_after_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let (one, two) = (root.join("one"), root.join("two"));
@@ -774,9 +777,7 @@ mod tests {
         load_all(&mut ws, page);
         assert_eq!(ws.graph.repo.as_ref(), Some(&one));
 
-        let page = ws.set_graph_filter(RefFilter::All).unwrap();
-        assert_eq!(page.revs(), ["--all"]);
-        load_all(&mut ws, Some(page));
+        assert_eq!(ws.graph.filter(), RefFilter::All);
         assert_eq!(sorted(&ws), ["feature work", "init", "local work", "upstream work"]);
 
         let page = ws.toggle_graph_branch("refs/heads/feature").unwrap();
@@ -793,15 +794,15 @@ mod tests {
 
         let page = ws.pick_graph_repo(two.clone());
         load_all(&mut ws, page);
-        assert_eq!(ws.graph.filter(), RefFilter::Auto, "the choice is per repo");
+        assert_eq!(ws.graph.filter(), RefFilter::All, "the choice is per repo");
         let page = ws.pick_graph_repo(one.clone());
         load_all(&mut ws, page);
         assert_eq!(ws.graph.filter(), RefFilter::Branches(vec!["refs/heads/feature".into(), "refs/heads/main".into()]));
 
         ws.toggle_graph_branch("refs/heads/feature");
         let page = ws.toggle_graph_branch("refs/heads/main").unwrap();
-        assert_eq!(page.filter, RefFilter::Auto, "unticking the last branch goes back to Auto");
-        assert_eq!(ws.set_graph_filter(RefFilter::Auto), None, "the same choice again: nothing reloads");
+        assert_eq!(page.filter, RefFilter::All, "unticking the last branch goes back to the default");
+        assert_eq!(ws.set_graph_filter(RefFilter::All), None, "the same choice again: nothing reloads");
     }
 
     #[test]
@@ -815,23 +816,23 @@ mod tests {
         ws.state_file = Some(file.clone());
         let page = ws.sync_graph();
         load_all(&mut ws, page);
-        ws.set_graph_filter(RefFilter::All);
+        ws.set_graph_filter(RefFilter::Auto);
         let page = ws.pick_graph_repo(two.clone());
         load_all(&mut ws, page);
         ws.set_graph_filter(RefFilter::Branches(vec!["refs/heads/main".into()]));
         assert_eq!(ws.last_error, None);
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert_eq!(saved["graph_filters"][one.to_str().unwrap()], "all");
+        assert_eq!(saved["graph_filters"][one.to_str().unwrap()], "auto");
         assert_eq!(saved["graph_filters"][two.to_str().unwrap()][0], "refs/heads/main");
 
         let mut again = Workspace::open(dir.path());
         again.graph.load_filters(&crate::state::graph_filters(&file));
         let page = again.sync_graph().unwrap();
-        assert_eq!(page.filter, RefFilter::All, "the first repo comes back with its choice");
+        assert_eq!(page.filter, RefFilter::Auto, "the first repo comes back with its choice");
         again.state_file = Some(file.clone());
-        again.set_graph_filter(RefFilter::Auto);
+        again.set_graph_filter(RefFilter::All);
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert!(saved["graph_filters"].get(one.to_str().unwrap()).is_none(), "Auto is not saved, like VS Code");
+        assert!(saved["graph_filters"].get(one.to_str().unwrap()).is_none(), "the default (All) is not saved");
         assert!(saved["graph_filters"].get(two.to_str().unwrap()).is_some());
     }
 
