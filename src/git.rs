@@ -714,22 +714,26 @@ fn network(repo: &Path, args: &[&str], interactive: bool) -> Result<String> {
 }
 
 /// The environment that makes git and ssh ask through the antler binary (see `askpass`); without `interactive`
-/// the helper is `false`, so a question fails at once.
+/// the helper is `false` (on Windows the binary in its never-asking mode), so a question fails at once.
 pub fn askpass_envs(interactive: bool) -> Vec<(&'static str, std::ffi::OsString)> {
-    let exe = std::env::current_exe().map(|p| p.into_os_string()).unwrap_or_default();
-    // Windows has no `false`: the antler binary in its never-asking mode stands in
-    let (helper, mode) = match (interactive && !exe.is_empty(), cfg!(windows)) {
-        (true, _) => (exe, "1"),
-        (false, true) => (exe, ASKPASS_NEVER),
-        (false, false) => ("/usr/bin/false".into(), "1"),
+    askpass_envs_for(std::env::current_exe().ok().map(std::path::PathBuf::into_os_string), interactive)
+}
+
+/// [`askpass_envs`] with the antler binary at `exe` (`None`: unknown).
+fn askpass_envs_for(exe: Option<std::ffi::OsString>, interactive: bool) -> Vec<(&'static str, std::ffi::OsString)> {
+    // Windows has no `false`: the antler binary in its never-asking mode stands in. Without that binary there is
+    // no helper at all: git and ssh, with no terminal and no askpass (`SSH_ASKPASS_REQUIRE=force`), fail at once
+    let helper = match (exe, interactive, cfg!(windows)) {
+        (Some(exe), true, _) => Some((exe, "1")),
+        (Some(exe), false, true) => Some((exe, ASKPASS_NEVER)),
+        (None, _, true) => None,
+        (_, _, false) => Some(("/usr/bin/false".into(), "1")),
     };
-    vec![
-        ("GIT_TERMINAL_PROMPT", "0".into()),
-        ("GIT_ASKPASS", helper.clone()),
-        ("SSH_ASKPASS", helper),
-        ("SSH_ASKPASS_REQUIRE", "force".into()), // ssh would otherwise read the passphrase from the tty, if any
-        (ASKPASS_ENV, mode.into()),
-    ]
+    let mut envs = vec![("GIT_TERMINAL_PROMPT", "0".into()), ("SSH_ASKPASS_REQUIRE", "force".into())]; // ssh would otherwise read the passphrase from the tty, if any
+    if let Some((helper, mode)) = helper {
+        envs.extend([("GIT_ASKPASS", helper.clone()), ("SSH_ASKPASS", helper), (ASKPASS_ENV, mode.into())]);
+    }
+    envs
 }
 
 /// `ASKPASS_ENV`'s value when the question must fail at once.
@@ -774,8 +778,8 @@ fn askpass_powershell(hidden: bool) -> String {
 fn askpass_command(prompt: &str) -> Command {
     if cfg!(windows) {
         let mut c = Command::new("powershell.exe");
-        antler_host::host::no_console(&mut c);
-        c.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &crate::ssh::encoded(&askpass_powershell(asks_secret(prompt)))]).env("ANTLER_ASKPASS_PROMPT", prompt);
+        crate::host::no_console(&mut c);
+        c.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &crate::ssh::powershell_encoded(&askpass_powershell(asks_secret(prompt)))]).env("ANTLER_ASKPASS_PROMPT", prompt);
         c
     } else {
         let mut c = Command::new("osascript");
@@ -916,6 +920,25 @@ mod tests {
         assert!(askpass_powershell(false).contains("UseSystemPasswordChar = $false"));
         assert!(askpass_powershell(true).contains("$env:ANTLER_ASKPASS_PROMPT"), "the prompt never goes inside the script");
         assert!(asks_secret("Enter passphrase for key 'C:\\Users\\me/.ssh/id_ed25519': ") && !asks_secret("Username for 'https://pin.example.com': "));
+    }
+
+    #[test]
+    fn askpass_names_the_antler_binary_and_never_an_empty_helper() {
+        let get = |envs: &[(&str, std::ffi::OsString)], k: &str| envs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+        let exe = Some(std::ffi::OsString::from("antler"));
+        let asking = askpass_envs_for(exe.clone(), true);
+        assert_eq!((get(&asking, "GIT_ASKPASS").as_deref(), get(&asking, ASKPASS_ENV).as_deref()), (Some("antler"), Some("1")));
+        assert_eq!(get(&asking, "SSH_ASKPASS").as_deref(), Some("antler"));
+        let never = askpass_envs_for(exe, false);
+        let never_helper = if cfg!(windows) { ("antler", ASKPASS_NEVER) } else { ("/usr/bin/false", "1") };
+        assert_eq!((get(&never, "GIT_ASKPASS").as_deref(), get(&never, ASKPASS_ENV).as_deref()), (Some(never_helper.0), Some(never_helper.1)));
+        for interactive in [true, false] {
+            let lost = askpass_envs_for(None, interactive); // the binary's path is unknown
+            assert_eq!(get(&lost, "GIT_TERMINAL_PROMPT").as_deref(), Some("0"), "still no terminal prompt");
+            for k in ["GIT_ASKPASS", "SSH_ASKPASS"] {
+                assert_ne!(get(&lost, k).as_deref(), Some(""), "{k} empty");
+            }
+        }
     }
 
     #[test]

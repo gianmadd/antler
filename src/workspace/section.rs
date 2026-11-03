@@ -99,7 +99,7 @@ impl Section {
 
     /// The commit box's placeholder, like VS Code.
     pub fn placeholder(&self) -> String {
-        format!("Message ({}Enter to commit on '{}')", if cfg!(windows) { "Ctrl+" } else { "⌘" }, self.branch)
+        format!("Message ({}Enter to commit on '{}')", crate::keys::primary_modifier(), self.branch)
     }
 }
 
@@ -512,7 +512,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         repo(&tmp.path().join("one"));
         let ws = Workspace::open(tmp.path());
-        assert_eq!(ws.sections[0].placeholder(), if cfg!(windows) { "Message (Ctrl+Enter to commit on 'main')" } else { "Message (⌘Enter to commit on 'main')" });
+        assert_eq!(ws.sections[0].placeholder(), if crate::platform::MAC { "Message (⌘Enter to commit on 'main')" } else { "Message (Ctrl+Enter to commit on 'main')" });
     }
 
     #[test]

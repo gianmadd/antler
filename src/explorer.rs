@@ -436,7 +436,7 @@ impl Antler {
                                         .item(menu_item(&weak, "New File…", move |t, w, cx| t.new_entry(t1.clone(), false, w, cx)))
                                         .item(menu_item(&weak, "New Folder…", move |t, w, cx| t.new_entry(t2.clone(), true, w, cx)))
                                         .separator()
-                                        .item(PopupMenuItem::new(crate::keys::REVEAL_IN_OS).on_click(move |_, _, cx| cx.reveal_path(&reveal)));
+                                        .item(PopupMenuItem::new(crate::platform::REVEAL_IN_OS).on_click(move |_, _, cx| cx.reveal_path(&reveal)));
                                     // like VS Code, only folders offer it
                                     let menu = if dir {
                                         menu.separator().item(menu_item(&weak, "Find in Folder…", move |t, w, cx| t.find_in_folder(&f, w, cx)))

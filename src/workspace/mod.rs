@@ -511,7 +511,7 @@ mod tests {
 
         let ws = Workspace::open(&root);
 
-        let names: Vec<_> = ws.sections.iter().map(|s| s.name.replace('\\', "/")).collect();
+        let names: Vec<_> = ws.sections.iter().map(|s| crate::testing::slashes(&s.name)).collect();
         assert_eq!(names, ["project", "app/api", "app/web"]);
         let api = &ws.sections[1];
         assert_eq!(api.branch, "main");
@@ -559,7 +559,7 @@ mod tests {
         ws.refresh();
 
         assert_eq!(ws.root, tmp.path().join("new"));
-        let names: Vec<_> = ws.sections.iter().map(|s| s.name.replace('\\', "/")).collect();
+        let names: Vec<_> = ws.sections.iter().map(|s| crate::testing::slashes(&s.name)).collect();
         assert_eq!(names, ["two"]);
         assert!(ws.tabs.is_empty() && ws.active.is_none());
         assert!(ws.hide_clean, "options from the command line stay");

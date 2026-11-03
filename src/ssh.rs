@@ -253,11 +253,11 @@ pub fn asset_url(version: &str, os: Os, arch: Arch) -> String {
 
 /// Windows has no `sh`: the script travels as `-EncodedCommand` (base64 of UTF-16LE), which no shell mangles.
 fn powershell(script: &str) -> String {
-    format!("powershell -NoProfile -NonInteractive -EncodedCommand {}", encoded(script))
+    format!("powershell -NoProfile -NonInteractive -EncodedCommand {}", powershell_encoded(script))
 }
 
 /// PowerShell's `-EncodedCommand` value for `script`: base64 of its UTF-16LE.
-pub(crate) fn encoded(script: &str) -> String {
+pub(crate) fn powershell_encoded(script: &str) -> String {
     const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let mut out = String::new();
@@ -380,7 +380,7 @@ impl SshConnector {
             }
         }
         let mut c = Command::new(&self.ssh);
-        antler_host::host::no_console(&mut c);
+        crate::host::no_console(&mut c);
         if let Some(f) = &self.config {
             c.arg("-F").arg(f);
         }
@@ -444,7 +444,7 @@ impl SshConnector {
             let url = asset_url(VERSION, info.os, info.arch);
             // Windows 10 and 11 ship curl.exe in System32
             let mut curl = Command::new(if cfg!(windows) { "curl.exe" } else { "/usr/bin/curl" });
-            antler_host::host::no_console(&mut curl);
+            crate::host::no_console(&mut curl);
             let done = curl.args(["-fsSL", "--retry", "2", "-o"]).arg(&tmp).arg(&url).output().map_err(|e| format!("cannot run curl: {e}"))?;
             if !done.status.success() {
                 return Err(format!("cannot download {url}: {}", String::from_utf8_lossy(&done.stderr).trim()));
@@ -613,9 +613,9 @@ Host first
     #[cfg(unix)]
     #[test]
     fn installs_the_server_and_connects_through_a_stand_in_ssh() {
-        use antler_host::host::Host;
+        use crate::host::Host;
         let tmp = tempfile::tempdir().unwrap();
-        let home = antler_host::host::canonical(tmp.path()).unwrap().join("home");
+        let home = crate::host::canonical(tmp.path()).unwrap().join("home");
         std::fs::create_dir(&home).unwrap();
         let fake = tmp.path().join("fake-ssh");
         let log = tmp.path().join("calls");

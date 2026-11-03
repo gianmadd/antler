@@ -14,6 +14,7 @@ mod host;
 mod goto_view;
 mod palette;
 mod paths;
+mod platform;
 mod ports_view;
 mod graph;
 mod graph_view;
@@ -105,11 +106,9 @@ fn set_menus(cx: &mut App) {
     let layout = Menu::new("Editor Layout").items([keys::item("workbench.action.splitEditor"), keys::item("workbench.action.splitEditorDown")]);
     let mut windows: Vec<MenuItem> = cx.global::<Windows>().0.iter().map(|e| MenuItem::action(windows::title(e.host.as_deref(), &e.root), FocusWindow(e.id))).collect();
     let (mut recent, mut minimap, mut layout) = (Some(open_recent), Some(minimap), Some(layout));
-    // the first menu is the macOS app menu
-    let app = Menu::new("Antler").items(
-        (cx.global::<update::Enabled>().0.then(|| keys::item("antler.checkForUpdates")).into_iter())
-            .chain([keys::item("workbench.action.openSettings"), keys::item("workbench.action.openGlobalKeybindings"), MenuItem::separator(), keys::item("workbench.action.quit")]),
-    );
+    // the macOS app menu, by command id ("-" is a separator)
+    let app: Vec<&str> = cx.global::<update::Enabled>().0.then_some("antler.checkForUpdates").into_iter().chain(["workbench.action.openSettings", "workbench.action.openGlobalKeybindings", "-", "workbench.action.quit"]).collect();
+    let app_item = |id: &str| if id == "-" { MenuItem::separator() } else { keys::item(id) };
     let mut menus: Vec<Menu> = keys::MENUS
         .iter()
         .map(|(name, ids)| {
@@ -123,18 +122,18 @@ fn set_menus(cx: &mut App) {
             }))
         })
         .collect();
-    if cfg!(target_os = "macos") {
-        menus.insert(0, app);
+    if platform::MAC {
+        menus.insert(0, Menu::new("Antler").items(app.into_iter().map(app_item)));
     } else {
         // no app menu: VS Code puts these under File > Preferences and File > Exit
-        let prefs = Menu::new("Preferences").items(app.items.into_iter().filter(|i| !matches!(i, MenuItem::Separator)).filter(|i| !matches!(i, MenuItem::Action { name, .. } if name.as_ref() == "Quit Antler")));
+        let prefs = Menu::new("Preferences").items(app.into_iter().filter(|id| !matches!(*id, "-" | "workbench.action.quit")).map(app_item));
         if let Some(file) = menus.iter_mut().find(|m| m.name.as_ref() == "File") {
             file.items.extend([MenuItem::separator(), MenuItem::submenu(prefs), MenuItem::separator(), MenuItem::action("Exit", Quit)]);
         }
     }
     cx.set_menus(menus);
     // Windows has no system menu bar: each window's title bar draws GPUI's menus (`AppMenuBar`)
-    if !cfg!(target_os = "macos") {
+    if !platform::MAC {
         if let Some(owned) = cx.get_menus() {
             GlobalState::global_mut(cx).set_app_menus(owned);
         }
@@ -152,7 +151,7 @@ impl Global for MenuBars {}
 
 /// A window's menu bar, where there is no system one (see [`set_menus`]).
 fn new_menu_bar(cx: &mut App) -> Option<Entity<AppMenuBar>> {
-    if cfg!(target_os = "macos") {
+    if platform::MAC {
         return None;
     }
     let bar = AppMenuBar::new(cx);
@@ -611,10 +610,10 @@ impl Antler {
         let options = PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open".into()) };
         let picked = cx.prompt_for_paths(options);
         cx.spawn_in(window, async move |this, cx| {
-            // shortcut: picker errors (Linux only) are ignored like a cancel; macOS-only app for now
+            // shortcut: picker errors (Linux only) are ignored like a cancel
             let Ok(Ok(Some(mut paths))) = picked.await else { return };
             let Some(root) = paths.pop() else { return };
-            let root = antler_host::host::canonical(&root).unwrap_or(root); // watcher events carry canonical paths
+            let root = crate::host::canonical(&root).unwrap_or(root); // watcher events carry canonical paths
             this.update_in(cx, |this, window, cx| this.open_root(root, window, cx)).ok();
         })
         .detach();
@@ -842,7 +841,7 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
     }
     let s = cx.global::<settings::Current>().0.clone();
     // watcher events carry canonical paths; a path on a host is the host's to say
-    let root = if link.is_some() { save.root } else { antler_host::host::canonical(&save.root).unwrap_or(save.root) };
+    let root = if link.is_some() { save.root } else { crate::host::canonical(&save.root).unwrap_or(save.root) };
     if std::env::var_os("ANTLER_DEBUG").is_some() {
         eprintln!("antler: new window on {:?}", root);
     }
@@ -890,7 +889,7 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
 /// `antler <folder>` and Finder's "Open With": the window that shows `root` comes to the front, or a new one opens.
 /// Anything that is not a folder is ignored.
 fn open_folder_window(cx: &mut App, root: PathBuf) {
-    let Ok(root) = antler_host::host::canonical(&root) else { return };
+    let Ok(root) = crate::host::canonical(&root) else { return };
     if !root.is_dir() {
         return;
     }
@@ -925,7 +924,7 @@ fn main() {
     settings::migrate(&file); // keys of an older version get the new names
     let (root, s, error) = settings::startup(std::env::args().skip(1), &file);
     // no folder (Finder, Dock, Spotlight give no args and a cwd of `/`): window.restoreWindows decides what opens; the `antler` command passes `$PWD`
-    let root = root.map(|root| antler_host::host::canonical(&root).unwrap_or(root));
+    let root = root.map(|root| crate::host::canonical(&root).unwrap_or(root));
     if let Some(root) = &root {
         recent::add(&recent::default_path(), root);
     }

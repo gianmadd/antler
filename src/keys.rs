@@ -226,7 +226,7 @@ cmds![
     // the active file (VS Code's cmd-k chords, which work anywhere), and the selected row of the Explorer or Git view
     ("workbench.action.files.copyPathOfActiveFile", "Copy Path of Active File", "cmd-k alt-cmd-c", Global, CopyTabPath),
     ("workbench.action.files.copyRelativePathOfActiveFile", "Copy Relative Path of Active File", "cmd-k shift-alt-cmd-c", Global, CopyRelativeTabPath),
-    ("workbench.action.files.revealActiveFileInWindows", if cfg!(windows) { "Reveal Active File in File Explorer" } else { "Reveal Active File in Finder" }, "cmd-k r", Global, RevealTabInFinder),
+    ("workbench.action.files.revealActiveFileInWindows", crate::platform::REVEAL_ACTIVE_FILE_IN_OS, "cmd-k r", Global, RevealTabInFinder),
     ("antler.revealActiveFileInExplorer", "Reveal Active File in Explorer", "", Global, RevealTabInExplorer),
     ("copyFilePath", "Copy Path", "alt-cmd-c", Explorer, CopyEntryPath),
     ("copyFilePath", "Copy Path", "alt-cmd-c", Git, CopyEntryPath),
@@ -251,9 +251,6 @@ cmds![
     ("antler.closeBranchPicker", "Close Branch Picker", "escape", Branch, CloseBranch),
     ("antler.closeStashPicker", "Close Stash Picker", "escape", Stash, CloseStash),
 ];
-
-/// The context menus' item that shows a file in the system's file manager (VS Code's words).
-pub(crate) const REVEAL_IN_OS: &str = if cfg!(windows) { "Reveal in File Explorer" } else { "Reveal in Finder" };
 
 /// One key of one command in one context, as the user's keybindings.json leaves it.
 #[derive(Clone)]
@@ -306,10 +303,10 @@ fn from_vscode(key: &str) -> Option<String> {
 }
 
 fn default_bindings() -> Vec<Binding> {
-    defaults(cfg!(windows))
+    defaults(!crate::platform::MAC)
 }
 
-/// The table's keys, or with `windows` VS Code's Windows defaults (see [`windows_key`]).
+/// The table's keys (the Mac's), or with `windows` VS Code's Windows/Linux defaults (see [`windows_key`]).
 fn defaults(windows: bool) -> Vec<Binding> {
     let key = |cmd: &Cmd| if windows { windows_key(cmd.id, cmd.key) } else { cmd.key.to_string() };
     COMMANDS.iter().map(|cmd| (cmd, key(cmd))).filter(|(_, k)| !k.is_empty()).filter_map(|(cmd, k)| Some(Binding { cmd, key: from_gpui(&k)?, ctx: cmd.ctx, user: false })).collect()
@@ -342,8 +339,25 @@ const WINDOWS_KEYS: &[(&str, &str)] = &[
 fn windows_key(id: &str, mac: &str) -> String {
     match WINDOWS_KEYS.iter().find(|(i, _)| *i == id) {
         Some((_, k)) => k.to_string(),
-        None => mac.split(' ').map(|chord| chord.split('-').map(|m| if m == "cmd" { "ctrl" } else { m }).collect::<Vec<_>>().join("-")).collect::<Vec<_>>().join(" "),
+        None => ctrl_for_cmd(mac),
     }
+}
+
+/// "cmd-k cmd-s" as "ctrl-k ctrl-s".
+fn ctrl_for_cmd(key: &str) -> String {
+    key.split(' ').map(|chord| chord.split('-').map(|m| if m == "cmd" { "ctrl" } else { m }).collect::<Vec<_>>().join("-")).collect::<Vec<_>>().join(" ")
+}
+
+/// A Mac key with its primary modifier as this OS has it: Cmd on macOS, Ctrl elsewhere.
+fn primary(mac: &str) -> String {
+    if crate::platform::MAC { mac.to_string() } else { ctrl_for_cmd(mac) }
+}
+
+/// The primary modifier as the labels show it, in front of a key: "⌘" on macOS ("⌘S"), "Ctrl+" elsewhere
+/// ("Ctrl+S").
+pub(crate) fn primary_modifier() -> String {
+    let label = pretty_key(&primary("cmd-a"));
+    label.strip_suffix('A').unwrap_or(&label).to_string()
 }
 
 /// A chord sequence ("cmd-k cmd-w") in canonical spelling.
@@ -486,10 +500,10 @@ pub(crate) fn label(cx: &App, text: &str, id: &str) -> String {
 }
 
 fn pretty(k: &Keystroke) -> String {
-    if cfg!(windows) { pretty_words(k) } else { pretty_mac(k) }
+    if crate::platform::MAC { pretty_mac(k) } else { pretty_words(k) }
 }
 
-/// VS Code's labels on Windows: "Ctrl+Shift+G", "Ctrl+K Ctrl+S" (chords joined by the caller).
+/// VS Code's labels on Windows and Linux:"Ctrl+Shift+G", "Ctrl+K Ctrl+S" (chords joined by the caller).
 fn pretty_words(k: &Keystroke) -> String {
     let m = &k.modifiers;
     let key = match k.key.as_str() {
@@ -499,8 +513,11 @@ fn pretty_words(k: &Keystroke) -> String {
         "right" => "RightArrow".into(),
         "pageup" => "PageUp".into(),
         "pagedown" => "PageDown".into(),
-        k if k.chars().count() <= 1 => k.to_uppercase(),
-        k => k[..1].to_uppercase() + &k[1..], // Enter, Escape, Backspace, Delete, Tab, F3
+        k => {
+            // Enter, Escape, Backspace, Delete, Tab, F3; a single letter is upper case
+            let mut chars = k.chars();
+            chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+        }
     };
     let mods = [(m.control, "Ctrl"), (m.shift, "Shift"), (m.alt, "Alt"), (m.platform, "Win")];
     mods.iter().filter(|(on, _)| *on).map(|(_, n)| *n).chain([key.as_str()]).collect::<Vec<_>>().join("+")
@@ -807,6 +824,13 @@ mod tests {
         assert_eq!(label("ctrl-pagedown"), "Ctrl+PageDown");
         assert_eq!(label("shift-alt-up"), "Shift+Alt+UpArrow");
         assert_eq!(label("ctrl-enter"), "Ctrl+Enter");
+        assert_eq!(label("ctrl-ñandú"), "Ctrl+Ñandú", "a key name starting with a multibyte letter");
+    }
+
+    #[test]
+    fn the_primary_modifier_reads_like_the_labels() {
+        assert_eq!(primary("cmd-k cmd-s"), if crate::platform::MAC { "cmd-k cmd-s" } else { "ctrl-k ctrl-s" });
+        assert_eq!(primary_modifier(), if crate::platform::MAC { "⌘" } else { "Ctrl+" });
     }
 
     #[test]
@@ -843,11 +867,6 @@ mod tests {
         assert_eq!(from_vscode(""), None);
     }
 
-    /// A Mac default key as this OS has it (Ctrl for Cmd on Windows).
-    fn primary(mac: &str) -> String {
-        if cfg!(windows) { windows_key("", mac) } else { mac.to_string() }
-    }
-
     fn keys_of<'a>(b: &'a [Binding], id: &str) -> Vec<(&'a str, Ctx)> {
         b.iter().filter(|b| b.cmd.id == id).map(|b| (b.key.as_str(), b.ctx)).collect()
     }
@@ -859,7 +878,7 @@ mod tests {
             { "key": "cmd+j", "command": "workbench.action.toggleSidebarVisibility", "when": "editor" },
             { "key": "PRIMARY+d", "command": "-editor.action.addSelectionToNextFindMatch" },
             { "key": "", "command": "-editor.action.selectHighlights" }
-        ]"#.replace("PRIMARY", if cfg!(windows) { "ctrl" } else { "cmd" });
+        ]"#.replace("PRIMARY", primary("cmd").as_str());
         let (b, warnings) = resolve(Some(&user));
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(keys_of(&b, "workbench.action.toggleSidebarVisibility"), [("cmd-j", Ctx::Editor)]);
@@ -883,9 +902,9 @@ mod tests {
         assert_eq!((b.len(), warnings.len()), (default_bindings().len(), 1));
     }
 
-    /// The default row of `id` whose Mac key is `key` (its Windows key on Windows).
+    /// The default row of `id` whose Mac key is `key` (its Windows key off macOS).
     fn row(id: &str, key: &str) -> Row {
-        let key = if cfg!(windows) { windows_key(id, key) } else { key.to_string() };
+        let key = if crate::platform::MAC { key.to_string() } else { windows_key(id, key) };
         rows_of(&default_bindings()).into_iter().find(|r| r.cmd.id == id && r.key == key).unwrap()
     }
 
@@ -927,8 +946,8 @@ mod tests {
     fn a_key_in_use_is_reported_in_the_same_context_only() {
         let rows = rows_of(&default_bindings());
         assert_eq!(conflicts(&rows, "workbench.action.files.saveAll", &primary("cmd-s"), Ctx::Global), ["Save"]);
-        assert!(conflicts(&rows, "workbench.action.files.save", "cmd-s", Ctx::Global).is_empty());
-        assert!(conflicts(&rows, "workbench.action.files.saveAll", "cmd-s", Ctx::Editor).is_empty());
+        assert!(conflicts(&rows, "workbench.action.files.save", &primary("cmd-s"), Ctx::Global).is_empty(), "its own key");
+        assert!(conflicts(&rows, "workbench.action.files.saveAll", &primary("cmd-s"), Ctx::Editor).is_empty(), "another context");
     }
 
     #[test]
@@ -937,7 +956,7 @@ mod tests {
         let ids = |q| filter(&rows, q).iter().map(|r| r.cmd.id).collect::<Vec<_>>();
         assert!(ids("toggle sidebar").contains(&"workbench.action.toggleSidebarVisibility"));
         assert!(ids("openGlobalKey").contains(&"workbench.action.openGlobalKeybindings"));
-        let (vscode, label) = if cfg!(windows) { ("ctrl+b", "Ctrl+B") } else { ("cmd+b", "⌘B") };
+        let (vscode, label) = if crate::platform::MAC { ("cmd+b", "⌘B") } else { ("ctrl+b", "Ctrl+B") };
         assert!(ids(vscode).contains(&"workbench.action.toggleSidebarVisibility"));
         assert!(ids(label).contains(&"workbench.action.toggleSidebarVisibility"));
         assert_eq!(filter(&rows, "").len(), rows.len());

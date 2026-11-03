@@ -1,7 +1,5 @@
 use super::*;
-
-/// What the confirmations call the place deleted files go: VS Code says "Recycle Bin" on Windows.
-pub(crate) const TRASH: &str = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
+use crate::platform::TRASH;
 
 /// A git action from the panel. `Send`: the UI runs it on a background thread with `scan_after`.
 #[derive(Debug, Clone)]

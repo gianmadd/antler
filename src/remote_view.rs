@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use antler_host::host::Host;
+use crate::host::Host;
 use antler_host::remote::{Remote, Status};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::{

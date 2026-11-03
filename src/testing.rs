@@ -78,3 +78,8 @@ pub fn antler_remote(cargo: &mut Command) -> antler_host::remote::Remote {
 pub fn over_remote() -> bool {
     std::env::var_os("ANTLER_TEST_REMOTE").is_some()
 }
+
+/// `path` with `/` separators, as the tests write paths (Windows gives `\`).
+pub fn slashes(path: impl AsRef<str>) -> String {
+    path.as_ref().replace('\\', "/")
+}

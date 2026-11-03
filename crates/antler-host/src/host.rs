@@ -138,7 +138,7 @@ impl Default for Local {
 /// A path as Windows' `canonicalize` gives it, without the `\\?\` prefix it adds (`\\?\C:\x` is `C:\x`,
 /// `\\?\UNC\server\share` is `\\server\share`), so it matches what the file watcher, git and the user write.
 /// Other paths come back as they are.
-fn simplify(path: PathBuf) -> PathBuf {
+fn strip_verbatim(path: PathBuf) -> PathBuf {
     let Some(s) = path.to_str() else { return path };
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{rest}"));
@@ -149,10 +149,10 @@ fn simplify(path: PathBuf) -> PathBuf {
     }
 }
 
-/// `std::fs::canonicalize` without Windows' verbatim prefix (see [`simplify`]): what a Root opened on this
+/// `std::fs::canonicalize` without Windows' verbatim prefix (see [`strip_verbatim`]): what a Root opened on this
 /// machine is set to.
 pub fn canonical(path: &Path) -> io::Result<PathBuf> {
-    std::fs::canonicalize(path).map(simplify)
+    std::fs::canonicalize(path).map(strip_verbatim)
 }
 
 /// A console program started by the app opens no console window of its own (Windows' `CREATE_NO_WINDOW`; the
@@ -164,17 +164,20 @@ pub fn no_console(c: &mut std::process::Command) -> &mut std::process::Command {
 }
 
 /// Moves `path` (a file or a folder with everything in it) to the Windows Recycle Bin, with no dialog of the
-/// shell's own (the app has asked already).
-#[cfg(windows)]
-pub fn recycle(path: &Path) -> Result<(), String> {
+/// shell's own (the app has asked already). The shell takes no `\\?\` path, so the prefix goes
+/// ([`strip_verbatim`]); a path over `MAX_PATH` works only where Windows has long paths enabled, else the error
+/// says so.
+#[cfg(all(windows, any(test, not(feature = "test-trash"))))]
+fn recycle(path: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt as _;
     use windows_sys::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW, SHFileOperationW};
     if path.symlink_metadata().is_err() {
         return Err(format!("{}: not found", path.display()));
     }
     // an absolute path, and a list ended by two NULs
-    let full = std::path::absolute(path).map_err(|e| e.to_string())?;
-    let from: Vec<u16> = full.as_os_str().encode_wide().chain([0, 0]).collect();
+    let full = strip_verbatim(std::path::absolute(path).map_err(|e| e.to_string())?);
+    let wide: Vec<u16> = full.as_os_str().encode_wide().collect();
+    let from: Vec<u16> = wide.iter().copied().chain([0, 0]).collect();
     // SAFETY: every pointer field is null or `from`, which outlives the call
     let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
     op.wFunc = FO_DELETE;
@@ -182,12 +185,33 @@ pub fn recycle(path: &Path) -> Result<(), String> {
     op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as _;
     let code = unsafe { SHFileOperationW(&mut op) };
     if code != 0 {
-        return Err(format!("the Recycle Bin refused it (error {code:#x})"));
+        return Err(recycle_error(code, wide.len()));
     }
     if op.fAnyOperationsAborted != 0 {
         return Err("cancelled".into());
     }
     Ok(())
+}
+
+/// The words for `SHFileOperationW`'s `code` on a path of `len` UTF-16 units: its own `DE_*` codes (which
+/// overlap Win32 ones, and win), otherwise the system's message for a Win32 error. A path over `MAX_PATH` that
+/// fails for another reason than access or a cancel failed for its length.
+#[cfg(all(windows, any(test, not(feature = "test-trash"))))]
+fn recycle_error(code: i32, len: usize) -> String {
+    const MAX_LEN: usize = 259; // MAX_PATH, less its NUL
+    if len > MAX_LEN && !matches!(code, 5 | 0x75 | 0x78) {
+        return format!("the path is too long for the Recycle Bin ({len} characters, the limit is {MAX_LEN})");
+    }
+    let words = match code {
+        0x74 => "a drive's root cannot go to the Recycle Bin".to_string(),
+        0x75 => "cancelled".into(),
+        0x78 => "access denied".into(),
+        0x79 | 0x81 => "the path is too long".into(),
+        0x7C => "the path is not valid".into(),
+        0x402 => "an unknown error".into(),
+        _ => io::Error::from_raw_os_error(code).to_string().split(" (os error").next().unwrap_or_default().trim().to_string(),
+    };
+    format!("{words} (error {code:#x})")
 }
 
 /// Deletes a file or a folder with everything in it, for good (a link goes, not its target).
@@ -245,7 +269,8 @@ impl Host for Local {
         }
     }
 
-    /// macOS: Finder's Put Back works. Elsewhere there is no Trash to use: gone for good, nothing to undo.
+    /// macOS: the Trash, where Finder's Put Back works and Undo moves the item back. Windows has the Recycle Bin (below);
+    /// other OSes delete for good, nothing to undo.
     #[cfg(all(target_os = "macos", not(any(test, feature = "test-trash"))))]
     fn trash(&self, path: &Path) -> Result<Option<PathBuf>, String> {
         use objc2_foundation::{NSFileManager, NSURL};
@@ -362,10 +387,10 @@ mod tests {
 
     #[test]
     fn a_verbatim_windows_path_loses_its_prefix() {
-        assert_eq!(simplify(PathBuf::from(r"\\?\C:\Users\x\repo")), PathBuf::from(r"C:\Users\x\repo"));
-        assert_eq!(simplify(PathBuf::from(r"\\?\UNC\server\share\repo")), PathBuf::from(r"\\server\share\repo"));
-        assert_eq!(simplify(PathBuf::from(r"\\?\Volume{1234}\x")), PathBuf::from(r"\\?\Volume{1234}\x"), "no drive letter: kept");
-        assert_eq!(simplify(PathBuf::from("/Users/x/repo")), PathBuf::from("/Users/x/repo"));
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\C:\Users\x\repo")), PathBuf::from(r"C:\Users\x\repo"));
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\UNC\server\share\repo")), PathBuf::from(r"\\server\share\repo"));
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\Volume{1234}\x")), PathBuf::from(r"\\?\Volume{1234}\x"), "no drive letter: kept");
+        assert_eq!(strip_verbatim(PathBuf::from("/Users/x/repo")), PathBuf::from("/Users/x/repo"));
     }
 
     /// Touches the user's real Recycle Bin (one empty temp file), so it only runs when asked:
@@ -382,6 +407,29 @@ mod tests {
         recycle(&dir).unwrap();
         assert!(!file.exists() && !dir.exists());
         assert!(recycle(&file).is_err(), "a missing file is an error, not a silent success");
+        // `std::fs::canonicalize` gives `\\?\C:\…`, which the shell refuses as it is
+        std::fs::write(&file, b"").unwrap();
+        recycle(&std::fs::canonicalize(&file).unwrap()).unwrap();
+        assert!(!file.exists());
+        // over MAX_PATH: the shell takes it where long paths are enabled, else a clear error and the file stays
+        let deep = (0..6).fold(tmp.path().to_path_buf(), |d, i| d.join(format!("{i}-{}", "x".repeat(50))));
+        std::fs::create_dir_all(&deep).unwrap();
+        let long = deep.join("file.txt");
+        std::fs::write(&long, b"").unwrap();
+        match recycle(&long) {
+            Ok(()) => assert!(!long.exists()),
+            Err(e) => assert!(e.contains("too long") && long.exists(), "{e}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_shells_error_codes_read_as_words() {
+        assert_eq!(recycle_error(0x7C, 40), "the path is not valid (error 0x7c)");
+        assert_eq!(recycle_error(0x78, 40), "access denied (error 0x78)");
+        let os = recycle_error(5, 40); // a Win32 code: the system's own words, in the system's language
+        assert!(os.ends_with(" (error 0x5)") && !os.starts_with(" ("), "{os}");
+        assert_eq!(recycle_error(0x7C, 300), "the path is too long for the Recycle Bin (300 characters, the limit is 259)");
     }
 
     #[test]

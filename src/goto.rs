@@ -215,7 +215,7 @@ mod tests {
 
     /// (relative path, highlighted slices) of the matches for `query`.
     fn found(ws: &Workspace, query: &str) -> Vec<(String, Vec<String>)> {
-        ws.goto_matches(query, 50).into_iter().map(|m| (m.rel.replace('\\', "/"), m.ranges.iter().map(|r| m.rel[r.clone()].to_string()).collect())).collect()
+        ws.goto_matches(query, 50).into_iter().map(|m| (crate::testing::slashes(&m.rel),m.ranges.iter().map(|r| m.rel[r.clone()].to_string()).collect())).collect()
     }
 
     fn open(root: &Path) -> Workspace {
@@ -249,7 +249,7 @@ mod tests {
     }
 
     fn rels(ws: &Workspace, query: &str) -> Vec<String> {
-        ws.goto_matches(query, 50).into_iter().map(|m| m.rel.replace('\\', "/")).collect()
+        ws.goto_matches(query, 50).into_iter().map(|m| crate::testing::slashes(&m.rel)).collect()
     }
 
     #[test]
