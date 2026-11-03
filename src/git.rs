@@ -152,13 +152,25 @@ pub fn group_patch(repo: &Path, staged: bool) -> Result<String> {
     if staged {
         args.push("--cached");
     }
-    let mut patch = run(repo, &args, None)?;
-    if !staged {
-        for file in status(repo)?.into_iter().filter(FileStatus::is_untracked) {
-            patch.push_str(&diff(repo, &file, false)?);
-        }
-    }
-    Ok(patch)
+    let patch = run(repo, &args, None)?;
+    if staged { return Ok(patch); }
+    let untracked = status(repo)?.into_iter().filter(FileStatus::is_untracked).map(|f| f.path).collect::<Vec<_>>();
+    if untracked.is_empty() { return Ok(patch); }
+    static NEXT_INDEX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let host = crate::host::current();
+    let index = repo.join(run(repo, &["rev-parse", "--git-path", "index"], None)?.trim());
+    let temporary = index.with_file_name(format!("antler-index-{}-{}", std::process::id(), NEXT_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    if host.exists(&index) { host.copy(&index, &temporary).map_err(|e| e.to_string())?; }
+    else { host.create(&temporary, false).map_err(|e| e.to_string())?; }
+    struct RemoveIndex(std::sync::Arc<dyn crate::host::Host>, std::path::PathBuf);
+    impl Drop for RemoveIndex { fn drop(&mut self) { let _ = self.0.remove_file(&self.1); } }
+    let _remove = RemoveIndex(host, temporary.clone());
+    let index_env = temporary.as_os_str();
+    let envs = [("GIT_INDEX_FILE", index_env)];
+    let mut add = vec!["add", "-N", "--"];
+    add.extend(untracked.iter().map(String::as_str));
+    run_env(repo, &add, None, &envs)?;
+    run_env(repo, &args, None, &envs)
 }
 
 /// Splits a Git patch into (new path, per-file patch) pairs in patch order.
@@ -702,14 +714,15 @@ pub fn resolve_ref(repo: &Path, name: &str) -> Result<Ref> {
 /// VS Code's current history base: configured remote base, branch creation source, then the default remote branch.
 pub fn branch_base(repo: &Path, branch: &str) -> Option<Ref> {
     if branch == DETACHED { return None; }
+    let upstream = run(repo, &["rev-parse", "--symbolic-full-name", &format!("{branch}@{{u}}")], None).ok().map(|s| s.trim().to_string());
     let key = format!("branch.{branch}.vscode-merge-base");
     if let Ok(configured) = run(repo, &["config", "--get", &key], None) {
         let configured = configured.trim();
         if configured.starts_with("refs/remotes/") {
-            if let Ok(reference) = resolve_ref(repo, configured) { return Some(reference); }
+            if let Ok(reference) = resolve_ref(repo, configured) { return (upstream.as_deref() != Some(reference.name.as_str())).then_some(reference); }
         } else if let Some(remote) = configured.split_once('/') {
             let name = format!("refs/remotes/{}/{}", remote.0, remote.1);
-            if let Ok(reference) = resolve_ref(repo, &name) { return Some(reference); }
+            if let Ok(reference) = resolve_ref(repo, &name) { return (upstream.as_deref() != Some(reference.name.as_str())).then_some(reference); }
         }
     }
     let created = run(repo, &["reflog", "show", "--format=%gs", &format!("refs/heads/{branch}")], None).ok()?;
@@ -729,12 +742,12 @@ pub fn branch_base(repo: &Path, branch: &str) -> Option<Ref> {
         } else {
             None
         };
-        if let Some(full) = full && let Ok(reference) = resolve_ref(repo, &full) { return Some(reference); }
+        if let Some(full) = full && let Ok(reference) = resolve_ref(repo, &full) && upstream.as_deref() != Some(reference.name.as_str()) { return Some(reference); }
     }
     let remotes = remotes(repo).ok()?;
     let remote = remotes.iter().find(|r| *r == "origin").or_else(|| remotes.first())?;
     let default = run(repo, &["symbolic-ref", "--quiet", &format!("refs/remotes/{remote}/HEAD")], None).ok()?;
-    resolve_ref(repo, default.trim()).ok()
+    resolve_ref(repo, default.trim()).ok().filter(|reference| upstream.as_deref() != Some(reference.name.as_str()))
 }
 
 /// `git merge ref`; the merge commit keeps git's message (no editor opens).
@@ -1037,6 +1050,11 @@ mod tests {
         crate::testing::git(p, &["checkout", "-q", "-b", "feature"]);
         crate::testing::git(p, &["config", "branch.feature.vscode-merge-base", "origin/main"]);
         assert_eq!(branch_base(p, "feature").unwrap().name, "refs/remotes/origin/main");
+        crate::testing::git(p, &["branch", "--set-upstream-to=origin/dev", "feature"]);
+        crate::testing::git(p, &["config", "branch.feature.vscode-merge-base", "origin/dev"]);
+        assert_eq!(branch_base(p, "feature"), None, "the upstream is not a distinct merge base");
+        crate::testing::git(p, &["branch", "--unset-upstream", "feature"]);
+        crate::testing::git(p, &["config", "branch.feature.vscode-merge-base", "origin/main"]);
         crate::testing::git(p, &["config", "--unset", "branch.feature.vscode-merge-base"]);
         assert_eq!(branch_base(p, "feature").unwrap().name, "refs/remotes/origin/dev");
         crate::testing::git(p, &["reflog", "expire", "--expire=now", "--all"]);
@@ -1213,6 +1231,17 @@ mod tests {
         assert!(patch.contains("diff --git a/new.txt b/new.txt") && patch.contains("+new"), "{patch}");
         assert!(patch.contains("Binary files"));
         assert!(split_patch(&patch).iter().any(|(path, _)| path == "binary.bin"));
+    }
+
+    #[test]
+    fn group_patch_does_not_change_the_real_index() {
+        let dir = repo();
+        let p = dir.path();
+        fs::write(p.join("new.txt"), "new\n").unwrap();
+        let index = p.join(crate::testing::out(p, &["rev-parse", "--git-path", "index"]));
+        let before = fs::read(&index).unwrap();
+        assert!(group_patch(p, false).unwrap().contains("+new"));
+        assert_eq!(fs::read(index).unwrap(), before);
     }
 
     #[test]

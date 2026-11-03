@@ -571,6 +571,8 @@ impl Antler {
                     window.push_notification(Notification::error(e).title("git"), cx);
                 }
                 this.sync_diff(cx);
+                let me = cx.entity();
+                cx.defer(move |cx| me.update(cx, |_, cx| cx.notify()));
             }).ok();
         }).detach();
     }

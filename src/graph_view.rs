@@ -113,11 +113,11 @@ fn commit_menu(
     subject: &str,
     upstream: Option<String>,
     base: Option<crate::git::Ref>,
+    right_name: String,
 ) -> PopupMenu {
     let (repo, sha) = (repo.to_path_buf(), sha.to_string());
     let (r, s) = (repo.clone(), sha.clone());
     let (multi_repo, multi_sha, multi_subject) = (repo.clone(), sha.clone(), subject.to_string());
-    let right_name = sha[..sha.len().min(7)].to_string();
     let (remote_repo, remote_sha) = (repo.clone(), sha.clone());
     let (base_repo, base_sha) = (repo.clone(), sha.clone());
     let (remote_name, base_name) = (right_name.clone(), right_name);
@@ -371,6 +371,7 @@ impl Antler {
                             Item::Commit(c_ix) => {
                                 let commit = &g.commits[c_ix];
                                 let sha = commit.sha.clone();
+                                let right_name = commit.labels.first().map_or_else(|| sha[..sha.len().min(7)].to_string(), |label| label.name.clone());
                                 let (weak, repo, hash, message, subject) = (cx.entity().downgrade(), repo.clone(), commit.sha.clone(), commit.message.clone(), commit.subject().to_string());
                                 let (upstream, base) = (upstream.clone(), base.clone());
                                 let when = graph::relative_time(commit.time, now);
@@ -392,7 +393,9 @@ impl Antler {
                                         Tooltip::element(move |_, _| v_flex().max_w(px(480.)).children(tip.lines().map(|l| div().child(l.to_string()))))
                                             .build(window, cx)
                                     })
-                                    .context_menu(move |menu, _, _| commit_menu(menu, &weak, &repo, &hash, &message, &subject, upstream.clone(), base.clone()))
+                                    .context_menu(move |menu, _, _| {
+                                        commit_menu(menu, &weak, &repo, &hash, &message, &subject, upstream.clone(), base.clone(), right_name.clone())
+                                    })
                                     .child(lanes(g.rows[c_ix].clone(), true, width(&g.rows[c_ix])))
                                     .child(div().flex_1().min_w(px(msg_w.min(MSG_MIN))).truncate().child(commit.subject().to_string()))
                                     .children(pills.iter().take(shown).map(|(l, twin)| pill(l, *twin)))
