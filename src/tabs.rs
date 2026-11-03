@@ -30,6 +30,52 @@ actions!(antler, [RevealTabInExplorer, KeepTabOpen, ReopenClosedTab, NextRecentT
 actions!(antler, [SplitEditor, SplitEditorDown, SplitEditorOrthogonal, CloseEditorsInGroup]);
 actions!(antler, [FocusFirstGroup, FocusSecondGroup, FocusThirdGroup, FocusFourthGroup, FocusFifthGroup, FocusSixthGroup, FocusSeventhGroup, FocusEighthGroup]);
 
+type BlockOps = std::rc::Rc<Vec<(Option<workspace::Op>, Option<workspace::Op>, std::ops::Range<usize>)>>;
+
+fn block_annotations(tab: &workspace::DiffTab, file_key: &'static str, id_base: usize) -> (Vec<DiffAnnotation>, BlockOps) {
+    // Commits and conflict comparisons are read-only.
+    let changes = if tab.source.read_only() { Vec::new() } else { tab.parsed.changes() };
+    let annotations = changes.iter().enumerate().map(|(i, change)| {
+        let (original, line) = tab.parsed.last_line_of(change);
+        let side = if original { DiffSide::Original } else { DiffSide::Modified };
+        DiffAnnotation::line((file_key, id_base + i), DiffLinePosition::new(tab.source.path.clone(), side, line))
+    }).collect();
+    let ops = std::rc::Rc::new(changes.iter().enumerate().map(|(i, change)| {
+        (tab.block_op(i, false), tab.block_op(i, true), change.lines.clone())
+    }).collect());
+    (annotations, ops)
+}
+
+fn render_block_actions(a: &DiffAnnotation, staged: bool, this: WeakEntity<Antler>, ops: BlockOps, typed: Option<PathBuf>) -> AnyElement {
+    let ElementId::NamedInteger(_, i) = a.id() else { return h_flex().into_any_element() };
+    let i = *i as usize;
+    let button = |id: &'static str, icon, label: &'static str, revert: bool| {
+        let (this, ops, typed) = (this.clone(), ops.clone(), typed.clone());
+        Button::new((id, i)).ghost().xsmall().icon(icon).label(label).on_click(move |_, window, cx| {
+            this.update(cx, |t, cx| match (&typed, revert) {
+                (Some(path), true) => {
+                    let wanted = ops[i].2.clone();
+                    t.revert_changes(path, move |r| *r == wanted, window, cx);
+                }
+                _ => {
+                    if let Some(op) = if revert { &ops[i].1 } else { &ops[i].0 } {
+                        t.confirm_and_run(op.clone(), window, cx);
+                    }
+                }
+            }).ok();
+        })
+    };
+    if staged {
+        h_flex().child(button("unstage-hunk", IconName::Minus, "Unstage Block", false)).into_any_element()
+    } else {
+        h_flex()
+            .gap_1()
+            .child(button("revert-hunk", IconName::Undo2, "Discard Block", true))
+            .child(button("stage-hunk", IconName::Plus, "Stage Block", false))
+            .into_any_element()
+    }
+}
+
 /// What an editor group draws besides its tabs: its diff view (showing the group's active tab) and that view's width,
 /// measured each frame (a narrow one shows inline).
 pub(crate) struct GroupUi {
@@ -915,17 +961,9 @@ impl Antler {
             Some(_) if tab.is_binary() => msg("Binary file: no diff to show."),
             Some(_) if self.diff_of(g).read(cx).files().is_empty() => msg("No changes."),
             Some(_) => {
-                let file = self.diff_of(g).read(cx).files()[0].path().clone();
-                // a commit's diff is read-only: no Block actions. A Block is one change, as in VS Code, not the Hunk around it.
-                let changes = if tab.source.read_only() { Vec::new() } else { tab.parsed.changes() };
-                let annotations = changes.iter().enumerate().map(|(i, c)| {
-                    let (original, line) = tab.parsed.last_line_of(c);
-                    let side = if original { DiffSide::Original } else { DiffSide::Modified };
-                    DiffAnnotation::line(("hunk", i), DiffLinePosition::new(file.clone(), side, line))
-                });
+                let (annotations, ops) = block_annotations(tab, "hunk", 0);
                 let (this, staged) = (cx.entity().downgrade(), tab.source.staged);
                 // (stage or unstage, discard, the change's lines): a typed text is discarded in the editor, not on the disk
-                let ops = std::rc::Rc::new(changes.iter().enumerate().map(|(k, c)| (tab.block_op(k, false), tab.block_op(k, true), c.lines.clone())).collect::<Vec<_>>());
                 let typed = (tab.is_editable() && !staged).then(|| tab.source.repo.join(&tab.source.path));
                 let measure = self.width_probe(g, tab, false, cx);
                 let view = Diff::new(self.diff_of(g))
@@ -936,35 +974,7 @@ impl Antler {
                     // per-half scroll (gpui-component 0.8.1 has none); the editable diff has its own halves (side_diff.rs).
                     .soft_wrap(true)
                     .annotations(annotations)
-                    .render_annotation(move |a, _, _| {
-                        let ElementId::NamedInteger(_, i) = a.id() else { return h_flex() };
-                        let i = *i as usize;
-                        let button = |id: &'static str, icon, label: &'static str, revert: bool| {
-                            let (this, ops, typed) = (this.clone(), ops.clone(), typed.clone());
-                            Button::new((id, i)).ghost().xsmall().icon(icon).label(label).on_click(move |_, window, cx| {
-                                this.update(cx, |t, cx| match (&typed, revert) {
-                                    (Some(path), true) => {
-                                        let wanted = ops[i].2.clone();
-                                        t.revert_changes(path, move |r| *r == wanted, window, cx);
-                                    }
-                                    _ => {
-                                        if let Some(op) = if revert { &ops[i].1 } else { &ops[i].0 } {
-                                            t.confirm_and_run(op.clone(), window, cx);
-                                        }
-                                    }
-                                })
-                                .ok();
-                            })
-                        };
-                        if staged {
-                            h_flex().child(button("unstage-hunk", IconName::Minus, "Unstage Block", false))
-                        } else {
-                            h_flex()
-                                .gap_1()
-                                .child(button("revert-hunk", IconName::Undo2, "Discard Block", true))
-                                .child(button("stage-hunk", IconName::Plus, "Stage Block", false))
-                        }
-                    })
+                    .render_annotation(move |a, _, _| render_block_actions(a, staged, this.clone(), ops.clone(), typed.clone()))
                     .flex_1()
                     .min_h_0();
                 let (weak, read_only) = (cx.entity().downgrade(), tab.source.read_only());
@@ -1012,12 +1022,25 @@ impl Antler {
         let (repo, staged, this) = match &tab.source {
             workspace::MultiDiffSource::Group { repo, staged } => (repo.clone(), *staged, cx.entity().downgrade()),
         };
+        let mut annotations = Vec::new();
+        let mut all_ops = Vec::new();
+        for file in &tab.files {
+            let base = all_ops.len();
+            let (file_annotations, file_ops) = block_annotations(file, "hunk", base);
+            annotations.extend(file_annotations);
+            all_ops.extend(file_ops.iter().cloned());
+        }
+        let all_ops = std::rc::Rc::new(all_ops);
+        let header_this = this.clone();
+        let menu_this = this.clone();
         let view = Diff::new(self.diff_of(g))
             .soft_wrap(true)
+            .annotations(annotations)
+            .render_annotation(move |a, _, _| render_block_actions(a, staged, this.clone(), all_ops.clone(), None))
             .render_header(move |file, _, _| {
                 let path = file.path().to_string();
                 let repo = repo.clone();
-                let this = this.clone();
+                let this = header_this.clone();
                 Button::new(format!("open-multi-diff-file-{path}")).ghost().xsmall().label(path.clone()).on_click(move |_, _window, cx| {
                     cx.stop_propagation();
                     this.update_in(cx, |this, window, cx| {
@@ -1029,7 +1052,22 @@ impl Antler {
             })
             .flex_1()
             .min_h_0();
-        v_flex().id(("multi-diff-area", g)).relative().flex_1().min_h_0().child(measure).child(view).into_any_element()
+        v_flex()
+            .id(("multi-diff-area", g))
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(measure)
+            .child(view)
+            .context_menu(move |menu, _, _| {
+                let item = |label: &'static str, revert: bool| menu_item(&menu_this, label, move |t, w, cx| t.act_on_selection(revert, w, cx));
+                if staged {
+                    menu.item(item("Unstage Selected Ranges", false))
+                } else {
+                    menu.item(item("Stage Selected Ranges", false)).item(item("Revert Selected Ranges", true))
+                }
+            })
+            .into_any_element()
     }
 
     /// An invisible child that measures the diff view's width each frame: a narrow view shows inline, and a view whose

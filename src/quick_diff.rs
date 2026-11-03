@@ -72,6 +72,16 @@ impl Antler {
     /// editor's, against the text as typed (saved or not, as VS Code does).
     pub(crate) fn act_on_selection(&mut self, revert: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.ws.active.map(|a| &self.ws.tabs[a]) else { return };
+        if let TabKind::MultiDiff(multi) = &tab.kind {
+            let Some(sel) = self.diff_of(self.ws.group).read(cx).selected_lines() else { return };
+            let Some(file) = multi.files.iter().find(|file| file.source.path == sel.path().as_ref()) else { return };
+            let end = |side: DiffSide, n| (side == DiffSide::Original, n);
+            let picked = file.parsed.pick_between(end(sel.side(), sel.start()), end(sel.end_side(), sel.end()));
+            if let Some(op) = file.lines_op(&picked, revert) {
+                self.confirm_and_run(op, window, cx);
+            }
+            return;
+        }
         // the editable diff's patch is of the text typed
         let live = tab.diff().filter(|d| self.editable_split(self.ws.group, d));
         let op = match (tab.diff(), tab.file()) {
