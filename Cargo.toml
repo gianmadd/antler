@@ -1,6 +1,6 @@
 [package]
 name = "antler"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.98"
 description = "A minimal, fast IDE for macOS and Windows: explorer, editor, git and remote over SSH, with every repository under a folder in one panel"
