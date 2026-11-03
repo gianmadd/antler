@@ -234,6 +234,8 @@ impl Antler {
                     .key_context("GoToFile")
                     .w(px(600.))
                     .shadow_lg()
+                    // a click on a row must not also reach the view underneath
+                    .occlude()
                     .on_action(cx.listener(Self::close_go_to_file))
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_go_to_file(&CloseGoToFile, window, cx)))
                     .child(command),
