@@ -1226,6 +1226,37 @@ mod tests {
     }
 
     #[test]
+    fn multi_diff_block_op_equals_single_diff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        repo(&dir);
+        fs::write(dir.join("a.txt"), "base\n").unwrap();
+        git(&dir, &["add", "a.txt"]);
+        git(&dir, &["commit", "-qm", "base"]);
+        fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        fs::write(dir.join("b.txt"), "staged\n").unwrap();
+        git(&dir, &["add", "b.txt"]);
+
+        let mut ws = Workspace::open(tmp.path());
+        for staged in [false, true] {
+            let source = MultiDiffSource::Group { repo: dir.clone(), staged };
+            ws.open_multi_diff(source.clone());
+            ws.set_multi_diff(&source, source.load());
+            let (path, ops) = match &ws.tabs[ws.active.unwrap()].kind {
+                TabKind::MultiDiff(tab) => {
+                    let file = &tab.files[0];
+                    (file.source.path.clone(), [file.block_op(0, false), file.block_op(0, true)])
+                }
+                _ => unreachable!(),
+            };
+            let single = ws.show(0, staged, &path, false);
+            for (revert, expected) in [false, true].into_iter().zip(ops) {
+                assert_eq!(expected, single.block_op(0, revert), "staged={staged}, revert={revert}");
+            }
+        }
+    }
+
+    #[test]
     fn open_path_previews_a_file_next_to_diffs_and_pins_on_double_click() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();

@@ -2,7 +2,7 @@ use super::*;
 use crate::platform::TRASH;
 
 /// A git action from the panel. `Send`: the UI runs it on a background thread with `scan_after`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     Stage { repo: PathBuf, path: String },
     Unstage { repo: PathBuf, path: String },
