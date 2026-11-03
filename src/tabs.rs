@@ -30,6 +30,52 @@ actions!(antler, [RevealTabInExplorer, KeepTabOpen, ReopenClosedTab, NextRecentT
 actions!(antler, [SplitEditor, SplitEditorDown, SplitEditorOrthogonal, CloseEditorsInGroup]);
 actions!(antler, [FocusFirstGroup, FocusSecondGroup, FocusThirdGroup, FocusFourthGroup, FocusFifthGroup, FocusSixthGroup, FocusSeventhGroup, FocusEighthGroup]);
 
+type BlockOps = std::rc::Rc<Vec<(Option<workspace::Op>, Option<workspace::Op>, std::ops::Range<usize>)>>;
+
+fn block_annotations(tab: &workspace::DiffTab, file_key: &'static str, id_base: usize) -> (Vec<DiffAnnotation>, BlockOps) {
+    // Commits and conflict comparisons are read-only.
+    let changes = if tab.source.read_only() { Vec::new() } else { tab.parsed.changes() };
+    let annotations = changes.iter().enumerate().map(|(i, change)| {
+        let (original, line) = tab.parsed.last_line_of(change);
+        let side = if original { DiffSide::Original } else { DiffSide::Modified };
+        DiffAnnotation::line((file_key, id_base + i), DiffLinePosition::new(tab.source.path.clone(), side, line))
+    }).collect();
+    let ops = std::rc::Rc::new(changes.iter().enumerate().map(|(i, change)| {
+        (tab.block_op(i, false), tab.block_op(i, true), change.lines.clone())
+    }).collect());
+    (annotations, ops)
+}
+
+fn render_block_actions(a: &DiffAnnotation, staged: bool, this: WeakEntity<Antler>, ops: BlockOps, typed: Option<PathBuf>) -> AnyElement {
+    let ElementId::NamedInteger(_, i) = a.id() else { return h_flex().into_any_element() };
+    let i = *i as usize;
+    let button = |id: &'static str, icon, label: &'static str, revert: bool| {
+        let (this, ops, typed) = (this.clone(), ops.clone(), typed.clone());
+        Button::new((id, i)).ghost().xsmall().icon(icon).label(label).on_click(move |_, window, cx| {
+            this.update(cx, |t, cx| match (&typed, revert) {
+                (Some(path), true) => {
+                    let wanted = ops[i].2.clone();
+                    t.revert_changes(path, move |r| *r == wanted, window, cx);
+                }
+                _ => {
+                    if let Some(op) = if revert { &ops[i].1 } else { &ops[i].0 } {
+                        t.confirm_and_run(op.clone(), window, cx);
+                    }
+                }
+            }).ok();
+        })
+    };
+    if staged {
+        h_flex().child(button("unstage-hunk", IconName::Minus, "Unstage Block", false)).into_any_element()
+    } else {
+        h_flex()
+            .gap_1()
+            .child(button("revert-hunk", IconName::Undo2, "Discard Block", true))
+            .child(button("stage-hunk", IconName::Plus, "Stage Block", false))
+            .into_any_element()
+    }
+}
+
 /// What an editor group draws besides its tabs: its diff view (showing the group's active tab) and that view's width,
 /// measured each frame (a narrow one shows inline).
 pub(crate) struct GroupUi {
@@ -361,7 +407,10 @@ impl Antler {
     fn load_new_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         match self.ws.tabs[ix].diff() {
             Some(d) if d.patch.is_none() => self.load_diff(d.source.clone(), window, cx),
-            _ => self.load_tab(ix, cx),
+            _ => match &self.ws.tabs[ix].kind {
+                TabKind::MultiDiff(d) if d.patch.is_none() => self.load_multi_diff(d.source.clone(), window, cx),
+                _ => self.load_tab(ix, cx),
+            },
         }
     }
 
@@ -514,6 +563,39 @@ impl Antler {
         self.load_diff(source, window, cx);
     }
 
+    pub(crate) fn open_multi_diff(&mut self, source: workspace::MultiDiffSource, window: &mut Window, cx: &mut Context<Self>) {
+        self.ws.open_multi_diff(source.clone());
+        self.sync_diff(cx);
+        self.load_multi_diff(source, window, cx);
+    }
+
+    pub(crate) fn load_multi_diff(&mut self, source: workspace::MultiDiffSource, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.ws.host.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let load = source.clone();
+            let patch = cx.background_spawn(async move { crate::host::scoped(&host, || load.load()) }).await;
+            this.update_in(cx, |this, window, cx| {
+                let initial_empty = patch.as_ref().is_ok_and(String::is_empty)
+                    && this.ws.tabs.iter().any(|t| matches!(&t.kind, TabKind::MultiDiff(d) if d.source == source && d.patch.is_none()));
+                this.ws.set_multi_diff(&source, patch);
+                if initial_empty {
+                    let text = match source {
+                        workspace::MultiDiffSource::Group { staged: true, .. } => "The repository does not have any staged changes.",
+                        workspace::MultiDiffSource::Group { .. } => "The repository does not have any changes.",
+                        workspace::MultiDiffSource::Refs { .. } => "There are no differences between these refs.",
+                        workspace::MultiDiffSource::Commit { .. } => "The commit has no changes.",
+                    };
+                    window.push_notification(Notification::info(text), cx);
+                } else if let Some(e) = this.ws.last_error.take() {
+                    window.push_notification(Notification::error(e).title("git"), cx);
+                }
+                this.sync_diff(cx);
+                let me = cx.entity();
+                cx.defer(move |cx| me.update(cx, |_, cx| cx.notify()));
+            }).ok();
+        }).detach();
+    }
+
     /// Loads `source`'s diff on a background thread into its tab.
     pub(crate) fn load_diff(&mut self, source: workspace::DiffSource, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.ws.host.clone();
@@ -541,12 +623,18 @@ impl Antler {
         self.group_ui.retain(|g, _| groups.contains(g));
         for g in groups {
             let ui = self.group_ui.entry(g).or_insert_with(|| GroupUi { diff: cx.new(|cx| DiffState::new([], cx)), width: Default::default() });
-            let patch = self.ws.active_in(g).and_then(|a| self.ws.tabs[a].diff()?.patch.as_deref()).unwrap_or("");
+            let patch = self.ws.active_in(g).and_then(|a| match &self.ws.tabs[a].kind {
+                TabKind::Diff(d) => d.patch.as_deref(),
+                TabKind::MultiDiff(d) => d.patch.as_deref(),
+                _ => None,
+            }).unwrap_or("");
             let files = DiffFile::parse(patch).unwrap_or_default();
+            let large_files = files.iter().filter(|f| f.additions() + f.deletions() > 5_000).map(|f| f.path().clone()).collect::<Vec<_>>();
             let mode = if workspace::side_by_side(self.ws.split, ui.width.get()) { DiffMode::Split } else { DiffMode::Unified };
             ui.diff.update(cx, |d, cx| {
                 d.set_files(files, cx);
                 d.set_mode(mode, cx);
+                for path in large_files { d.set_file_collapsed(&path, true, cx); }
             });
         }
         cx.notify();
@@ -557,6 +645,7 @@ impl Antler {
         match self.ws.active.map(|a| &self.ws.tabs[a].kind) {
             Some(TabKind::Diff(d)) if self.editable_split(self.ws.group, d) => self.jump_to_change(forward, window, cx),
             Some(TabKind::Diff(_)) => self.diff_of(self.ws.group).clone().update(cx, |d, cx| if forward { d.next_change(cx) } else { d.previous_change(cx) }),
+            Some(TabKind::MultiDiff(_)) => self.diff_of(self.ws.group).clone().update(cx, |d, cx| if forward { d.next_change(cx) } else { d.previous_change(cx) }),
             Some(TabKind::File(_)) => self.jump_to_change(forward, window, cx),
             _ => {}
         }
@@ -582,6 +671,9 @@ impl Antler {
     fn tab_file(&self, ix: usize) -> PathBuf {
         match (&self.ws.tabs[ix].kind, self.ws.tabs[ix].path()) {
             (TabKind::Diff(d), _) => d.source.repo.join(&d.source.path),
+            (TabKind::MultiDiff(d), _) => match &d.source {
+                workspace::MultiDiffSource::Group { repo, .. } | workspace::MultiDiffSource::Commit { repo, .. } | workspace::MultiDiffSource::Refs { repo, .. } => repo.clone(),
+            },
             (_, path) => path.unwrap_or(std::path::Path::new("")).to_path_buf(),
         }
     }
@@ -759,6 +851,7 @@ impl Antler {
         let crumbs = self.crumbs(g, active, cx);
         let content = match &self.ws.tabs[active].kind {
             TabKind::Diff(tab) => self.diff_view(g, tab, cx),
+            TabKind::MultiDiff(tab) => self.multi_diff_view(g, tab, cx),
             TabKind::File(f) => match (&f.error, self.editor_in(g, &f.path)) {
                 (None, Some(editor)) => Self::editor_actions(v_flex(), cx)
                     .flex_1()
@@ -895,17 +988,9 @@ impl Antler {
             Some(_) if tab.is_binary() => msg("Binary file: no diff to show."),
             Some(_) if self.diff_of(g).read(cx).files().is_empty() => msg("No changes."),
             Some(_) => {
-                let file = self.diff_of(g).read(cx).files()[0].path().clone();
-                // a commit's diff is read-only: no Block actions. A Block is one change, as in VS Code, not the Hunk around it.
-                let changes = if tab.source.read_only() { Vec::new() } else { tab.parsed.changes() };
-                let annotations = changes.iter().enumerate().map(|(i, c)| {
-                    let (original, line) = tab.parsed.last_line_of(c);
-                    let side = if original { DiffSide::Original } else { DiffSide::Modified };
-                    DiffAnnotation::line(("hunk", i), DiffLinePosition::new(file.clone(), side, line))
-                });
+                let (annotations, ops) = block_annotations(tab, "hunk", 0);
                 let (this, staged) = (cx.entity().downgrade(), tab.source.staged);
                 // (stage or unstage, discard, the change's lines): a typed text is discarded in the editor, not on the disk
-                let ops = std::rc::Rc::new(changes.iter().enumerate().map(|(k, c)| (tab.block_op(k, false), tab.block_op(k, true), c.lines.clone())).collect::<Vec<_>>());
                 let typed = (tab.is_editable() && !staged).then(|| tab.source.repo.join(&tab.source.path));
                 let measure = self.width_probe(g, tab, false, cx);
                 let view = Diff::new(self.diff_of(g))
@@ -916,35 +1001,7 @@ impl Antler {
                     // per-half scroll (gpui-component 0.8.1 has none); the editable diff has its own halves (side_diff.rs).
                     .soft_wrap(true)
                     .annotations(annotations)
-                    .render_annotation(move |a, _, _| {
-                        let ElementId::NamedInteger(_, i) = a.id() else { return h_flex() };
-                        let i = *i as usize;
-                        let button = |id: &'static str, icon, label: &'static str, revert: bool| {
-                            let (this, ops, typed) = (this.clone(), ops.clone(), typed.clone());
-                            Button::new((id, i)).ghost().xsmall().icon(icon).label(label).on_click(move |_, window, cx| {
-                                this.update(cx, |t, cx| match (&typed, revert) {
-                                    (Some(path), true) => {
-                                        let wanted = ops[i].2.clone();
-                                        t.revert_changes(path, move |r| *r == wanted, window, cx);
-                                    }
-                                    _ => {
-                                        if let Some(op) = if revert { &ops[i].1 } else { &ops[i].0 } {
-                                            t.confirm_and_run(op.clone(), window, cx);
-                                        }
-                                    }
-                                })
-                                .ok();
-                            })
-                        };
-                        if staged {
-                            h_flex().child(button("unstage-hunk", IconName::Minus, "Unstage Block", false))
-                        } else {
-                            h_flex()
-                                .gap_1()
-                                .child(button("revert-hunk", IconName::Undo2, "Discard Block", true))
-                                .child(button("stage-hunk", IconName::Plus, "Stage Block", false))
-                        }
-                    })
+                    .render_annotation(move |a, _, _| render_block_actions(a, staged, this.clone(), ops.clone(), typed.clone()))
                     .flex_1()
                     .min_h_0();
                 let (weak, read_only) = (cx.entity().downgrade(), tab.source.read_only());
@@ -969,6 +1026,88 @@ impl Antler {
                     .into_any_element()
             }
         }
+    }
+
+    pub(crate) fn multi_diff_view(&self, g: GroupId, tab: &workspace::MultiDiffTab, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let msg = |m: &str| div().p_4().text_color(theme.muted_foreground).child(m.to_string()).into_any_element();
+        if let Some(error) = &tab.error { return msg(error); }
+        if tab.patch.is_none() { return msg("Loading…"); }
+        if self.diff_of(g).read(cx).files().is_empty() { return msg("No changes"); }
+
+        let width = self.group_ui[&g].width.clone();
+        let diff = self.diff_of(g).clone();
+        let split = self.ws.split;
+        let measure = canvas(
+            |bounds, _, _| bounds.size.width.as_f32(),
+            move |_, w, _, cx| {
+                width.set(w);
+                let mode = if workspace::side_by_side(split, w) { DiffMode::Split } else { DiffMode::Unified };
+                diff.update(cx, |d, cx| if d.mode() != mode { d.set_mode(mode, cx) });
+            },
+        ).absolute().size_full();
+        let (repo, staged, commit, this) = match &tab.source {
+            workspace::MultiDiffSource::Group { repo, staged } => (repo.clone(), *staged, None, cx.entity().downgrade()),
+            workspace::MultiDiffSource::Commit { repo, sha, .. } => (repo.clone(), false, Some(sha.clone()), cx.entity().downgrade()),
+            workspace::MultiDiffSource::Refs { repo, right, .. } => (repo.clone(), false, Some(right.sha.clone()), cx.entity().downgrade()),
+        };
+        let mut annotations = Vec::new();
+        let mut all_ops = Vec::new();
+        for file in &tab.files {
+            let base = all_ops.len();
+            let (file_annotations, file_ops) = block_annotations(file, "hunk", base);
+            annotations.extend(file_annotations);
+            all_ops.extend(file_ops.iter().cloned());
+        }
+        let all_ops = std::rc::Rc::new(all_ops);
+        let read_only = commit.is_some();
+        let header_this = this.clone();
+        let menu_this = this.clone();
+        let view = Diff::new(self.diff_of(g))
+            .soft_wrap(true)
+            .annotations(annotations)
+            .render_annotation(move |a, _, _| render_block_actions(a, staged, this.clone(), all_ops.clone(), None))
+            .render_header(move |file, _, _| {
+                let path = file.path().to_string();
+                let repo = repo.clone();
+                let this = header_this.clone();
+                let commit = commit.clone();
+                Button::new(format!("open-multi-diff-file-{path}")).ghost().xsmall().label(path.clone()).on_click(move |_, _window, cx| {
+                    cx.stop_propagation();
+                    let (repo, path, commit) = (repo.clone(), path.clone(), commit.clone());
+                    this.update_in(cx, |this, window, cx| {
+                        if let Some(sha) = commit {
+                            let source = workspace::DiffSource { repo: repo.clone(), path: path.clone(), staged, untracked: false, commit: Some(sha), compare: None };
+                            let source = this.ws.open_diff(source, true);
+                            this.sync_diff(cx);
+                            this.load_diff(source, window, cx);
+                        } else if let Some(section) = this.ws.section(&repo) {
+                            this.open_file(section, staged, &path, false, window, cx);
+                        }
+                    }).ok();
+                })
+            })
+            .flex_1()
+            .min_h_0();
+        v_flex()
+            .id(("multi-diff-area", g))
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(measure)
+            .child(view)
+            .context_menu(move |menu, _, _| {
+                if read_only {
+                    return menu;
+                }
+                let item = |label: &'static str, revert: bool| menu_item(&menu_this, label, move |t, w, cx| t.act_on_selection(revert, w, cx));
+                if staged {
+                    menu.item(item("Unstage Selected Ranges", false))
+                } else {
+                    menu.item(item("Stage Selected Ranges", false)).item(item("Revert Selected Ranges", true))
+                }
+            })
+            .into_any_element()
     }
 
     /// An invisible child that measures the diff view's width each frame: a narrow view shows inline, and a view whose
@@ -1006,8 +1145,10 @@ impl Antler {
             let (tab_group, close_group): (SharedString, SharedString) = (format!("tab-{i}").into(), format!("tab-close-{i}").into());
             let name = match (&t.kind, t.path()) {
                 (TabKind::Diff(d), _) => d.source.path.clone(),
+                (TabKind::MultiDiff(d), _) => d.source.title(),
                 (_, path) => path.unwrap_or(std::path::Path::new("")).display().to_string(),
             };
+            let icon = if matches!(&t.kind, TabKind::MultiDiff(_)) { Icon::new(IconName::Eye).into_any_element() } else { style::file_icon(&name).into_any_element() };
             let x = Icon::new(IconName::Close).xsmall();
             let close = div()
                 .id(("close", i))
@@ -1059,7 +1200,7 @@ impl Antler {
                     let to = this.ws.move_tab_to(d.ix, g, Some(i));
                     this.activate_tab(to, cx);
                 }))
-                .child(style::file_icon(&name))
+                .child(icon)
                 .child(div().when(t.preview, |el| el.italic()).child(t.title()))
                 .child(close)
                 .context_menu(move |menu, _, _| tab_menu(menu, &weak, i, preview))
@@ -1084,6 +1225,7 @@ impl Antler {
         let section_name = self.ws.active_section().map(|s| s.name.clone());
         let path = match (&self.ws.tabs[active].kind, self.ws.tabs[active].path()) {
             (TabKind::Diff(d), _) => section_name.into_iter().chain([d.source.path.clone()]).collect::<Vec<_>>().join("/"),
+            (TabKind::MultiDiff(d), _) => d.source.title(),
             (_, path) => {
                 let path = path.unwrap_or(std::path::Path::new(""));
                 path.strip_prefix(&self.ws.root).unwrap_or(path).display().to_string()
@@ -1140,8 +1282,8 @@ impl Antler {
                         .bg(c(SIDE))
                         .child(mode("inline", "Inline", false))
                         .child(mode("split", "Side by side", true)),
-                )
-        });
+                ).into_any_element()
+        }).or_else(|| matches!(self.ws.tabs[active].kind, TabKind::MultiDiff(_)).then(|| self.multi_diff_tools(g, cx)));
         h_flex()
             .h(px(30.))
             .flex_none()
@@ -1155,6 +1297,26 @@ impl Antler {
             .child(div().flex_1().min_w_0().truncate().child(path))
             .children(preview)
             .children(tools)
+    }
+
+    fn multi_diff_tools(&self, g: GroupId, cx: &mut Context<Self>) -> AnyElement {
+        let mode = |id: &'static str, label: &'static str, split: bool| {
+            Button::new((id, g)).ghost().xsmall().label(label).selected(workspace::side_by_side(self.ws.split, self.width_of(g)) == split).on_click(cx.listener(move |this, _, _, cx| {
+                this.ws.split = split;
+                this.sync_diff(cx);
+            }))
+        };
+        let step = |id: &'static str, icon, tip_text: String, forward: bool| {
+            Button::new((id, g)).ghost().xsmall().icon(icon).tooltip(tip_text).on_click(cx.listener(move |this, _, w, cx| {
+                this.ws.focus(g);
+                this.step_change(forward, w, cx)
+            }))
+        };
+        h_flex().flex_none().gap(px(8.))
+            .child(step("previous-change", IconName::ArrowUp, crate::keys::label(cx, "Previous Change", "workbench.action.editor.previousChange"), false))
+            .child(step("next-change", IconName::ArrowDown, crate::keys::label(cx, "Next Change", "workbench.action.editor.nextChange"), true))
+            .child(h_flex().p(px(1.)).rounded(px(6.)).border_1().border_color(cx.theme().border).bg(c(SIDE))
+                .child(mode("inline", "Inline", false)).child(mode("split", "Side by side", true))).into_any_element()
     }
 }
 

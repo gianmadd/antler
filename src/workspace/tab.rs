@@ -14,6 +14,44 @@ pub struct DiffSource {
     pub compare: Option<[String; 2]>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiDiffSource {
+    Group { repo: PathBuf, staged: bool },
+    Commit { repo: PathBuf, sha: String, subject: String },
+    Refs { repo: PathBuf, left: git::Ref, right: git::Ref },
+}
+
+impl MultiDiffSource {
+    pub fn load(&self) -> git::Result<String> {
+        match self {
+            Self::Group { repo, staged } => git::group_patch(repo, *staged),
+            Self::Commit { repo, sha, .. } => git::commit_parent(repo, sha).and_then(|left| git::refs_patch(repo, &left, sha)),
+            Self::Refs { repo, left, right } => git::refs_patch_from_merge_base(repo, &left.sha, &right.sha),
+        }
+    }
+
+    pub fn title(&self) -> String {
+        match self {
+            Self::Group { repo, staged } => format!("{}: {}", file_name(repo), if *staged { "Staged Changes" } else { "Changes" }),
+            Self::Commit { sha, subject, .. } => format!("{} - {subject}", &sha[..sha.len().min(7)]),
+            Self::Refs { left, right, .. } => format!("{} ↔ {}", left.name, right.name),
+        }
+    }
+}
+
+pub struct MultiDiffTab {
+    pub source: MultiDiffSource,
+    pub patch: Option<String>,
+    pub files: Vec<DiffTab>,
+    pub error: Option<String>,
+}
+
+impl MultiDiffTab {
+    fn new(source: MultiDiffSource) -> Self {
+        Self { source, patch: None, files: Vec::new(), error: None }
+    }
+}
+
 impl DiffSource {
     /// A file of `repo` in the working tree or, with `staged`, in the index; no commit, no compare.
     pub fn working(repo: PathBuf, path: String, staged: bool, untracked: bool) -> Self {
@@ -78,6 +116,7 @@ pub struct Tab {
 pub enum Reopen {
     Path(PathBuf),
     Diff(DiffSource),
+    MultiDiff(MultiDiffSource),
     Settings,
     Keybindings,
 }
@@ -95,6 +134,7 @@ pub enum CloseScope {
 
 pub enum TabKind {
     Diff(DiffTab),
+    MultiDiff(MultiDiffTab),
     File(FileTab),
     Image(ImageTab),
     /// The Settings editor; its content lives in the view.
@@ -118,6 +158,7 @@ impl Tab {
     pub(super) fn reopen(&self) -> Reopen {
         match (&self.kind, self.path()) {
             (TabKind::Diff(d), _) => Reopen::Diff(d.source.clone()),
+            (TabKind::MultiDiff(d), _) => Reopen::MultiDiff(d.source.clone()),
             (TabKind::Settings, _) => Reopen::Settings,
             (TabKind::Keybindings, _) => Reopen::Keybindings,
             (_, path) => Reopen::Path(path.unwrap_or(Path::new("")).to_path_buf()),
@@ -137,6 +178,7 @@ impl Tab {
                     None => name.to_string(),
                 }
             }
+            TabKind::MultiDiff(d) => d.source.title(),
             TabKind::File(FileTab { path, .. }) | TabKind::Image(ImageTab { path, .. }) => file_name(path),
             TabKind::Settings => "Settings".into(),
             TabKind::Keybindings => "Keyboard Shortcuts".into(),
@@ -147,7 +189,7 @@ impl Tab {
     pub fn path(&self) -> Option<&Path> {
         match &self.kind {
             TabKind::File(FileTab { path, .. }) | TabKind::Image(ImageTab { path, .. }) => Some(path),
-            TabKind::Diff(_) | TabKind::Settings | TabKind::Keybindings => None,
+            TabKind::Diff(_) | TabKind::MultiDiff(_) | TabKind::Settings | TabKind::Keybindings => None,
         }
     }
 
@@ -452,6 +494,60 @@ impl Workspace {
         source
     }
 
+    /// Opens or focuses one read-only tab for a Section's Changes or Staged Changes group.
+    pub fn open_multi_diff(&mut self, source: MultiDiffSource) -> usize {
+        let existing = self.tabs.iter().position(|t| matches!(&t.kind, TabKind::MultiDiff(d) if d.source == source));
+        self.show_tab(existing, || TabKind::MultiDiff(MultiDiffTab::new(source)), true)
+    }
+
+    /// Installs a multi-file patch. Empty first loads close all but commit tabs, whose file view stays open.
+    pub fn set_multi_diff(&mut self, source: &MultiDiffSource, result: git::Result<String>) -> bool {
+        let Some(ix) = self.tabs.iter().position(|t| matches!(&t.kind, TabKind::MultiDiff(d) if &d.source == source)) else { return false };
+        let TabKind::MultiDiff(tab) = &mut self.tabs[ix].kind else { unreachable!() };
+        match result {
+            Ok(patch) => {
+                if patch.is_empty() && tab.patch.is_none() && !matches!(source, MultiDiffSource::Commit { .. }) {
+                    self.close_tab(ix);
+                    self.closed.pop();
+                    return false;
+                }
+                let (repo, staged, commit) = match source {
+                    MultiDiffSource::Group { repo, staged } => (repo, *staged, None),
+                    MultiDiffSource::Commit { repo, sha, .. } => (repo, false, Some(sha.clone())),
+                    MultiDiffSource::Refs { repo, right, .. } => (repo, false, Some(right.sha.clone())),
+                };
+                let section = if matches!(source, MultiDiffSource::Group { .. }) {
+                    self.sections.iter().find(|s| s.repo.path == *repo)
+                } else {
+                    None
+                };
+                tab.files = git::split_patch(&patch).into_iter().map(|(path, patch)| {
+                    let untracked = matches!(source, MultiDiffSource::Group { .. }) && !staged && section.is_some_and(|s| s.changes.iter().any(|f| f.path == path && f.is_untracked()));
+                    let mut source = DiffSource::working(repo.clone(), path, staged, untracked);
+                    source.commit = commit.clone();
+                    let mut file = DiffTab::new(source);
+                    file.set_patch(patch);
+                    file
+                }).collect();
+                tab.patch = Some(patch);
+                tab.error = None;
+            }
+            Err(error) => {
+                tab.error = Some(error.clone());
+                self.last_error = Some(error);
+            }
+        }
+        true
+    }
+
+    /// Group sources currently open in this Workspace, reloaded after every Section refresh.
+    pub fn open_group_multi_diffs(&self) -> Vec<MultiDiffSource> {
+        self.tabs.iter().filter_map(|t| match &t.kind {
+            TabKind::MultiDiff(d) if matches!(d.source, MultiDiffSource::Group { .. }) => Some(d.source.clone()),
+            _ => None,
+        }).collect()
+    }
+
     /// Cmd+, : the Settings tab (the existing one if open), pinned.
     pub fn open_settings(&mut self) {
         let existing = self.find_here(|t| matches!(t.kind, TabKind::Settings));
@@ -560,6 +656,7 @@ impl Workspace {
             let kind = match what {
                 Reopen::Path(path) => TabKind::loading(&path),
                 Reopen::Diff(source) => TabKind::Diff(DiffTab::new(source)),
+                Reopen::MultiDiff(source) => TabKind::MultiDiff(MultiDiffTab::new(source)),
                 Reopen::Settings => TabKind::Settings,
                 Reopen::Keybindings => TabKind::Keybindings,
             };
@@ -1140,6 +1237,37 @@ mod tests {
     }
 
     #[test]
+    fn multi_diff_block_op_equals_single_diff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        repo(&dir);
+        fs::write(dir.join("a.txt"), "base\n").unwrap();
+        git(&dir, &["add", "a.txt"]);
+        git(&dir, &["commit", "-qm", "base"]);
+        fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        fs::write(dir.join("b.txt"), "staged\n").unwrap();
+        git(&dir, &["add", "b.txt"]);
+
+        let mut ws = Workspace::open(tmp.path());
+        for staged in [false, true] {
+            let source = MultiDiffSource::Group { repo: dir.clone(), staged };
+            ws.open_multi_diff(source.clone());
+            ws.set_multi_diff(&source, source.load());
+            let (path, ops) = match &ws.tabs[ws.active.unwrap()].kind {
+                TabKind::MultiDiff(tab) => {
+                    let file = &tab.files[0];
+                    (file.source.path.clone(), [file.block_op(0, false), file.block_op(0, true)])
+                }
+                _ => unreachable!(),
+            };
+            let single = ws.show(0, staged, &path, false);
+            for (revert, expected) in [false, true].into_iter().zip(ops) {
+                assert_eq!(expected, single.block_op(0, revert), "staged={staged}, revert={revert}");
+            }
+        }
+    }
+
+    #[test]
     fn open_path_previews_a_file_next_to_diffs_and_pins_on_double_click() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -1161,6 +1289,174 @@ mod tests {
         ws.show(0, false, "a.txt", false); // already open as a pinned diff: just activates it
         assert_eq!(titles(&ws), owned(&[("a.txt", false), ("a.txt", false)]));
         assert_eq!(ws.active, Some(0));
+    }
+
+    #[test]
+    fn multi_diff_one_tab_per_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        fs::write(repo_path.join("a.txt"), "changed\n").unwrap();
+        let mut ws = Workspace::open(tmp.path());
+        let source = MultiDiffSource::Group { repo: repo_path.clone(), staged: false };
+        let first = ws.open_multi_diff(source.clone());
+        ws.set_multi_diff(&source, source.load());
+        let second = ws.open_multi_diff(source.clone());
+        assert_eq!(first, second);
+        assert_eq!(ws.tabs.iter().filter(|t| matches!(&t.kind, TabKind::MultiDiff(d) if d.source == source)).count(), 1);
+        assert_eq!(ws.tabs[second].title(), "one: Changes");
+        assert_eq!(MultiDiffSource::Group { repo: repo_path, staged: true }.title(), "one: Staged Changes");
+    }
+
+    #[test]
+    fn multi_diff_empty_group_opens_no_tab() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        let mut ws = Workspace::open(tmp.path());
+        let source = MultiDiffSource::Group { repo: repo_path, staged: false };
+        ws.open_multi_diff(source.clone());
+        assert!(!ws.set_multi_diff(&source, source.load()));
+        assert!(!ws.tabs.iter().any(|t| matches!(&t.kind, TabKind::MultiDiff(d) if d.source == source)));
+    }
+
+    #[test]
+    fn multi_diff_follows_stage_after_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        fs::write(repo_path.join("a.txt"), "changed\n").unwrap();
+        fs::write(repo_path.join("b.txt"), "staged\n").unwrap();
+        git(&repo_path, &["add", "b.txt"]);
+        let mut ws = Workspace::open(tmp.path());
+        let changes = MultiDiffSource::Group { repo: repo_path.clone(), staged: false };
+        let staged = MultiDiffSource::Group { repo: repo_path.clone(), staged: true };
+        ws.open_multi_diff(changes.clone());
+        ws.set_multi_diff(&changes, changes.load());
+        ws.open_multi_diff(staged.clone());
+        ws.set_multi_diff(&staged, staged.load());
+        ws.perform(Op::Stage { repo: repo_path.clone(), path: "a.txt".into() });
+        let sources = ws.open_group_multi_diffs();
+        for source in sources { ws.set_multi_diff(&source.clone(), source.load()); }
+
+        let paths = |source: &MultiDiffSource, ws: &Workspace| ws.tabs.iter().find_map(|t| match &t.kind {
+            TabKind::MultiDiff(d) if &d.source == source => Some(d.files.iter().map(|f| f.source.path.clone()).collect::<Vec<_>>()),
+            _ => None,
+        }).unwrap();
+        assert!(paths(&changes, &ws).is_empty());
+        assert_eq!(paths(&changes, &ws).into_iter().collect::<std::collections::HashSet<_>>(), ws.sections[0].changes.iter().map(|f| f.path.clone()).collect());
+        assert_eq!(paths(&staged, &ws).into_iter().collect::<std::collections::HashSet<_>>(), ws.sections[0].staged.iter().map(|f| f.path.clone()).collect());
+    }
+
+    #[test]
+    fn multi_diff_is_never_dirty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        fs::write(repo_path.join("a.txt"), "changed\n").unwrap();
+        let mut ws = Workspace::open(tmp.path());
+        let source = MultiDiffSource::Group { repo: repo_path, staged: false };
+        let ix = ws.open_multi_diff(source.clone());
+        ws.set_multi_diff(&source, source.load());
+        assert!(!ws.tabs[ix].is_dirty());
+        assert!(ws.tabs[ix].file().is_none());
+    }
+
+    #[test]
+    fn multi_diff_reopens_with_shift_cmd_t() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        fs::write(repo_path.join("a.txt"), "changed\n").unwrap();
+        let mut ws = Workspace::open(tmp.path());
+        let source = MultiDiffSource::Group { repo: repo_path, staged: false };
+        ws.open_multi_diff(source.clone());
+        ws.set_multi_diff(&source, source.load());
+        ws.close_tab(0);
+        let ix = ws.reopen_closed().unwrap();
+        assert!(matches!(&ws.tabs[ix].kind, TabKind::MultiDiff(d) if d.source == source));
+        assert!(matches!(ws.tabs[ix].kind, TabKind::MultiDiff(ref d) if d.patch.is_none()), "reopened tab reloads in the view");
+    }
+
+    #[test]
+    fn commit_multi_diff_never_reloads_and_opens_each_file_at_that_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        fs::write(repo_path.join("a.txt"), "committed\n").unwrap();
+        git(&repo_path, &["add", "a.txt"]);
+        git(&repo_path, &["commit", "-q", "-m", "commit subject"]);
+        let sha = out(&repo_path, &["rev-parse", "HEAD"]);
+        let source = MultiDiffSource::Commit { repo: repo_path.clone(), sha: sha.clone(), subject: "commit subject".into() };
+        let mut ws = Workspace::open(tmp.path());
+        let ix = ws.open_multi_diff(source.clone());
+        assert!(ws.set_multi_diff(&source, source.load()));
+        assert!(!ws.open_group_multi_diffs().contains(&source));
+        let before = match &ws.tabs[ix].kind { TabKind::MultiDiff(d) => d.patch.clone(), _ => unreachable!() };
+        git(&repo_path, &["commit", "--allow-empty", "-q", "-m", "later"]);
+        for group in ws.open_group_multi_diffs() { ws.set_multi_diff(&group.clone(), group.load()); }
+        let TabKind::MultiDiff(tab) = &ws.tabs[ix].kind else { unreachable!() };
+        assert_eq!(tab.patch, before);
+        assert_eq!(tab.source.title(), format!("{} - commit subject", &sha[..7]));
+        assert_eq!(tab.files[0].source.commit.as_deref(), Some(sha.as_str()));
+        assert_eq!(tab.files[0].source.load().unwrap(), crate::git::commit_diff(&repo_path, &sha, "a.txt").unwrap());
+    }
+
+    #[test]
+    fn commit_multi_diff_one_tab_per_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        let sha = out(&repo_path, &["rev-parse", "HEAD"]);
+        let mut ws = Workspace::open(tmp.path());
+        let source = MultiDiffSource::Commit { repo: repo_path, sha, subject: "init".into() };
+        let first = ws.open_multi_diff(source.clone());
+        let second = ws.open_multi_diff(source.clone());
+        assert_eq!(first, second);
+        assert_eq!(ws.tabs.iter().filter(|t| matches!(&t.kind, TabKind::MultiDiff(d) if d.source == source)).count(), 1);
+    }
+
+    #[test]
+    fn refs_multi_diff_left_is_the_ref_right_the_commit_and_never_reloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        git(&repo_path, &["checkout", "-q", "-b", "left"]);
+        fs::write(repo_path.join("a.txt"), "left\n").unwrap();
+        git(&repo_path, &["add", "a.txt"]);
+        git(&repo_path, &["commit", "-q", "-m", "left"]);
+        let left = out(&repo_path, &["rev-parse", "HEAD"]);
+        git(&repo_path, &["checkout", "-q", "main"]);
+        fs::write(repo_path.join("a.txt"), "right\n").unwrap();
+        git(&repo_path, &["add", "a.txt"]);
+        git(&repo_path, &["commit", "-q", "-m", "right"]);
+        let right = out(&repo_path, &["rev-parse", "HEAD"]);
+        let source = MultiDiffSource::Refs { repo: repo_path.clone(), left: crate::git::Ref { name: "left".into(), sha: left }, right: crate::git::Ref { name: "main".into(), sha: right } };
+        let patch = source.load().unwrap();
+        assert!(patch.contains("+right"));
+        assert!(!patch.contains("+left"));
+        assert_eq!(source.title(), "left ↔ main");
+        let mut ws = Workspace::open(tmp.path());
+        let ix = ws.open_multi_diff(source.clone());
+        assert!(ws.set_multi_diff(&source, Ok(patch)));
+        assert!(!ws.open_group_multi_diffs().contains(&source));
+        git(&repo_path, &["checkout", "-q", "left"]);
+        assert_eq!(ws.tabs[ix].title(), "left ↔ main");
+        assert!(matches!(&ws.tabs[ix].kind, TabKind::MultiDiff(tab) if tab.files[0].source.read_only()));
+    }
+
+    #[test]
+    fn refs_without_differences_open_no_tab() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        let sha = out(&repo_path, &["rev-parse", "HEAD"]);
+        let reference = crate::git::Ref { name: "main".into(), sha: sha.clone() };
+        let source = MultiDiffSource::Refs { repo: repo_path.clone(), left: reference.clone(), right: reference };
+        let mut ws = Workspace::open(tmp.path());
+        ws.open_multi_diff(source.clone());
+        assert!(!ws.set_multi_diff(&source, source.load()));
+        assert!(!ws.tabs.iter().any(|t| matches!(&t.kind, TabKind::MultiDiff(d) if d.source == source)));
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub struct Section {
     pub branch: String,
     /// The branch's upstream (`origin/main`); `None` offers Publish Branch instead of Sync.
     pub upstream: Option<String>,
+    /// VS Code's history base for this local branch, when it resolves to a different remote ref than upstream.
+    pub base: Option<git::Ref>,
     /// Commits to pull (↓) and to push (↑), against the upstream as of the last fetch.
     pub behind: usize,
     pub ahead: usize,

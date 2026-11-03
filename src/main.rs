@@ -531,6 +531,9 @@ impl Antler {
                 for source in this.ws.apply(scan) {
                     this.load_diff(source, window, cx);
                 }
+                for source in this.ws.open_group_multi_diffs() {
+                    this.load_multi_diff(source, window, cx);
+                }
                 this.load_quicks(cx);
                 this.sync_messages(window, cx);
                 this.sync_diff(cx);

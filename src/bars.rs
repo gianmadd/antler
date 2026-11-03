@@ -146,6 +146,7 @@ impl Antler {
                     vec![format!("{blocks} block{}", if blocks == 1 { "" } else { "s" }), sides.into()]
                 }
             },
+            Some(TabKind::MultiDiff(d)) => vec![format!("{} file{}", d.files.len(), if d.files.len() == 1 { "" } else { "s" }), "read-only".into()],
             Some(TabKind::Image(i)) => match &i.info {
                 Some(info) => info.size.map(|(w, h)| format!("{w} × {h}")).into_iter().chain([bytes(info.bytes)]).collect(),
                 None => Vec::new(),

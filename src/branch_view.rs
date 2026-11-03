@@ -21,7 +21,7 @@ actions!(antler, [CloseBranch]);
 
 /// What the open picker is for.
 #[derive(Clone)]
-enum Purpose {
+pub(crate) enum Purpose {
     Checkout,
     Detached,
     /// "Create new branch from…": the name typed first.
@@ -29,6 +29,8 @@ enum Purpose {
     Delete,
     Merge,
     Rebase,
+    /// Compare with…: the Graph commit is the right side.
+    Compare { right: crate::git::Ref },
 }
 
 /// A picker row.
@@ -134,7 +136,7 @@ impl Antler {
     }
 
     /// Lists the refs off the UI thread, then opens the picker.
-    fn pick_ref(&mut self, repo: PathBuf, purpose: Purpose, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pick_ref(&mut self, repo: PathBuf, purpose: Purpose, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             let dir = repo.clone();
@@ -162,6 +164,11 @@ impl Antler {
                 let others = |prefix| of(prefix).into_iter().filter(|c| !matches!(c, Choice::Ref(r) if r.name == current)).collect();
                 vec![(Some("branches"), others("refs/heads/")), (Some("remote branches"), others("refs/remotes/"))]
             }
+            Purpose::Compare { .. } => vec![
+                (Some("branches"), of("refs/heads/")),
+                (Some("remote branches"), of("refs/remotes/")),
+                (Some("tags"), of("refs/tags/")),
+            ],
             _ => {
                 let commands = match purpose {
                     Purpose::Checkout => vec![Choice::CreateBranch, Choice::CreateFrom, Choice::CheckoutDetached],
@@ -203,6 +210,14 @@ impl Antler {
                 let name = r.name.trim_start_matches("refs/heads/").to_string();
                 self.run(Op::DeleteBranch { repo, name, force: false }, window, cx)
             }
+            (Choice::Ref(r), Purpose::Compare { right }) => self.open_multi_diff(crate::workspace::MultiDiffSource::Refs {
+                repo,
+                left: crate::git::Ref {
+                    name: r.name.strip_prefix("refs/heads/").or_else(|| r.name.strip_prefix("refs/remotes/")).or_else(|| r.name.strip_prefix("refs/tags/")).unwrap_or(&r.name).to_string(),
+                    ..r
+                },
+                right,
+            }, window, cx),
         }
     }
 
@@ -216,6 +231,7 @@ impl Antler {
             Purpose::Delete => "Select a branch to delete".into(),
             Purpose::Merge => "Select a branch to merge from".into(),
             Purpose::Rebase => "Select a branch to rebase onto".into(),
+            Purpose::Compare { .. } => "Select a ref to compare with".into(),
         };
         let mut command = Command::new(&popup.state).placeholder(placeholder).max_h(px(420.));
         for (heading, rows) in &popup.groups {
