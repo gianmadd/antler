@@ -3,8 +3,8 @@
 //! `antler-server daemon` listens on `127.0.0.1` (random port) and writes `<port> <token>` to
 //! `<base>/<version>/daemon` (owner-only). `antler-server proxy` reads that file, connects, sends the token and then
 //! copies its stdin/stdout to the socket, so the protocol of `serve` runs unchanged on top. No daemon (or a stale
-//! file): the proxy starts one. The daemon exits after `grace` with no client (3 hours, like VS Code's reconnection
-//! grace time).
+//! file): the proxy starts one. The daemon exits after `grace` with no client (1 hour; VS Code uses 3, see docs/vscode-differences.md; the
+//! client retries for the same hour).
 //! Loopback TCP with a token, on every OS: the smallest thing that works on Windows too (no named pipes, no cfg).
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
@@ -20,7 +20,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The daemon's idle time before it exits.
 pub fn grace() -> Duration {
-    Duration::from_secs(std::env::var("ANTLER_SERVER_GRACE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3 * 3600))
+    Duration::from_secs(std::env::var("ANTLER_SERVER_GRACE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3600))
 }
 
 /// `~/.antler-server` (`ANTLER_SERVER_DIR` for tests).
