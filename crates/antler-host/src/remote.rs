@@ -538,17 +538,18 @@ impl Host for Remote {
         }
     }
 
-    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>)) {
+    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>)) -> bool {
         if cancel.load(Ordering::Relaxed) {
-            return;
+            return true;
         }
         let req = Req::Files { root: wire_path(root), repos: strings(repos), exclude: exclude() };
-        // a lost connection ends the list where it is
-        drop(self.inner().call_chunked(req, &[], Some(cancel), &mut |c| {
-            if let Res::FilesChunk { files } = c {
-                on_chunk(files.into_iter().map(PathBuf::from).collect());
-            }
-        }));
+        self.inner()
+            .call_chunked(req, &[], Some(cancel), &mut |c| {
+                if let Res::FilesChunk { files } = c {
+                    on_chunk(files.into_iter().map(PathBuf::from).collect());
+                }
+            })
+            .is_ok()
     }
 
     fn search_chunked(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, on_files: &mut dyn FnMut(Vec<FileMatches>)) -> Results {

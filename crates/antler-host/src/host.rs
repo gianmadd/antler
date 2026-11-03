@@ -68,7 +68,8 @@ pub trait Host: Send + Sync {
     fn discover(&self, root: &Path, max_depth: usize) -> Vec<Repo>;
     /// Every file that Search and Go to File see (see `search::walk`), absolute, in walk order, given to `on_chunk`
     /// in chunks while the walk goes on (so a remote host shows the first files early); stops when `cancel` is set.
-    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>));
+    /// False when the list is cut short by an error (a lost connection): what was given is not the whole list.
+    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>)) -> bool;
     /// All of `files_chunked` at once.
     fn files(&self, root: &Path, repos: &[PathBuf]) -> Vec<PathBuf> {
         let mut all = Vec::new();
@@ -264,17 +265,21 @@ impl Host for Local {
         crate::discovery::discover(root, max_depth)
     }
 
-    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>)) {
+    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>)) -> bool {
         let mut batch = Batch::new(on_chunk);
         for e in crate::search::walk(root, repos, self.exclude()).take_while(|_| !cancel.load(Ordering::Relaxed)) {
             batch.push(e.into_path());
         }
         batch.flush();
+        true
     }
 
     fn search_chunked(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, on_files: &mut dyn FnMut(Vec<FileMatches>)) -> Results {
         let mut batch = Batch::new(on_files);
-        let results = crate::search::search(root, repos, query, limit, cancel, self.exclude(), &mut |f| batch.push(f));
+        let results = crate::search::search(root, repos, query, limit, cancel, self.exclude(), &mut |f| match f {
+            Some(f) => batch.push(f),
+            None => batch.tick(),
+        });
         batch.flush();
         results
     }

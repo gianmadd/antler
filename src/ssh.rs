@@ -237,11 +237,6 @@ pub fn parse_uname(out: &str) -> Option<(Os, Arch)> {
     Some((os, Arch::from_machine(machine)?))
 }
 
-/// `PROCESSOR_ARCHITECTURE` of a Windows host (`AMD64`, `ARM64`).
-pub fn parse_windows_arch(out: &str) -> Option<(Os, Arch)> {
-    Some((Os::Windows, Arch::from_machine(out.trim())?))
-}
-
 /// The release asset for a host: `antler-server-<version>-<os>-<arch>[.exe]`, under
 /// `https://github.com/gianmadd/antler/releases/download/v<version>/` (stage 5 publishes them).
 /// os: `linux` `macos` `windows`; arch: `x86_64` `aarch64` (Rust's names, what the server's Hello says).
@@ -503,7 +498,15 @@ impl SshConnector {
         for &os in order {
             let mut child = self.spawn(&probe_command(os, VERSION))?;
             let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
-            let Some(probe) = read_probe(&mut out)? else {
+            let probe = match read_probe(&mut out) {
+                Ok(p) => p,
+                Err(e) => {
+                    child.kill().ok(); // not leaked: it would idle on the host until the master dies
+                    child.wait().ok();
+                    return Err(e);
+                }
+            };
+            let Some(probe) = probe else {
                 // the stream ended with no header: another kind of host, or ssh failed
                 let status = child.wait().ok();
                 let mut text = String::new();
@@ -659,8 +662,6 @@ Host first
         assert_eq!(parse_uname("Linux aarch64"), Some((Os::Linux, Arch::Aarch64)));
         assert_eq!(parse_uname("MINGW64_NT-10.0 x86_64"), Some((Os::Windows, Arch::X86_64)));
         assert_eq!(parse_uname("FreeBSD amd64"), None);
-        assert_eq!(parse_windows_arch("ARM64\r\n"), Some((Os::Windows, Arch::Aarch64)));
-        assert_eq!(parse_windows_arch("%PROCESSOR_ARCHITECTURE%"), None);
         assert_eq!(asset_name("0.3.0", Os::Linux, Arch::X86_64), "antler-server-0.3.0-linux-x86_64");
         assert_eq!(asset_name("0.3.0", Os::Windows, Arch::Aarch64), "antler-server-0.3.0-windows-aarch64.exe");
         assert_eq!(asset_url("0.3.0", Os::Macos, Arch::Aarch64), "https://github.com/gianmadd/antler/releases/download/v0.3.0/antler-server-0.3.0-macos-aarch64");
@@ -677,6 +678,37 @@ Host first
         // base64 of UTF-16LE "a" is "YQA="
         assert_eq!(powershell("a"), "powershell -NoProfile -NonInteractive -EncodedCommand YQA=");
         assert!(upload_command(Os::Windows, "0.3.0").starts_with("powershell -NoProfile"));
+    }
+
+    /// A stand-in ssh that runs `body` with the remote command in `$1`; its calls are logged (first word only).
+    #[cfg(unix)]
+    fn fake_ssh(dir: &Path, body: &str) -> (SshConnector, PathBuf) {
+        let (fake, log) = (dir.join("fake-ssh"), dir.join("calls"));
+        let script = format!("#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -o|-F|-p) shift 2;; -T) shift;; --) shift; break;; *) break;; esac; done\nshift\necho \"${{1%% *}}\" >> '{}'\n{body}\n", log.display());
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        (SshConnector::with(Target::parse("ada@example.test").unwrap(), fake, dir.join("none"), dir.join("cache")), log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_without_sh_is_tried_as_windows_and_remembered_but_a_failed_connection_is_not_retried() {
+        let tmp = tempfile::tempdir().unwrap();
+        let calls = |log: &Path| std::fs::read_to_string(log).unwrap().lines().map(String::from).collect::<Vec<_>>();
+        // `sh` is not there: no output, status 1; PowerShell answers with the header
+        let (c, log) = fake_ssh(tmp.path(), "case \"$1\" in sh*) exit 1;; *) printf 'antler-info\\r\\nWindows_NT AMD64\\r\\nC:\\\\Users\\\\a\\r\\nantler-proxy\\r\\n';; esac");
+        assert!(c.connect().is_ok());
+        assert_eq!(calls(&log), ["sh", "powershell"]);
+        assert_eq!(c.host_info().unwrap().os, Os::Windows);
+        assert!(c.connect().is_ok());
+        assert_eq!(calls(&log)[2..], ["powershell"], "a known Windows host goes first, with no `sh` attempt");
+
+        // status 255 is ssh itself failing: its message comes back and the other shell is not tried
+        let dir = tmp.path().join("down");
+        std::fs::create_dir(&dir).unwrap();
+        let (c, log) = fake_ssh(&dir, "echo 'ssh: Could not resolve hostname' >&2; exit 255");
+        assert_eq!(c.connect().err().as_deref(), Some("ssh: Could not resolve hostname"));
+        assert_eq!(calls(&log), ["sh"]);
     }
 
     #[test]

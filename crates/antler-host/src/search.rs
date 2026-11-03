@@ -145,6 +145,11 @@ impl<'a, T> Batch<'a, T> {
 
     pub fn push(&mut self, item: T) {
         self.buf.push(item);
+        self.tick();
+    }
+
+    /// A file without a match went by: gives out what waits once `EVERY` has passed.
+    pub fn tick(&mut self) {
         if self.last.is_none_or(|l| l.elapsed() >= Self::EVERY) {
             self.flush();
         }
@@ -159,8 +164,8 @@ impl<'a, T> Batch<'a, T> {
 }
 
 /// The local implementation of `Host::search_chunked`: each file with matches goes to `on_file` as it is found,
-/// in walk order; the returned `Results` has no files.
-pub fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, exclude: Arc<[String]>, on_file: &mut dyn FnMut(FileMatches)) -> Results {
+/// in walk order, and `None` after each file without (a clock tick for the caller); the returned `Results` has no files.
+pub fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, exclude: Arc<[String]>, on_file: &mut dyn FnMut(Option<FileMatches>)) -> Results {
     let mut results = Results::default();
     let matcher = match matcher(query) {
         Ok(m) => m,
@@ -203,7 +208,9 @@ pub fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cance
         });
         // unreadable files are skipped, like ripgrep does
         if searcher.search_path(&matcher, entry.path(), sink).is_ok() && !lines.is_empty() {
-            on_file(FileMatches { path: entry.into_path(), lines });
+            on_file(Some(FileMatches { path: entry.into_path(), lines }));
+        } else {
+            on_file(None);
         }
     }
     results
@@ -255,4 +262,23 @@ fn walk_filtered(root: &Path, repos: &[PathBuf], filter: Override, ignore_files:
         })
         .flatten()
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::Batch;
+
+    #[test]
+    fn a_tick_gives_out_what_waits_once_the_time_has_passed() {
+        let mut out = Vec::new();
+        let mut emit = |c: Vec<i32>| out.push(c);
+        let mut batch = Batch::new(&mut emit);
+        batch.push(1); // the first goes out at once
+        batch.push(2); // too soon: waits
+        batch.tick();
+        std::thread::sleep(Batch::<i32>::EVERY * 2);
+        batch.tick(); // a file with no match went by, long after the match
+        drop(batch);
+        assert_eq!(out, [vec![1], vec![2]]);
+    }
 }

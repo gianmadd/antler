@@ -37,10 +37,10 @@ pub struct FilesJob {
 }
 
 impl FilesJob {
-    /// Gives the relative paths to `on_chunk` as the host walks (`Workspace::list_chunk`).
-    pub fn run_chunked(&self, on_chunk: &mut dyn FnMut(Vec<String>)) {
+    /// Gives the relative paths to `on_chunk` as the host walks (`Workspace::list_chunk`); false if the list was cut short.
+    pub fn run_chunked(&self, on_chunk: &mut dyn FnMut(Vec<String>)) -> bool {
         let rel = |p: &Path| p.strip_prefix(&self.root).ok().map(|p| p.to_string_lossy().into_owned());
-        self.host.files_chunked(&self.root, &self.repos, &self.cancel, &mut |c| on_chunk(c.iter().filter_map(|p| rel(p)).collect()));
+        self.host.files_chunked(&self.root, &self.repos, &self.cancel, &mut |c| on_chunk(c.iter().filter_map(|p| rel(p)).collect()))
     }
 
     /// The whole sorted list at once.
@@ -94,8 +94,11 @@ impl Workspace {
     }
 
     /// The walk of `job` ended: sorts the chunks into the final list (an empty Root has no chunk and an empty list).
-    pub fn end_list_files(&mut self, job: &FilesJob) {
-        if job.id == self.goto.last && job.root == self.root {
+    /// A walk cut short (`complete` false) leaves no list rather than a short one.
+    pub fn end_list_files(&mut self, job: &FilesJob, complete: bool) {
+        if job.id == self.goto.last && job.root == self.root && !complete {
+            (self.goto.files, self.goto.partial) = (None, false);
+        } else if job.id == self.goto.last && job.root == self.root {
             let mut files = if self.goto.partial { self.goto.files.take().map(Arc::unwrap_or_clone).unwrap_or_default() } else { Vec::new() };
             files.sort_unstable();
             self.goto.files = Some(Arc::new(files));
@@ -279,13 +282,24 @@ mod tests {
         let newer = ws.start_list_files();
         ws.list_chunk(&job, vec!["late.rs".into()]);
         assert_eq!(found(&ws, "rs").len(), 2, "a chunk of a dropped list is ignored");
-        ws.end_list_files(&job);
+        ws.end_list_files(&job, true);
         assert!(job.cancel.load(std::sync::atomic::Ordering::Relaxed), "a newer list stops the walk of the older one");
         let mut rels = Vec::new();
         newer.run_chunked(&mut |c| rels.extend(c));
         ws.list_chunk(&newer, rels);
-        ws.end_list_files(&newer);
+        ws.end_list_files(&newer, true);
         assert_eq!(found(&ws, "rs").into_iter().map(|f| f.0).collect::<Vec<_>>(), ["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn a_list_cut_short_is_not_installed_as_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        files(tmp.path(), &["a.rs"]);
+        let mut ws = open(tmp.path());
+        let job = ws.start_list_files();
+        ws.list_chunk(&job, vec!["b.rs".into()]);
+        ws.end_list_files(&job, false);
+        assert!(found(&ws, "").is_empty(), "no short list");
     }
 
     #[test]

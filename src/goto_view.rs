@@ -78,9 +78,9 @@ impl Antler {
                 })
                 .ok();
             }
-            walk.await;
+            let complete = walk.await;
             this.update_in(cx, |this, window, cx| {
-                this.ws.end_list_files(&job);
+                this.ws.end_list_files(&job, complete);
                 this.match_files(window, cx);
             })
             .ok();
