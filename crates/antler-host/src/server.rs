@@ -15,7 +15,7 @@ use crate::protocol::*;
 
 /// What a running request leaves behind for `Cancel`.
 enum Active {
-    /// A search or the port poll: set to stop it.
+    /// A file list, a search or the port poll: set to stop it.
     Flag(Arc<AtomicBool>),
     /// A stream to a port of this host (a forwarded port).
     Stream(TcpStream),
@@ -59,7 +59,7 @@ pub fn serve<R: Read, W: Write + Send + 'static>(mut input: R, output: W) -> io:
         }
         // registered here, not on the request's thread, so a `Cancel` right behind the request finds it
         let cancel = Arc::new(AtomicBool::new(false));
-        if matches!(req, Req::Search { .. } | Req::WatchPorts) {
+        if matches!(req, Req::Files { .. } | Req::Search { .. } | Req::WatchPorts) {
             state.lock().unwrap_or_else(|e| e.into_inner()).insert(id, Active::Flag(cancel.clone()));
         }
         let (send, state) = (send.clone(), state.clone());
@@ -166,12 +166,24 @@ fn handle(id: u64, req: Req, body: Vec<u8>, cancel: &AtomicBool, state: &State, 
         }
         Req::Files { root, repos, exclude } => {
             let repos: Vec<PathBuf> = repos.iter().map(|r| p(r)).collect();
-            let files = Local::with_exclude(exclude).files(&p(&root), &repos).iter().map(|f| wire_path(f)).collect();
-            (Res::Files { files }, Vec::new())
+            let host = Local::with_exclude(exclude);
+            host.files_chunked(&p(&root), &repos, cancel, &mut |c| {
+                // a closed output means the client is gone: stop walking
+                if send(id, Res::FilesChunk { files: c.iter().map(|f| wire_path(f)).collect() }, &[]).is_err() {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            });
+            state.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            (Res::Ok, Vec::new())
         }
         Req::Search { root, repos, query, limit, exclude } => {
             let repos: Vec<PathBuf> = repos.iter().map(|r| p(r)).collect();
-            let results = Local::with_exclude(exclude).search(&p(&root), &repos, &query, limit, cancel);
+            let results = Local::with_exclude(exclude).search_chunked(&p(&root), &repos, &query, limit, cancel, &mut |c| {
+                let files = c.into_iter().map(|f| (wire_path(&f.path), f.lines)).collect();
+                if send(id, Res::SearchChunk { files }, &[]).is_err() {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            });
             state.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
             (Res::Results(results.into()), Vec::new())
         }

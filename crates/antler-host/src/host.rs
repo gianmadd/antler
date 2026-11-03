@@ -14,12 +14,12 @@
 //!   do not use this layer.
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
 
 use crate::discovery::Repo;
-use crate::search::{Query, Results};
+use crate::search::{Batch, FileMatches, Query, Results};
 
 /// What `metadata` reports; `size` and `mtime` are those of the target of a link.
 #[derive(Debug, Clone)]
@@ -66,10 +66,28 @@ pub trait Host: Send + Sync {
     fn list_dir(&self, dir: &Path) -> Vec<(PathBuf, bool)>;
     /// Every Nested repository under `root`, down to Scan depth `max_depth`, sorted by path.
     fn discover(&self, root: &Path, max_depth: usize) -> Vec<Repo>;
-    /// Every file that Search and Go to File see (see `search::walk`), absolute, in walk order.
-    fn files(&self, root: &Path, repos: &[PathBuf]) -> Vec<PathBuf>;
-    /// The Search over the Root; `cancel` is set when a newer one starts.
-    fn search(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool) -> Results;
+    /// Every file that Search and Go to File see (see `search::walk`), absolute, in walk order, given to `on_chunk`
+    /// in chunks while the walk goes on (so a remote host shows the first files early); stops when `cancel` is set.
+    /// False when the list is cut short by an error (a lost connection): what was given is not the whole list.
+    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>)) -> bool;
+    /// All of `files_chunked` at once.
+    fn files(&self, root: &Path, repos: &[PathBuf]) -> Vec<PathBuf> {
+        let mut all = Vec::new();
+        self.files_chunked(root, repos, &AtomicBool::new(false), &mut |c| all.extend(c));
+        all
+    }
+    /// The Search over the Root; `cancel` is set when a newer one starts. The files with matches go to `on_files` in
+    /// chunks, in walk order (each repo is walked on its own: not sorted overall); the returned `Results` has
+    /// `truncated` and `error` but no files.
+    fn search_chunked(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, on_files: &mut dyn FnMut(Vec<FileMatches>)) -> Results;
+    /// All of `search_chunked` at once, the files sorted by path.
+    fn search(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool) -> Results {
+        let mut files = Vec::new();
+        let mut results = self.search_chunked(root, repos, query, limit, cancel, &mut |c| files.extend(c));
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        results.files = files;
+        results
+    }
     /// Calls `on_change` with each path that changes under `root` (`.git` included), from any thread.
     fn watch(&self, root: &Path, on_change: Box<dyn Fn(PathBuf) + Send>) -> Result<WatchGuard, String>;
     /// Runs `git args` in `repo`: its stdout, or its error text. `stdin` is fed to it; see `git::run_env`.
@@ -334,12 +352,23 @@ impl Host for Local {
         crate::discovery::discover(root, max_depth)
     }
 
-    fn files(&self, root: &Path, repos: &[PathBuf]) -> Vec<PathBuf> {
-        crate::search::walk(root, repos, self.exclude()).map(|e| e.into_path()).collect()
+    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>)) -> bool {
+        let mut batch = Batch::new(on_chunk);
+        for e in crate::search::walk(root, repos, self.exclude()).take_while(|_| !cancel.load(Ordering::Relaxed)) {
+            batch.push(e.into_path());
+        }
+        batch.flush();
+        true
     }
 
-    fn search(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool) -> Results {
-        crate::search::search(root, repos, query, limit, cancel, self.exclude())
+    fn search_chunked(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, on_files: &mut dyn FnMut(Vec<FileMatches>)) -> Results {
+        let mut batch = Batch::new(on_files);
+        let results = crate::search::search(root, repos, query, limit, cancel, self.exclude(), &mut |f| match f {
+            Some(f) => batch.push(f),
+            None => batch.tick(),
+        });
+        batch.flush();
+        results
     }
 
     fn watch(&self, root: &Path, on_change: Box<dyn Fn(PathBuf) + Send>) -> Result<WatchGuard, String> {

@@ -67,15 +67,20 @@ impl Antler {
 
     /// Lists the Root's files off the UI thread, then refreshes the popup's matches.
     pub(crate) fn spawn_list_files(&mut self, job: crate::goto::FilesJob, window: &mut Window, cx: &mut Context<Self>) {
+        let (tx, rx) = async_channel::unbounded();
         cx.spawn_in(window, async move |this, cx| {
-            let (job, files) = cx
-                .background_spawn(async move {
-                    let files = job.run();
-                    (job, files)
+            let bg = job.clone();
+            let walk = cx.background_spawn(async move { bg.run_chunked(&mut |c| drop(tx.send_blocking(c))) });
+            while let Ok(chunk) = rx.recv().await {
+                this.update_in(cx, |this, window, cx| {
+                    this.ws.list_chunk(&job, chunk);
+                    this.match_files(window, cx);
                 })
-                .await;
+                .ok();
+            }
+            let complete = walk.await;
             this.update_in(cx, |this, window, cx| {
-                this.ws.finish_list_files(&job, files);
+                this.ws.end_list_files(&job, complete);
                 this.match_files(window, cx);
             })
             .ok();

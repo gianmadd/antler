@@ -19,7 +19,7 @@ use crate::discovery::Repo;
 use crate::host::{Envs, Host, Meta, WatchGuard};
 use crate::ports::{ListeningPort, bind_local};
 use crate::protocol::*;
-use crate::search::{Query, Results};
+use crate::search::{FileMatches, Query, Results};
 
 type Answer = (Res, Vec<u8>);
 
@@ -74,7 +74,8 @@ struct Core {
     conn: Mutex<Arc<Inner>>,
     next: Arc<AtomicU64>,
     sinks: Sinks,
-    connector: Option<Arc<Connector>>,
+    /// Taken by `Remote::close`: dropping it is what stops the connector's own resources (ssh's master).
+    connector: Mutex<Option<Arc<Connector>>>,
     status: Mutex<Option<Arc<dyn Fn(Status) + Send + Sync>>>,
     /// The process behind the current connection.
     child: Mutex<Option<Child>>,
@@ -133,6 +134,8 @@ impl Inner {
                         }
                     }
                     Res::Closed => drop(lock(&sinks.streams).remove(&id).map(|s| s.shutdown(Shutdown::Write))),
+                    // part of an answer: the waiter stays registered until the closing frame
+                    res @ (Res::FilesChunk { .. } | Res::SearchChunk { .. }) => drop(lock(&reader.pending).1.get(&id).map(|tx| tx.send((res, body)))),
                     res => {
                         if let Some(tx) = lock(&reader.pending).1.remove(&id) {
                             tx.send((res, body)).ok();
@@ -166,7 +169,7 @@ impl Core {
             conn: Mutex::new(Inner::dead(next.clone())),
             next,
             sinks: Sinks::default(),
-            connector,
+            connector: Mutex::new(connector),
             status: Mutex::new(None),
             child: Mutex::new(None),
             closed: AtomicBool::new(false),
@@ -185,6 +188,10 @@ impl Core {
 
     /// Makes `transport` the current connection and sends the active watches again on it.
     fn install(core: &Arc<Core>, (input, output, mut child): Transport) -> Result<ServerInfo, String> {
+        if core.closed.load(Ordering::SeqCst) {
+            child.as_mut().map(|c| (drop(c.kill()), drop(c.wait()))); // closed while it was connecting
+            return Err("closed".into());
+        }
         let generation = core.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let weak: Weak<Core> = Arc::downgrade(core);
         let on_end = move || {
@@ -238,12 +245,13 @@ impl Core {
     }
 
     fn start_reconnecting(core: &Arc<Core>) {
-        if core.closed.load(Ordering::SeqCst) || core.connector.is_none() || core.reconnecting.swap(true, Ordering::SeqCst) {
+        if core.closed.load(Ordering::SeqCst) || lock(&core.connector).is_none() || core.reconnecting.swap(true, Ordering::SeqCst) {
             return;
         }
         let core = core.clone();
         std::thread::spawn(move || {
-            let (lost_at, connector) = (Instant::now(), core.connector.clone().unwrap());
+            let (lost_at, connector) = (Instant::now(), lock(&core.connector).clone());
+            let Some(connector) = connector else { return };
             let mut n = 0;
             loop {
                 core.notify(Status::Reconnecting { attempt: n + 1 });
@@ -398,20 +406,33 @@ fn relay(core: &Core, mut conn: TcpStream, host: &str, port: u16) -> io::Result<
     inner.send(core.next.fetch_add(1, Ordering::Relaxed), Req::Cancel { target: id }, &[])
 }
 
-impl Drop for Remote {
-    fn drop(&mut self) {
+impl Remote {
+    /// Ends this connection for good: no reconnect, the process behind it is killed and the connector is let go (for
+    /// ssh that stops the ControlMaster and removes its folder). For a window that closes: something may still hold
+    /// the `Remote` (a job, a stream), so this must not wait for `Drop`.
+    pub fn close(&self) {
         self.core.closed.store(true, Ordering::SeqCst);
         if let Some(mut child) = lock(&self.core.child).take() {
             // closing its stdin makes the server finish; kill is for one that does not
             drop(child.kill());
             drop(child.wait());
         }
+        // off this thread: stopping a master is a process to run, and the caller may be the UI
+        if let Some(connector) = lock(&self.core.connector).take() {
+            std::thread::spawn(move || drop(connector));
+        }
     }
 }
 
-/// A wire path as the app sees it: always `/`-separated, whatever the app's OS.
+impl Drop for Remote {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// A wire path as the app sees it: native, so it equals what `Local` gives (on Windows, `C:/x` becomes `C:\x`).
 fn native_wire(s: &str) -> PathBuf {
-    PathBuf::from(s)
+    native_path(s)
 }
 
 impl Inner {
@@ -421,6 +442,11 @@ impl Inner {
 
     /// Sends a request and waits for its answer; `cancel`, once set, sends a `Cancel` (the answer still comes).
     fn call(&self, req: Req, body: &[u8], cancel: Option<&AtomicBool>) -> io::Result<Answer> {
+        self.call_chunked(req, body, cancel, &mut |_| {})
+    }
+
+    /// `call` for an answer that comes in chunks: `on_chunk` gets each one, in order, before the closing answer.
+    fn call_chunked(&self, req: Req, body: &[u8], cancel: Option<&AtomicBool>, on_chunk: &mut dyn FnMut(Res)) -> io::Result<Answer> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let rx = self.register(id)?;
         self.send(id, req, body).inspect_err(|_| drop(self.shared.pending.lock().unwrap_or_else(|e| e.into_inner()).1.remove(&id)))?;
@@ -432,6 +458,7 @@ impl Inner {
             }
             match rx.recv_timeout(Duration::from_millis(25)) {
                 Ok((Res::Err { kind, msg }, _)) => return Err(io::Error::new(kind_from_name(&kind), msg)),
+                Ok((chunk @ (Res::FilesChunk { .. } | Res::SearchChunk { .. }), _)) => on_chunk(chunk),
                 Ok(answer) => return Ok(answer),
                 Err(RecvTimeoutError::Disconnected) => return Err(lost()),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -486,7 +513,7 @@ impl Host for Remote {
 
     fn create(&self, path: &Path, folder: bool) -> io::Result<PathBuf> {
         match self.inner().call(Req::Create { path: wire_path(path), folder }, &[], None)? {
-            (Res::Path { path }, _) => Ok(PathBuf::from(path)),
+            (Res::Path { path }, _) => Ok(native_wire(&path)),
             _ => unexpected("create"),
         }
     }
@@ -521,31 +548,43 @@ impl Host for Remote {
 
     fn list_dir(&self, dir: &Path) -> Vec<(PathBuf, bool)> {
         match self.inner().call(Req::ListDir { dir: wire_path(dir), exclude: exclude() }, &[], None) {
-            Ok((Res::Entries { entries }, _)) => entries.into_iter().map(|(p, d)| (PathBuf::from(p), d)).collect(),
+            Ok((Res::Entries { entries }, _)) => entries.into_iter().map(|(p, d)| (native_wire(&p), d)).collect(),
             _ => Vec::new(),
         }
     }
 
     fn discover(&self, root: &Path, max_depth: usize) -> Vec<Repo> {
         match self.inner().call(Req::Discover { root: wire_path(root), max_depth }, &[], None) {
-            Ok((Res::Repos { repos }, _)) => repos.into_iter().map(|r| Repo { path: PathBuf::from(r.path), worktree_of: r.worktree_of.map(PathBuf::from) }).collect(),
+            Ok((Res::Repos { repos }, _)) => repos.into_iter().map(|r| Repo { path: native_wire(&r.path), worktree_of: r.worktree_of.map(|p| native_wire(&p)) }).collect(),
             _ => Vec::new(),
         }
     }
 
-    fn files(&self, root: &Path, repos: &[PathBuf]) -> Vec<PathBuf> {
-        match self.inner().call(Req::Files { root: wire_path(root), repos: strings(repos), exclude: exclude() }, &[], None) {
-            Ok((Res::Files { files }, _)) => files.into_iter().map(PathBuf::from).collect(),
-            _ => Vec::new(),
+    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>)) -> bool {
+        if cancel.load(Ordering::Relaxed) {
+            return true;
         }
+        let req = Req::Files { root: wire_path(root), repos: strings(repos), exclude: exclude() };
+        self.inner()
+            .call_chunked(req, &[], Some(cancel), &mut |c| {
+                if let Res::FilesChunk { files } = c {
+                    on_chunk(files.iter().map(|p| native_wire(p)).collect());
+                }
+            })
+            .is_ok()
     }
 
-    fn search(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool) -> Results {
+    fn search_chunked(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, on_files: &mut dyn FnMut(Vec<FileMatches>)) -> Results {
         if cancel.load(Ordering::Relaxed) {
             return Results::default(); // like the walk that stops before its first file
         }
         let req = Req::Search { root: wire_path(root), repos: strings(repos), query: query.clone(), limit, exclude: exclude() };
-        match self.inner().call(req, &[], Some(cancel)) {
+        let chunk = |c| {
+            if let Res::SearchChunk { files } = c {
+                on_files(files.into_iter().map(|(path, lines)| FileMatches { path: native_wire(&path), lines }).collect());
+            }
+        };
+        match self.inner().call_chunked(req, &[], Some(cancel), &mut { chunk }) {
             Ok((Res::Results(r), _)) => r.into(),
             Ok(_) => Results { error: Some("unexpected answer to search".into()), ..Default::default() },
             Err(e) => Results { error: Some(e.to_string()), ..Default::default() },

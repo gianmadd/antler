@@ -1,9 +1,9 @@
 //! When to retry a lost connection: VS Code's schedule (waits of 0, 5, 5, 10 ×5, then 30 s repeated) until the
-//! reconnection grace time (3 hours, `ProtocolConstants.ReconnectionGraceTime`) is over. Each attempt has its own
+//! reconnection grace time (1 hour; VS Code's `ProtocolConstants.ReconnectionGraceTime` is 3 hours, see docs/vscode-differences.md) is over. Each attempt has its own
 //! 30 s timeout, which the connector applies (ssh's `ConnectTimeout`).
 use std::time::Duration;
 
-pub const GRACE: Duration = Duration::from_secs(3 * 3600);
+pub const GRACE: Duration = Duration::from_secs(3600);
 
 const WAITS: [u64; 8] = [0, 5, 5, 10, 10, 10, 10, 10];
 
@@ -28,8 +28,8 @@ mod tests {
     }
 
     #[test]
-    fn the_grace_time_is_three_hours() {
-        assert!(!expired(Duration::from_secs(3 * 3600 - 1)));
-        assert!(expired(Duration::from_secs(3 * 3600)));
+    fn the_grace_time_is_one_hour() {
+        assert!(!expired(Duration::from_secs(3600 - 1)));
+        assert!(expired(Duration::from_secs(3600)));
     }
 }

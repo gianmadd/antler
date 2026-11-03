@@ -16,7 +16,7 @@ use crate::ports::ListeningPort;
 use crate::search::{FileMatches, LineMatch, Query, Results};
 
 /// Bumped on any change a different version could not read; the client refuses a server with another one.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 const MAX_HEADER: u32 = 64 << 20;
 const MAX_BODY: u32 = 1 << 30;
@@ -62,7 +62,9 @@ pub enum Req {
     Exists { path: String },
     ListDir { dir: String, exclude: Vec<String> },
     Discover { root: String, max_depth: usize },
+    /// Answered by `FilesChunk`s, then `Ok`.
     Files { root: String, repos: Vec<String>, exclude: Vec<String> },
+    /// Answered by `SearchChunk`s, then `Results` (`truncated`, `error`; no files). `Cancel` ends it early.
     Search { root: String, repos: Vec<String>, query: Query, limit: usize, exclude: Vec<String> },
     /// Answered by `Ok`, then `Event`s with this id.
     Watch { root: String },
@@ -74,7 +76,7 @@ pub enum Req {
     /// Bytes (the body) for the stream `target`, not answered. Handled in order by the reader, like `Cancel`.
     Data { target: u64 },
     Git { repo: String, args: Vec<String>, stdin: Option<String>, envs: Vec<(String, String)> },
-    /// Stops the `Search`, the `Watch` or the stream that was sent with id `target`. Not answered.
+    /// Stops the `Files`, the `Search`, the `Watch` or the stream that was sent with id `target`. Not answered.
     Cancel { target: u64 },
 }
 
@@ -90,7 +92,9 @@ pub enum Res {
     Meta(WireMeta),
     Entries { entries: Vec<(String, bool)> },
     Repos { repos: Vec<WireRepo> },
-    Files { files: Vec<String> },
+    /// Part of the answer to `Files` (then `Ok`) or `Search` (then `Results` without files): more may follow with the same id.
+    FilesChunk { files: Vec<String> },
+    SearchChunk { files: Vec<(String, Vec<LineMatch>)> },
     Results(WireResults),
     Text { text: String },
     Event { path: String },
@@ -134,7 +138,7 @@ impl From<Results> for WireResults {
 impl From<WireResults> for Results {
     fn from(r: WireResults) -> Self {
         Results {
-            files: r.files.into_iter().map(|(path, lines)| FileMatches { path: PathBuf::from(path), lines }).collect(),
+            files: r.files.into_iter().map(|(path, lines)| FileMatches { path: native_path(&path), lines }).collect(),
             truncated: r.truncated,
             error: r.error,
         }

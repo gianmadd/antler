@@ -128,8 +128,44 @@ fn case_like(found: &str, rep: &str) -> String {
     }
 }
 
-/// The local implementation of `Host::search`.
-pub fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, exclude: Arc<[String]>) -> Results {
+/// Groups items into chunks while a walk produces them: the first item goes out at once, then at most one chunk per
+/// `EVERY`, so a result shows early and the frames stay few.
+pub struct Batch<'a, T> {
+    buf: Vec<T>,
+    last: Option<std::time::Instant>,
+    emit: &'a mut dyn FnMut(Vec<T>),
+}
+
+impl<'a, T> Batch<'a, T> {
+    const EVERY: std::time::Duration = std::time::Duration::from_millis(30);
+
+    pub fn new(emit: &'a mut dyn FnMut(Vec<T>)) -> Self {
+        Batch { buf: Vec::new(), last: None, emit }
+    }
+
+    pub fn push(&mut self, item: T) {
+        self.buf.push(item);
+        self.tick();
+    }
+
+    /// A file without a match went by: gives out what waits once `EVERY` has passed.
+    pub fn tick(&mut self) {
+        if self.last.is_none_or(|l| l.elapsed() >= Self::EVERY) {
+            self.flush();
+        }
+    }
+
+    pub fn flush(&mut self) {
+        if !self.buf.is_empty() {
+            (self.emit)(std::mem::take(&mut self.buf));
+            self.last = Some(std::time::Instant::now());
+        }
+    }
+}
+
+/// The local implementation of `Host::search_chunked`: each file with matches goes to `on_file` as it is found,
+/// in walk order, and `None` after each file without (a clock tick for the caller); the returned `Results` has no files.
+pub fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, exclude: Arc<[String]>, on_file: &mut dyn FnMut(Option<FileMatches>)) -> Results {
     let mut results = Results::default();
     let matcher = match matcher(query) {
         Ok(m) => m,
@@ -172,14 +208,15 @@ pub fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cance
         });
         // unreadable files are skipped, like ripgrep does
         if searcher.search_path(&matcher, entry.path(), sink).is_ok() && !lines.is_empty() {
-            results.files.push(FileMatches { path: entry.into_path(), lines });
+            on_file(Some(FileMatches { path: entry.into_path(), lines }));
+        } else {
+            on_file(None);
         }
     }
-    results.files.sort_by(|a, b| a.path.cmp(&b.path)); // each repo was walked on its own: sort by path
     results
 }
 
-/// The local implementation of `Host::files`.
+/// The local implementation of `Host::files_chunked`.
 /// Every file under the Root that the search and Go to File see: each nested repo honours its own .gitignore,
 /// the default exclusions are skipped. Walk order, one walk after another (not sorted overall; `search` sorts its results by path). Blocking.
 pub fn walk(root: &Path, repos: &[PathBuf], exclude: Arc<[String]>) -> impl Iterator<Item = ignore::DirEntry> + use<> {
@@ -225,4 +262,23 @@ fn walk_filtered(root: &Path, repos: &[PathBuf], filter: Override, ignore_files:
         })
         .flatten()
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::Batch;
+
+    #[test]
+    fn a_tick_gives_out_what_waits_once_the_time_has_passed() {
+        let mut out = Vec::new();
+        let mut emit = |c: Vec<i32>| out.push(c);
+        let mut batch = Batch::new(&mut emit);
+        batch.push(1); // the first goes out at once
+        batch.push(2); // too soon: waits
+        batch.tick();
+        std::thread::sleep(Batch::<i32>::EVERY * 2);
+        batch.tick(); // a file with no match went by, long after the match
+        drop(batch);
+        assert_eq!(out, [vec![1], vec![2]]);
+    }
 }
