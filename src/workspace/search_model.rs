@@ -56,13 +56,8 @@ impl Workspace {
         }
         let mut query = self.search.query.clone();
         query.text = text.to_string();
-        let repos = self.sections.iter().map(|s| s.repo.path.clone()).collect();
         self.quick_search.last += 1;
-        let job = SearchJob {
-            id: self.quick_search.last,
-            host: self.host.clone(), root: self.root.clone(), repos, query,
-            limit: 100, cancel: Default::default(),
-        };
+        let job = self.search_job(self.quick_search.last, query, 100, Default::default());
         self.quick_search.results = None;
         self.quick_search.job = Some(job.clone());
         Some(job)
@@ -94,8 +89,19 @@ impl Workspace {
             self.search.results = None;
             return None;
         }
-        let repos = self.sections.iter().map(|s| s.repo.path.clone()).collect();
-        Some(SearchJob { id: self.search.last, host: self.host.clone(), root: self.root.clone(), repos, query, limit: search::LIMIT, cancel: self.search.cancel.clone() })
+        Some(self.search_job(self.search.last, query, search::LIMIT, self.search.cancel.clone()))
+    }
+
+    fn search_job(&self, id: u64, query: Query, limit: usize, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> SearchJob {
+        SearchJob {
+            id,
+            host: self.host.clone(),
+            root: self.root.clone(),
+            repos: self.sections.iter().map(|s| s.repo.path.clone()).collect(),
+            query,
+            limit,
+            cancel,
+        }
     }
 
     /// After a rescan: with the Search view open and a query typed, the same search again (files may have changed).

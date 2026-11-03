@@ -66,6 +66,9 @@ pub struct FileMatches {
 pub struct LineMatch {
     /// 1-based.
     pub line: usize,
+    /// Character count of the indentation removed from `text`.
+    #[serde(default)]
+    pub indent: usize,
     /// The line without its indentation and line break.
     pub text: String,
     /// Byte ranges of the matches in `text`, to highlight.
@@ -195,6 +198,7 @@ pub fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cance
             }
             let text = line.trim_end_matches(['\n', '\r']);
             let indent = text.len() - text.trim_start().len();
+            let indent_chars = text[..indent].chars().count();
             let mut ranges = Vec::new();
             matcher.find_iter(text.as_bytes(), |m| {
                 // matches inside the indentation (e.g. a regex on spaces) are clamped to the visible text
@@ -202,7 +206,7 @@ pub fn search(root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cance
                 true
             })?;
             // shortcut: keeps whole lines, even minified megabyte ones; clip them if memory shows up.
-            lines.push(LineMatch { line: line_number as usize, text: text[indent..].to_string(), ranges });
+            lines.push(LineMatch { line: line_number as usize, indent: indent_chars, text: text[indent..].to_string(), ranges });
             found += 1;
             Ok(true)
         });

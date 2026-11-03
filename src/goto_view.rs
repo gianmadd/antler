@@ -4,15 +4,56 @@ use std::ops::Range;
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::{Sizable as _, button::{Button, ButtonVariants as _}};
 use gpui_kit::component::input::{EditorState, Position};
+use gpui_kit::base::Disableable as _;
 use gpui_kit::*;
 
 use crate::Antler;
 use crate::goto::Match;
 use crate::keys;
 use crate::palette::{self, Mode};
+use crate::search::FileMatches;
 use crate::style::{self, FG_DIM, FG_FAINT, GIT_M, c};
 
 actions!(antler, [GoToFile, CloseGoToFile, CommandPalette, GoToLine, QuickTextSearch, QuickSearchInSearchView]);
+
+#[cfg(test)]
+mod tests {
+    use super::quick_location;
+    use crate::search::{FileMatches, LineMatch};
+
+    #[test]
+    fn quick_search_row_maps_to_path_line_and_column() {
+        let files = vec![
+            FileMatches {
+                path: "first.rs".into(),
+                lines: vec![
+                    LineMatch { line: 2, indent: 0, text: "before".into(), ranges: vec![0..2] },
+                    LineMatch { line: 3, indent: 4, text: "éé target".into(), ranges: vec![5..11] },
+                ],
+            },
+            FileMatches {
+                path: "second.rs".into(),
+                lines: vec![LineMatch { line: 8, indent: 0, text: "match".into(), ranges: vec![0..5] }],
+            },
+        ];
+
+        assert_eq!(quick_location(&files, 2), Some(("first.rs".into(), 3, 7)));
+        assert_eq!(quick_location(&files, 4), Some(("second.rs".into(), 8, 0)));
+    }
+}
+
+fn quick_location(files: &[FileMatches], mut row: usize) -> Option<(std::path::PathBuf, usize, usize)> {
+    for file in files {
+        row = row.checked_sub(1)?; // file header
+        if row < file.lines.len() {
+            let hit = &file.lines[row];
+            let column = hit.indent + hit.text[..hit.ranges.first()?.start].chars().count();
+            return Some((file.path.clone(), hit.line, column));
+        }
+        row -= file.lines.len();
+    }
+    None
+}
 
 /// Most files the popup lists; type more to narrow it.
 const LIMIT: usize = 100;
@@ -29,6 +70,14 @@ pub(crate) struct GoToPopup {
 }
 
 impl Antler {
+    pub(crate) fn quick_search_query(&self, cx: &App) -> Option<String> {
+        let query = self.goto.as_ref()?.state.read(cx).query(cx);
+        match palette::mode(&query) {
+            Mode::QuickSearch(text) => Some(text.to_string()),
+            _ => None,
+        }
+    }
+
     /// Cmd+P: opens the popup with an empty query and lists the files again off the UI thread.
     pub(crate) fn go_to_file(&mut self, _: &GoToFile, window: &mut Window, cx: &mut Context<Self>) {
         if self.ws.has_folder() {
@@ -239,25 +288,11 @@ impl Antler {
                 });
             }
             Mode::QuickSearch(_) => {
-                let Some((path, line, column)) = self.quick_location(row) else { return };
+                let Some((path, line, column)) = self.ws.quick_search.results.as_ref().and_then(|r| quick_location(&r.files, row)) else { return };
                 self.close_go_to_file(&CloseGoToFile, window, cx);
                 self.open_path(path, Some(line), Some(column), true, cx);
             }
         }
-    }
-
-    fn quick_location(&self, mut row: usize) -> Option<(std::path::PathBuf, usize, usize)> {
-        for file in &self.ws.quick_search.results.as_ref()?.files {
-            if row == 0 { return None; }
-            row -= 1;
-            if row < file.lines.len() {
-                let hit = &file.lines[row];
-                let column = hit.ranges.first()?.start;
-                return Some((file.path.clone(), hit.line, hit.text[..column].chars().count()));
-            }
-            row -= file.lines.len();
-        }
-        None
     }
 
     fn open_match(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -301,18 +336,6 @@ impl Antler {
             }
             Mode::QuickSearch(rest) => {
                 let mut items = Vec::new();
-                let this = cx.entity().downgrade();
-                items.push(CommandItem::new().child(move |_, _| {
-                    let this = this.clone();
-                    Button::new("quick-search-in-search-view")
-                        .ghost()
-                        .xsmall()
-                        .label("Open in Search View")
-                        .on_click(move |_, _window, cx| {
-                            cx.stop_propagation();
-                            this.update_in(cx, |this, window, cx| this.quick_search_in_search_view(&QuickSearchInSearchView, window, cx)).ok();
-                        })
-                }));
                 if rest.is_empty() {
                     items.push(CommandItem::new().label("Type text after % to search in files"));
                 } else if let Some(results) = &self.ws.quick_search.results {
@@ -323,7 +346,7 @@ impl Antler {
                     } else {
                         for file in &results.files {
                             let rel = file.path.strip_prefix(&self.ws.root).unwrap_or(&file.path).display().to_string();
-                            items.push(CommandItem::new().label(rel));
+                            items.push(CommandItem::new().label(rel).disabled(true));
                             for line in &file.lines {
                                 let (text, ranges) = (line.text.clone(), line.ranges.clone());
                                 items.push(CommandItem::new().child(move |_, _| {
@@ -336,6 +359,18 @@ impl Antler {
                 } else {
                     items.push(CommandItem::new().label("Searching…"));
                 }
+                let this = cx.entity().downgrade();
+                items.push(CommandItem::new().child(move |_, _| {
+                    let this = this.clone();
+                    Button::new("quick-search-in-search-view")
+                        .ghost()
+                        .xsmall()
+                        .label("Open in Search View")
+                        .on_click(move |_, _window, cx| {
+                            cx.stop_propagation();
+                            this.update_in(cx, |this, window, cx| this.quick_search_in_search_view(&QuickSearchInSearchView, window, cx)).ok();
+                        })
+                }));
                 ("Search text in files", items)
             }
             Mode::Files => ("Search files by name", Self::file_items(popup, mark)),

@@ -85,12 +85,19 @@ impl Antler {
 
     /// Cmd+Shift+F: shows the Search view with its field focused and selected, ready to type over.
     pub(crate) fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
+        let quick_query = self.quick_search_query(cx);
+        if let Some(text) = &quick_query {
+            self.query.0.update(cx, |q, cx| q.set_value(text.clone(), window, cx));
+        }
         self.ws.view = Some(View::Search);
         self.query.0.update(cx, |q, cx| {
             q.focus(window, cx);
             q.select_all(window, cx);
         });
         cx.notify();
+        if quick_query.is_some() {
+            self.run_search(window, cx);
+        }
     }
 
     /// Explorer → Find in Folder…: the Search view with the search details open and `dir` in "files to include".
