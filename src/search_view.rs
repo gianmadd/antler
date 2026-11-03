@@ -117,13 +117,18 @@ impl Antler {
 
     /// Runs `job` off the UI thread and installs its results.
     pub(crate) fn spawn_search(&mut self, job: search::SearchJob, window: &mut Window, cx: &mut Context<Self>) {
+        let (tx, rx) = async_channel::unbounded();
         cx.spawn_in(window, async move |this, cx| {
-            let (job, results) = cx
-                .background_spawn(async move {
-                    let results = job.run();
-                    (job, results)
+            let bg = job.clone();
+            let walk = cx.background_spawn(async move { bg.run_chunked(&mut |c| drop(tx.send_blocking(c))) });
+            while let Ok(files) = rx.recv().await {
+                this.update(cx, |this, cx| {
+                    this.ws.search_chunk(&job, files);
+                    cx.notify();
                 })
-                .await;
+                .ok();
+            }
+            let results = walk.await;
             this.update(cx, |this, cx| {
                 this.ws.finish_search(&job, results);
                 cx.notify();
