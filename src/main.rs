@@ -870,7 +870,7 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
     let shift = px(26. * (cx.global::<Windows>().0.len() % 8) as f32);
     (bounds.origin.x, bounds.origin.y) = (bounds.origin.x + shift, bounds.origin.y + shift);
     let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..TitleBar::window_options() };
-    // ANTLER_BENCH_OPEN: ':'-separated files opened as pinned tabs at startup, used by scripts/benchmark.sh only.
+    // ANTLER_BENCH_OPEN: ':'-separated files opened as pinned tabs at startup, used by benchmarks only.
     let bench_open = std::env::var("ANTLER_BENCH_OPEN").unwrap_or_default();
     gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| {
