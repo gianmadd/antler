@@ -144,7 +144,8 @@ fn git_runs_on_the_server_and_reports_its_errors() {
     // stdin and environment reach git
     let sha = r.git(&repo, &["hash-object", "--stdin"], Some("hello\n"), &[]).unwrap();
     assert_eq!(sha.trim(), "ce013625030ba8dba906f756967f9e9ca394464a");
-    let env = [("GIT_AUTHOR_NAME", std::ffi::OsStr::new("Zed"))];
+    // with an email too: a CI runner has no git identity to complete the name with
+    let env = [("GIT_AUTHOR_NAME", std::ffi::OsStr::new("Zed")), ("GIT_AUTHOR_EMAIL", std::ffi::OsStr::new("zed@example.test"))];
     assert_eq!(r.git(&repo, &["var", "GIT_AUTHOR_IDENT"], None, &env).unwrap().split('<').next().unwrap().trim(), "Zed");
     assert!(r.git(&repo, &["no-such-subcommand"], None, &[]).unwrap_err().contains("no-such-subcommand"));
 }
