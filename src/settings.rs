@@ -79,6 +79,10 @@ pub struct Settings {
     /// Hide what `.gitignore` ignores in the Explorer.
     #[serde(rename = "explorer.excludeGitIgnore")]
     pub explorer_exclude_git_ignore: bool,
+    #[serde(rename = "git.blame.statusBarItem.enabled")]
+    pub git_blame_status_bar_enabled: bool,
+    #[serde(rename = "git.blame.editorDecoration.enabled")]
+    pub git_blame_editor_decoration_enabled: bool,
     #[serde(rename = "git.autofetch")]
     pub git_autofetch: bool,
     /// Seconds.
@@ -194,6 +198,8 @@ impl Default for Settings {
             insert_final_newline: false,
             files_exclude: default_exclude(),
             explorer_exclude_git_ignore: false,
+            git_blame_status_bar_enabled: false,
+            git_blame_editor_decoration_enabled: false,
             git_autofetch: false,
             git_autofetch_period: 180,
             confirm_discard: true,
@@ -392,12 +398,13 @@ mod tests {
     #[test]
     fn new_settings_are_read_with_vs_codes_names() {
         let json = r#"{"editor.fontSize": 15, "editor.tabSize": 2, "editor.insertSpaces": false, "editor.wordWrap": "on", "editor.fontFamily": "Menlo",
-            "files.trimTrailingWhitespace": true, "files.insertFinalNewline": true, "git.autofetch": true, "git.autofetchPeriod": 60,
+            "files.trimTrailingWhitespace": true, "files.insertFinalNewline": true, "git.autofetch": true, "git.autofetchPeriod": 60, "git.blame.editorDecoration.enabled": true,
             "window.restoreWindows": "none", "antler.confirmDiscard": false, "explorer.excludeGitIgnore": true}"#;
         let (_, s, e) = run(&[], Some(json));
         assert_eq!(e, None);
         assert_eq!((s.editor_font_size, s.editor_tab_size, s.editor_insert_spaces, s.editor_word_wrap), (15., 2, false, WordWrap::On));
         assert_eq!((s.trim_trailing_whitespace, s.insert_final_newline, s.git_autofetch, s.git_autofetch_period), (true, true, true, 60));
+        assert!(s.git_blame_editor_decoration_enabled);
         assert_eq!((s.restore_windows, s.confirm_discard, s.explorer_exclude_git_ignore, s.editor_font_family.as_str()), (RestoreWindows::None, false, true, "Menlo"));
     }
 

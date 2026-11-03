@@ -126,7 +126,13 @@ impl Antler {
             Some(TabKind::File(f)) => {
                 let p = self.editor_in(self.ws.group, &f.path).map(|e| e.read(cx).cursor_position());
                 let (line, col) = p.map_or((0, 0), |p| (p.line, p.character));
-                vec![format!("Ln {}, Col {}", line + 1, col + 1), "UTF-8".into(), style::language_name(&f.language()).into()]
+                let mut items = vec![format!("Ln {}, Col {}", line + 1, col + 1), "UTF-8".into(), style::language_name(&f.language()).into()];
+                if cx.global::<crate::settings::Current>().0.git_blame_status_bar_enabled
+                    && let Some(blame) = self.ws.blame_at(line as usize)
+                {
+                    items.insert(0, crate::git::blame_text(blame, false));
+                }
+                items
             }
             Some(TabKind::Diff(d)) => match &d.source.commit {
                 Some(sha) => vec![format!("Commit {}", &sha[..sha.len().min(7)]), "read-only".into()],

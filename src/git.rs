@@ -101,6 +101,38 @@ pub fn abort_operation(repo: &Path, op: Operation) -> Result<()> {
     run(repo, &[op.command(), "--abort"], None).map(drop)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlameLine { pub sha: String, pub author: String, pub time: i64, pub subject: String }
+
+/// Blame one repo-relative path; one record is returned for each source line.
+pub fn blame(repo: &Path, path: &str) -> Result<Vec<BlameLine>> {
+    let out = run(repo, &["blame", "--porcelain", "--", path], None)?;
+    let mut current = BlameLine { sha: String::new(), author: String::new(), time: 0, subject: String::new() };
+    let mut lines = Vec::new();
+    for line in out.lines() {
+        if line.starts_with('\t') { lines.push(current.clone()); continue; }
+        if let Some((sha, _)) = line.split_once(' ') && sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if current.sha != sha { current = BlameLine { sha: sha.into(), author: String::new(), time: 0, subject: String::new() }; }
+        } else if let Some(v) = line.strip_prefix("author ") { current.author = v.into(); }
+        else if let Some(v) = line.strip_prefix("author-time ") { current.time = v.parse().unwrap_or(0); }
+        else if let Some(v) = line.strip_prefix("summary ") { current.subject = v.into(); }
+    }
+    Ok(lines)
+}
+
+pub fn blame_text(line: Option<&BlameLine>, subject: bool) -> String {
+    let Some(line) = line.filter(|l| !l.sha.bytes().all(|b| b == b'0')) else { return "Not Committed Yet".into() };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let author = format!("{} ({})", line.author, age(line.time, now));
+    if subject { format!("{}, {author}", line.subject) } else { author }
+}
+
+fn age(time: i64, now: i64) -> String {
+    let seconds = now.saturating_sub(time).max(0);
+    let (n, unit) = if seconds < 60 { (seconds, "second") } else if seconds < 3_600 { (seconds / 60, "minute") } else if seconds < 86_400 { (seconds / 3_600, "hour") } else if seconds < 31_536_000 { (seconds / 86_400, "day") } else { (seconds / 31_536_000, "year") };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
 /// Changed, untracked and ignored files (ignored ones only for the Explorer view).
 pub fn status(repo: &Path) -> Result<Vec<FileStatus>> {
     let out = run(repo, &["status", "--porcelain=v1", "-z", "-uall", "--ignored=matching"], None)?;
@@ -885,6 +917,42 @@ mod tests {
     fn block(p: &Path, d: &Diff, k: usize, cached: bool, reverse: bool) {
         let patch = d.selection_patch(&d.pick_change(&d.changes()[k]), reverse).unwrap();
         apply_patch(p, &patch, cached, reverse).unwrap();
+    }
+
+    #[test]
+    fn blame_text_templates_and_ages() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let line = BlameLine { sha: "abc".into(), author: "Ada".into(), time: now - 90_061, subject: "first change".into() };
+        assert_eq!(blame_text(Some(&line), true), "first change, Ada (1 day ago)");
+        assert_eq!(blame_text(Some(&line), false), "Ada (1 day ago)");
+        assert_eq!(blame_text(None, false), "Not Committed Yet");
+        assert_eq!(age(90, 100), "10 seconds ago");
+        assert_eq!(age(0, 120), "2 minutes ago");
+        assert_eq!(age(0, 86_400), "1 day ago");
+        assert_eq!(age(0, 31_536_000), "1 year ago");
+        let uncommitted = BlameLine { sha: "0".repeat(40), ..line.clone() };
+        assert_eq!(blame_text(Some(&uncommitted), false), "Not Committed Yet");
+    }
+
+    #[test]
+    fn blame_reads_two_authors_and_an_uncommitted_line() {
+        let dir = tempfile::tempdir().unwrap(); let p = dir.path();
+        crate::testing::init(p);
+        fs::write(p.join("a.txt"), "Ada\n").unwrap();
+        crate::testing::git(p, &["add", "a.txt"]);
+        crate::testing::git(p, &["commit", "-q", "-m", "first"]);
+        fs::write(p.join("a.txt"), "Ada\nLin\n").unwrap();
+        crate::testing::git(p, &["add", "a.txt"]);
+        let out = std::process::Command::new("git").arg("-C").arg(p).args(["commit", "-q", "-m", "second"])
+            .env("GIT_AUTHOR_NAME", "Lin").env("GIT_AUTHOR_EMAIL", "lin@example.com")
+            .env("GIT_COMMITTER_NAME", "Lin").env("GIT_COMMITTER_EMAIL", "lin@example.com").output().unwrap();
+        assert!(out.status.success());
+        fs::write(p.join("a.txt"), "Ada\nLin\nLocal\n").unwrap();
+        let lines = blame(p, "a.txt").unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].author, "Ada");
+        assert_eq!(lines[1].author, "Lin");
+        assert_eq!(lines[2].sha, "0000000000000000000000000000000000000000");
     }
 
     #[test]

@@ -130,11 +130,11 @@ impl Antler {
 
     /// The bars over the editor's margin and the open Block, as overlays, from the text as typed.
     pub(crate) fn quick_margin(&self, f: &FileTab, editor: &Entity<EditorState>, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(q) = f.quick.as_ref() else { return Vec::new() };
-        let changes = q.parsed.changes();
-        if changes.is_empty() {
-            return Vec::new();
-        }
+        let settings = &cx.global::<crate::settings::Current>().0;
+        let show_blame = settings.git_blame_editor_decoration_enabled;
+        if f.quick.is_none() && !show_blame { return Vec::new(); }
+        let changes = f.quick.as_ref().map_or_else(Vec::new, |q| q.parsed.changes());
+        if changes.is_empty() && !show_blame { return Vec::new(); }
         // the layout read below is the last painted one: after a scroll or an edit, draw once more
         let seen = Some((editor.read(cx).scroll_offset(), f.text.len()));
         if self.quick.seen.replace(seen) != seen {
@@ -146,6 +146,27 @@ impl Antler {
         let end_of = |line: usize| starts.get(line + 1).map_or(f.text.len(), |s| s - 1);
         let state = editor.read(cx);
         let area = state.input_bounds();
+        let mut out = Vec::new();
+        if show_blame {
+            let cursor = state.cursor_position();
+            if let Some(blame) = self.ws.blame_at(cursor.line as usize) {
+                let start = starts.get(cursor.line as usize).copied().unwrap_or(f.text.len());
+                let end = starts.get(cursor.line as usize + 1).map_or(f.text.len(), |s| s - 1);
+                let range = if end > start { end - 1..end } else { end..end };
+                if let Some(bounds) = state.range_to_bounds(&range).filter(|b| b.bottom() > area.top() && b.top() < area.bottom()) {
+                    let width = area.right() - bounds.right() - px(6.);
+                    if width > px(0.) {
+                        let text = crate::git::blame_text(blame, true);
+                        out.push(deferred(anchored().position(point(bounds.right() + px(6.), bounds.top())).child(
+                            div().max_w(width).whitespace_nowrap().truncate().text_color(cx.theme().muted_foreground).child(text),
+                        )).into_any_element());
+                    }
+                }
+            }
+        }
+        if changes.is_empty() {
+            return out;
+        }
         let placed: Vec<_> = changes
             .iter()
             .map(|change| {
@@ -154,7 +175,6 @@ impl Antler {
                 (b, at_end)
             })
             .collect();
-        let mut out = Vec::new();
         for (k, (change, (b, at_end))) in changes.iter().zip(placed).enumerate() {
             let Some(b) = b else { continue };
             let path = f.path.clone();

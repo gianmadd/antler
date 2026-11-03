@@ -729,6 +729,13 @@ impl Workspace {
                 d.recompute();
             }
         }
+        if self.blame_requested.as_ref().is_some_and(|(_, requested)| requested == &path) {
+            self.blame_requested = None;
+        }
+        let current = self.tabs.iter().find_map(|tab| tab.file().filter(|file| file.path == path).map(|file| file.text.clone()));
+        if let (Some(blame), Some(current)) = (self.blame.as_mut().filter(|blame| blame.path == path), current) {
+            blame.line_map = super::blame_line_map(&blame.text, &current);
+        }
     }
 
     /// Auto-save tick: with `afterDelay`, the writes of the dirty file tabs whose last edit is at least the delay
@@ -783,6 +790,9 @@ impl Workspace {
             }
         }
         if result.is_ok() {
+            if self.blame.as_ref().is_some_and(|b| b.path == job.path)
+                || self.blame_requested.as_ref().is_some_and(|(_, path)| path == &job.path)
+            { self.clear_blame(); }
             self.disk_changed(&job.path, Instant::now());
         }
         result.is_ok()

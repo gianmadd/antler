@@ -40,6 +40,42 @@ pub const DEFAULT_DEPTH: usize = 3;
 /// How long disk events are gathered into one refresh (auto-save may write on every key).
 pub const DEBOUNCE: Duration = Duration::from_millis(200);
 
+pub struct Blame {
+    path: PathBuf,
+    repo: PathBuf,
+    text: String,
+    lines: Vec<git::BlameLine>,
+    line_map: Vec<Option<usize>>,
+}
+
+fn blame_line_map(old_text: &str, new_text: &str) -> Vec<Option<usize>> {
+    let old = old_text.lines().collect::<Vec<_>>().join("\n");
+    let new = new_text.lines().collect::<Vec<_>>().join("\n");
+    let mut map = vec![None; new_text.lines().count()];
+    let (mut old_ix, mut new_ix) = (0, 0);
+    for op in similar::TextDiff::from_lines(&old, &new).ops() {
+        match op.tag() {
+            similar::DiffTag::Equal => {
+                let len = op.old_range().len();
+                for offset in 0..len {
+                    if let Some(line) = map.get_mut(new_ix + offset) {
+                        *line = Some(old_ix + offset);
+                    }
+                }
+                old_ix += len;
+                new_ix += len;
+            }
+            similar::DiffTag::Delete => old_ix += op.old_range().len(),
+            similar::DiffTag::Insert => new_ix += op.new_range().len(),
+            similar::DiffTag::Replace => {
+                old_ix += op.old_range().len();
+                new_ix += op.new_range().len();
+            }
+        }
+    }
+    map
+}
+
 pub struct Workspace {
     /// Where the Root lives: this machine, or a Remote host. Jobs carry it to their background thread.
     pub host: Arc<dyn Host>,
@@ -54,6 +90,10 @@ pub struct Workspace {
     pub last_error: Option<String>,
     /// Open diff tabs: at most one preview, the others pinned.
     pub tabs: Vec<Tab>,
+    blame: Option<Blame>,
+    blame_requested: Option<(u64, PathBuf)>,
+    blame_request_id: u64,
+    repo_refs: HashMap<PathBuf, String>,
     /// The active tab: the active group's most recently used one.
     pub active: Option<usize>,
     /// How the editor groups are laid out, and which one is active (the others' tabs are in `tabs` too).
@@ -170,6 +210,10 @@ impl Workspace {
             git_tree: false,
             last_error: None,
             tabs: Vec::new(),
+            blame: None,
+            blame_requested: None,
+            blame_request_id: 0,
+            repo_refs: HashMap::new(),
             active: None,
             layout: Layout::Group(0),
             group: 0,
@@ -212,6 +256,60 @@ impl Workspace {
             undo_ops: Vec::new(),
             redo_ops: Vec::new(),
         }
+    }
+
+    /// Active file's owning repository, repo-relative path and current text.
+    pub fn blame_target(&self) -> Option<(PathBuf, String, String)> {
+        let f = self.tabs.get(self.active?)?.file()?;
+        if f.untitled || f.loading { return None; }
+        let section = self.sections.iter().filter(|s| f.path.starts_with(&s.repo.path)).max_by_key(|s| s.repo.path.components().count())?;
+        let path = f.path.strip_prefix(&section.repo.path).ok()?.to_string_lossy().replace('\\', "/");
+        if section.changes.iter().chain(&section.staged).chain(&section.merge).any(|x| x.path == path && x.badge == 'U') { return None; }
+        Some((section.repo.path.clone(), path, f.text.clone()))
+    }
+
+    pub fn set_blame(&mut self, path: PathBuf, text: String, lines: Vec<git::BlameLine>) {
+        let repo = self.sections.iter().filter(|s| path.starts_with(&s.repo.path)).max_by_key(|s| s.repo.path.components().count()).map(|s| s.repo.path.clone());
+        self.blame_requested = None;
+        if let Some(repo) = repo {
+            let line_map = (0..text.lines().count()).map(Some).collect();
+            self.blame = Some(Blame { path, repo, line_map, text, lines });
+        }
+    }
+
+    pub fn set_blame_result(&mut self, request: u64, path: PathBuf, text: String, lines: Vec<git::BlameLine>) -> bool {
+        if self.blame_requested.as_ref() != Some(&(request, path.clone()))
+            || self.blame_target().is_none_or(|(_, _, current)| current != text)
+        {
+            if self.blame_requested.as_ref().is_some_and(|(id, _)| *id == request) {
+                self.blame_requested = None;
+            }
+            return false;
+        }
+        self.set_blame(path, text, lines);
+        true
+    }
+
+    pub fn needs_blame(&self, path: &Path) -> bool {
+        self.blame.as_ref().is_none_or(|b| b.path != path) && self.blame_requested.as_ref().is_none_or(|(_, requested)| requested != path)
+    }
+
+    pub fn request_blame(&mut self, path: PathBuf) -> u64 {
+        self.blame_request_id += 1;
+        self.blame_requested = Some((self.blame_request_id, path));
+        self.blame_request_id
+    }
+    pub fn cancel_blame_request(&mut self, request: u64) {
+        if self.blame_requested.as_ref().is_some_and(|(id, _)| *id == request) {
+            self.blame_requested = None;
+        }
+    }
+    pub fn clear_blame(&mut self) { self.blame = None; self.blame_requested = None; self.blame_request_id += 1; }
+
+    pub fn blame_at(&self, line: usize) -> Option<Option<&git::BlameLine>> {
+        let f = self.tabs.get(self.active?)?.file()?;
+        let blame = self.blame.as_ref().filter(|b| b.path == f.path)?;
+        Some(blame.line_map.get(line).and_then(|old_line| *old_line).and_then(|old_line| blame.lines.get(old_line)))
     }
 
     /// False for a window opened without a folder (an empty `root`, as from Finder or the Dock): it only offers Open Folder….
@@ -350,6 +448,16 @@ impl Workspace {
     /// Returns the open tabs whose diff must be reloaded because their file, index or HEAD changed
     /// (load each, then `set_diff`); tabs whose file left its group show "No changes" right away.
     pub fn apply(&mut self, mut scan: Scan) -> Vec<DiffSource> {
+        let blame_repo = self.blame.as_ref().map(|blame| blame.repo.clone()).or_else(|| {
+            let path = &self.blame_requested.as_ref()?.1;
+            self.sections.iter().filter(|section| path.starts_with(&section.repo.path)).max_by_key(|section| section.repo.path.components().count()).map(|section| section.repo.path.clone())
+        });
+        if let Some(repo) = blame_repo
+            && (scan.committed.contains(&repo)
+                || self.sections.iter().find(|s| s.repo.path == repo).zip(scan.sections.iter().find(|s| s.repo.path == repo)).is_some_and(|(a,b)| a.branch != b.branch)
+                || scan.head_refs.iter().any(|(ref_repo, refs)| ref_repo == &repo && self.repo_refs.get(ref_repo).is_some_and(|old| old != refs)))
+        { self.clear_blame(); }
+        for (repo, refs) in &scan.head_refs { self.repo_refs.insert(repo.clone(), refs.clone()); }
         for s in &mut scan.sections {
             if let Some(old) = self.section(&s.repo.path).map(|i| &self.sections[i]) {
                 s.collapsed = old.collapsed;
@@ -493,6 +601,79 @@ mod tests {
     use super::*;
     use crate::workspace::tests_common::*;
     use std::fs;
+
+    fn blame_ws(root: &Path) -> (Workspace, PathBuf) {
+        let repo_path = root.join("repo"); repo(&repo_path);
+        let mut ws = Workspace::open(root); ws.open_path_now(&repo_path.join("a.txt"), None, true); (ws, repo_path)
+    }
+    fn sample_blame() -> Vec<git::BlameLine> { vec![git::BlameLine { sha: "abc".into(), author: "Ada".into(), time: 1, subject: "init".into() }] }
+
+    #[test]
+    fn blame_dropped_after_save() {
+        let tmp = tempfile::tempdir().unwrap(); let (mut ws, repo) = blame_ws(tmp.path()); let path = repo.join("a.txt");
+        ws.set_blame(path, "a\n".into(), sample_blame()); assert!(ws.blame_at(0).is_some()); ws.edit(0, "edited\n".into()); ws.save_now(0); assert!(ws.blame_at(0).is_none());
+    }
+
+    #[test]
+    fn pending_blame_is_retried_after_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut ws, repo) = blame_ws(tmp.path());
+        let path = repo.join("a.txt");
+        let request = ws.request_blame(path.clone());
+        ws.edit(0, "saved text\n".into());
+        ws.save_now(0);
+
+        assert!(!ws.set_blame_result(request, path.clone(), "a\n".into(), sample_blame()));
+        assert!(ws.blame.is_none());
+        assert!(ws.needs_blame(&path));
+    }
+
+    #[test]
+    fn pending_blame_is_cancelled_after_head_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut ws, repo) = blame_ws(tmp.path());
+        let path = repo.join("a.txt");
+        let request = ws.request_blame(path.clone());
+        fs::write(repo.join("a.txt"), "after commit\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "after commit"]);
+
+        let scan = ws.start_scan(vec![]).run();
+        ws.apply(scan);
+
+        assert!(!ws.set_blame_result(request, path.clone(), "a\n".into(), sample_blame()));
+        assert!(ws.blame.is_none());
+        assert!(ws.needs_blame(&path));
+    }
+    #[test]
+    fn blame_dropped_after_a_commit() {
+        let tmp = tempfile::tempdir().unwrap(); let (mut ws, repo) = blame_ws(tmp.path()); ws.set_blame(repo.clone().join("a.txt"), "a\n".into(), sample_blame());
+        fs::write(repo.join("a.txt"), "after commit\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "after commit"]);
+        let scan = ws.start_scan(vec![]).run();
+        ws.apply(scan);
+        assert!(ws.blame.is_none());
+    }
+    #[test]
+    fn no_blame_for_untracked_or_untitled() {
+        let tmp = tempfile::tempdir().unwrap(); let (mut ws, repo) = blame_ws(tmp.path()); fs::write(repo.join("new.txt"), "new\n").unwrap();
+        let scan = ws.start_scan(vec![]).run(); ws.apply(scan); ws.open_path_now(&repo.join("new.txt"), None, true); assert!(ws.blame_target().is_none()); ws.new_untitled(); assert!(ws.blame_target().is_none());
+    }
+    #[test]
+    fn edited_line_is_not_committed_yet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut ws, repo) = blame_ws(tmp.path());
+        ws.set_file(&repo.join("a.txt"), Ok("a\nb\n".into()));
+        ws.set_blame(repo.join("a.txt"), "a\nb\n".into(), vec![sample_blame()[0].clone(), sample_blame()[0].clone()]);
+        ws.edit(0, "changed\nb\n".into());
+        assert_eq!(ws.blame.as_ref().unwrap().line_map, [None, Some(1)]);
+        assert!(ws.blame_at(0).unwrap().is_none());
+        assert_eq!(ws.blame_at(1).unwrap().unwrap().author, "Ada");
+    }
+    #[test]
+    fn nested_repo_owns_its_blame() {
+        let tmp = tempfile::tempdir().unwrap(); let root = tmp.path(); repo(root); repo(&root.join("inner")); let mut ws = Workspace::open(root);
+        let path = root.join("inner/a.txt"); ws.open_path_now(&path, None, true); assert_eq!(ws.blame_target().unwrap().0, root.join("inner"));
+    }
 
     #[test]
     fn opening_a_root_loads_a_section_per_nested_repo_with_grouped_files() {

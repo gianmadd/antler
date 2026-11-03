@@ -18,6 +18,7 @@ pub struct Scan {
     pub(super) changed: Vec<PathBuf>,
     /// Branches, tags and HEAD of the repo the graph showed when the scan started.
     pub(super) refs: Option<(PathBuf, String)>,
+    pub(super) head_refs: Vec<(PathBuf, String)>,
     /// The open editor files under `changed`, read again: what `apply` compares and installs.
     pub(super) files: HashMap<PathBuf, Result<String, String>>,
 }
@@ -93,7 +94,8 @@ impl ScanJob {
                 (p, text)
             })
             .collect();
-        scan.refs = self.graph.map(|repo| (repo.clone(), git::refs(&repo)));
+        scan.refs = self.graph.as_ref().map(|repo| (repo.clone(), git::refs(repo)));
+        scan.head_refs = scan.sections.iter().map(|s| (s.repo.path.clone(), git::refs(&s.repo.path))).collect();
         scan
     }
 }
@@ -145,7 +147,7 @@ pub fn scan(root: &Path, depth: usize) -> Scan {
         })
         .collect();
     let error = (!errors.is_empty()).then(|| errors.join("\n"));
-    Scan { refused: None, sections, error, committed: Vec::new(), moved: Vec::new(), history: Vec::new(), dirs: Vec::new(), changed: Vec::new(), refs: None, files: HashMap::new() }
+    Scan { refused: None, sections, error, committed: Vec::new(), moved: Vec::new(), history: Vec::new(), dirs: Vec::new(), changed: Vec::new(), refs: None, head_refs: Vec::new(), files: HashMap::new() }
 }
 
 /// Path relative to the Root; the folder name for the Root itself or a repo outside it.
