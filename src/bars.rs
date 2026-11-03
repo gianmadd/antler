@@ -130,8 +130,7 @@ impl Antler {
                 if cx.global::<crate::settings::Current>().0.git_blame_status_bar_enabled
                     && let Some(blame) = self.ws.blame_at(line as usize)
                 {
-                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-                    items.insert(0, crate::git::blame_text(blame, false, now));
+                    items.insert(0, crate::git::blame_text(blame, false));
                 }
                 items
             }

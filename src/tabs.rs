@@ -86,12 +86,13 @@ impl Antler {
         let Some((repo, path, text)) = self.ws.blame_target() else { self.ws.clear_blame(); return; };
         let absolute = repo.join(&path);
         if !self.ws.needs_blame(&absolute) { return; }
-        self.ws.request_blame(absolute.clone());
+        let request = self.ws.request_blame(absolute.clone());
         let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             let lines = cx.background_spawn(async move { crate::host::scoped(&host, || crate::git::blame(&repo, &path)) }).await;
             this.update_in(cx, |this, _, cx| {
-                if let Ok(lines) = lines { this.ws.set_blame(absolute, text, lines); } else { this.ws.clear_blame(); }
+                if let Ok(lines) = lines { this.ws.set_blame_result(request, absolute, text, lines); }
+                else { this.ws.cancel_blame_request(request); }
                 cx.notify();
             }).ok();
         }).detach();

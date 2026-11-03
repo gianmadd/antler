@@ -120,8 +120,9 @@ pub fn blame(repo: &Path, path: &str) -> Result<Vec<BlameLine>> {
     Ok(lines)
 }
 
-pub fn blame_text(line: Option<&BlameLine>, subject: bool, now: i64) -> String {
+pub fn blame_text(line: Option<&BlameLine>, subject: bool) -> String {
     let Some(line) = line.filter(|l| !l.sha.bytes().all(|b| b == b'0')) else { return "Not Committed Yet".into() };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     let author = format!("{} ({})", line.author, age(line.time, now));
     if subject { format!("{}, {author}", line.subject) } else { author }
 }
@@ -920,16 +921,17 @@ mod tests {
 
     #[test]
     fn blame_text_templates_and_ages() {
-        let line = BlameLine { sha: "abc".into(), author: "Ada".into(), time: 0, subject: "first change".into() };
-        assert_eq!(blame_text(Some(&line), false, 90_061), "Ada (1 day ago)");
-        assert_eq!(blame_text(Some(&line), true, 90_061), "first change, Ada (1 day ago)");
-        assert_eq!(blame_text(None, false, 90_061), "Not Committed Yet");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let line = BlameLine { sha: "abc".into(), author: "Ada".into(), time: now - 90_061, subject: "first change".into() };
+        assert_eq!(blame_text(Some(&line), true), "first change, Ada (1 day ago)");
+        assert_eq!(blame_text(Some(&line), false), "Ada (1 day ago)");
+        assert_eq!(blame_text(None, false), "Not Committed Yet");
         assert_eq!(age(90, 100), "10 seconds ago");
         assert_eq!(age(0, 120), "2 minutes ago");
         assert_eq!(age(0, 86_400), "1 day ago");
         assert_eq!(age(0, 31_536_000), "1 year ago");
         let uncommitted = BlameLine { sha: "0".repeat(40), ..line.clone() };
-        assert_eq!(blame_text(Some(&uncommitted), false, 90_061), "Not Committed Yet");
+        assert_eq!(blame_text(Some(&uncommitted), false), "Not Committed Yet");
     }
 
     #[test]

@@ -154,11 +154,10 @@ impl Antler {
                 let end = starts.get(cursor.line as usize + 1).map_or(f.text.len(), |s| s - 1);
                 let range = if end > start { end - 1..end } else { end..end };
                 if let Some(bounds) = state.range_to_bounds(&range).filter(|b| b.bottom() > area.top() && b.top() < area.bottom()) {
-                    let width = area.right() - bounds.right();
+                    let width = area.right() - bounds.right() - px(6.);
                     if width > px(0.) {
-                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-                        let text = crate::git::blame_text(blame, true, now);
-                        out.push(deferred(anchored().position(point(bounds.right(), bounds.top())).child(
+                        let text = crate::git::blame_text(blame, true);
+                        out.push(deferred(anchored().position(point(bounds.right() + px(6.), bounds.top())).child(
                             div().max_w(width).whitespace_nowrap().truncate().text_color(cx.theme().muted_foreground).child(text),
                         )).into_any_element());
                     }
