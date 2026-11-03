@@ -27,6 +27,8 @@ usvg = { version = "0.46", default-features = false }
 similar = "2.7"
 zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2", "deflate-flate2-zlib-rs"] }
 flate2 = "1.1.10"
+# already built (gpui's deps): the askpass broker's token
+getrandom = "0.3"
 
 # build.rs: the icon and version info of antler.exe (gpui-pre builds it already)
 [build-dependencies]

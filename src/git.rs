@@ -788,20 +788,36 @@ fn askpass_command(prompt: &str) -> Command {
     }
 }
 
+/// The askpass dialog for `prompt`: the answer, or `None` for Cancel.
+/// shortcut: a native dialog (osascript, PowerShell on Windows), not one inside the window; it may open behind
+/// the window. Upgrade if users miss it.
+pub fn ask_dialog(prompt: &str) -> Option<String> {
+    match askpass_command(prompt).output() {
+        Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+        _ => None,
+    }
+}
+
 /// Askpass mode (`ASKPASS_ENV` set): git or ssh started antler with `prompt`; the answer goes to stdout.
-/// Cancel exits 1, so git fails with its own "could not read" error instead of waiting.
-/// shortcut: a native dialog (osascript, PowerShell on Windows), not one inside the window (that needs IPC with
-/// the running app); it may open behind the window. Upgrade if users miss it.
+/// Cancel exits 1, so git fails with its own "could not read" error instead of waiting. An ssh run of the
+/// connector asks the running app's broker (`askpass_broker`), which keeps the answer for the next runs; when no
+/// broker answers, the dialog shows here.
 pub fn askpass(prompt: &str) -> i32 {
     if std::env::var_os(ASKPASS_ENV).is_some_and(|v| v == ASKPASS_NEVER) {
         return 1;
     }
-    match askpass_command(prompt).output() {
-        Ok(out) if out.status.success() => {
-            print!("{}", String::from_utf8_lossy(&out.stdout));
+    let asked = crate::askpass_broker::question_from_env(prompt).and_then(|(env, q)| crate::askpass_broker::ask(&env, &q).ok());
+    let answer = match asked {
+        Some(crate::askpass_broker::Reply::Answer(a)) => Some(a),
+        Some(crate::askpass_broker::Reply::Cancel) => None,
+        None => ask_dialog(prompt),
+    };
+    match answer {
+        Some(a) => {
+            print!("{a}");
             0
         }
-        _ => 1,
+        None => 1,
     }
 }
 

@@ -189,6 +189,7 @@ dependencies = [
  "async-channel",
  "embed-resource",
  "flate2",
+ "getrandom 0.3.4",
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-apple",

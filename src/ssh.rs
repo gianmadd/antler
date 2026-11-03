@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use antler_host::remote::Transport;
 
@@ -338,9 +338,14 @@ pub struct SshConnector {
     control: Option<PathBuf>,
     info: Mutex<Option<HostInfo>>,
     delivered: Mutex<bool>,
+    /// The Connect attempt the runs belong to (`askpass_broker`): Cancel in its dialog ends it.
+    attempt: AtomicU64,
 }
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// The error of a connection whose password dialog was cancelled: the reconnect loop stops on it.
+pub use antler_host::remote::CANCELLED;
 
 impl SshConnector {
     pub fn new(target: Target) -> Self {
@@ -356,7 +361,19 @@ impl SshConnector {
             control,
             info: Mutex::new(None),
             delivered: Mutex::new(false),
+            attempt: AtomicU64::new(crate::askpass_broker::next_id()),
         }
+    }
+
+    /// Without a ControlMaster every run connects anew: the app's askpass broker answers the questions, so the
+    /// password is asked once (`askpass_broker`). `None` with a ControlMaster, or when the broker cannot listen.
+    fn broker(&self) -> Option<&'static crate::askpass_broker::Broker> {
+        if self.control.is_some() { None } else { crate::askpass_broker::global() }
+    }
+
+    /// Cancel was pressed in a dialog of this attempt.
+    fn cancelled(&self) -> bool {
+        self.broker().is_some_and(|b| b.was_cancelled(self.attempt.load(Ordering::Relaxed)))
     }
 
     /// For tests: another `ssh`, a local server binary, a cache folder.
@@ -388,11 +405,19 @@ impl SshConnector {
         c.args(opts).args(self.target.ssh_args());
         // passwords, passphrases and host key questions: a dialog (git.rs)
         c.envs(crate::git::askpass_envs(true));
+        if let Some(b) = self.broker() {
+            use crate::askpass_broker as ab;
+            c.env(ab::BROKER_ENV, b.env_value()).env(ab::SCOPE_ENV, self.target.to_string());
+            c.env(ab::RUN_ENV, ab::next_id().to_string()).env(ab::ATTEMPT_ENV, self.attempt.load(Ordering::Relaxed).to_string());
+        }
         Ok(c)
     }
 
     /// Runs `remote` on the host; `stdin` is a file fed to it.
     fn run(&self, remote: &str, stdin: Option<&Path>) -> Result<Output, String> {
+        if self.cancelled() {
+            return Err(CANCELLED.into());
+        }
         let mut c = self.command(&[]).map_err(|e| format!("cannot prepare ssh: {e}"))?;
         c.arg(remote).stdout(Stdio::piped()).stderr(Stdio::piped());
         c.stdin(match stdin {
@@ -402,7 +427,7 @@ impl SshConnector {
         let out = c.spawn().and_then(|c| c.wait_with_output()).map_err(|e| format!("cannot run ssh: {e}"))?;
         // ssh itself failed (no route, refused, denied, host key): its message is the answer; the remote's own failures are ordinary
         if out.status.code() == Some(255) {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            return Err(if self.cancelled() { CANCELLED.into() } else { String::from_utf8_lossy(&out.stderr).trim().to_string() });
         }
         Ok(out)
     }
@@ -472,6 +497,10 @@ impl SshConnector {
 
     /// One connection: delivery if needed, then `antler-server proxy` over ssh.
     pub fn connect(&self) -> Result<Transport, String> {
+        // a new attempt: after a Cancel, connecting again (a reconnect, or Connect to Host) asks again
+        if self.cancelled() {
+            self.attempt.store(crate::askpass_broker::next_id(), Ordering::Relaxed);
+        }
         let info = self.host_info()?;
         self.deliver(&info)?;
         let mut c = self.command(&[]).map_err(|e| e.to_string())?;
@@ -515,6 +544,23 @@ mod tests {
         let alone = ssh_options(None).join(" ");
         assert!(!alone.contains("Control"), "Win32-OpenSSH has no ControlMaster: {alone}");
         assert!(alone.starts_with("-T") && alone.contains("BatchMode=no") && alone.contains("ServerAliveInterval=15"), "{alone}");
+    }
+
+    #[test]
+    fn without_a_control_master_every_run_asks_the_apps_broker() {
+        use crate::askpass_broker as ab;
+        let mut c = SshConnector::new(Target::parse("ciro@mac").unwrap());
+        c.control = None; // Windows
+        let envs = |c: &SshConnector| -> std::collections::HashMap<String, String> {
+            let cmd = c.command(&[]).unwrap();
+            cmd.get_envs().filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string()))).collect()
+        };
+        let (one, two) = (envs(&c), envs(&c));
+        assert_eq!(one.get(ab::BROKER_ENV), Some(&ab::global().unwrap().env_value()));
+        assert_eq!(one.get(ab::SCOPE_ENV).map(String::as_str), Some("ciro@mac"));
+        assert_ne!(one.get(ab::RUN_ENV), two.get(ab::RUN_ENV), "each ssh run has its own number");
+        assert_eq!(one.get(ab::ATTEMPT_ENV), two.get(ab::ATTEMPT_ENV), "the runs of one Connect share the attempt");
+        assert!(!c.cancelled());
     }
 
     #[test]

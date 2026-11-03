@@ -158,6 +158,7 @@ impl Antler {
                         this.picker.as_mut().unwrap().stage = Stage::Busy("Reading the home folder…".into());
                         this.list_remote(remote, text, PathBuf::from(home), window, cx);
                     }
+                    Err(e) if e == ssh::CANCELLED => this.close_picker(window, cx), // Cancel in the password dialog: nothing to report
                     Err(e) => {
                         this.close_picker(window, cx);
                         window.push_notification(Notification::error(e).title(format!("Cannot connect to {text}")).autohide(false), cx);

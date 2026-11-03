@@ -1,5 +1,6 @@
 // the release app is a window, not a console program (no console opens beside it); debug builds keep their log
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+mod askpass_broker;
 mod bars;
 mod branch_view;
 mod conflict_view;
