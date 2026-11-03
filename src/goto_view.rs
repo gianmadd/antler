@@ -2,6 +2,7 @@
 use std::ops::Range;
 
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
+use gpui_kit::component::{Sizable as _, button::{Button, ButtonVariants as _}};
 use gpui_kit::component::input::{EditorState, Position};
 use gpui_kit::*;
 
@@ -11,7 +12,7 @@ use crate::keys;
 use crate::palette::{self, Mode};
 use crate::style::{self, FG_DIM, FG_FAINT, GIT_M, c};
 
-actions!(antler, [GoToFile, CloseGoToFile, CommandPalette, GoToLine, QuickTextSearch]);
+actions!(antler, [GoToFile, CloseGoToFile, CommandPalette, GoToLine, QuickTextSearch, QuickSearchInSearchView]);
 
 /// Most files the popup lists; type more to narrow it.
 const LIMIT: usize = 100;
@@ -47,6 +48,18 @@ impl Antler {
 
     pub(crate) fn quick_text_search(&mut self, _: &QuickTextSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.open_quick("%", window, cx);
+    }
+
+    pub(crate) fn quick_search_in_search_view(&mut self, _: &QuickSearchInSearchView, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(popup) = &self.goto else { return };
+        let query = popup.state.read(cx).query(cx);
+        let Mode::QuickSearch(text) = palette::mode(&query) else { return };
+        let text = text.to_string();
+        self.close_go_to_file(&CloseGoToFile, window, cx);
+        self.query.0.update(cx, |q, cx| q.set_value(text.clone(), window, cx));
+        self.ws.search.query.text = text;
+        self.show_search(&crate::ShowSearch, window, cx);
+        self.run_search(window, cx);
     }
 
     fn open_quick(&mut self, prefix: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -288,6 +301,18 @@ impl Antler {
             }
             Mode::QuickSearch(rest) => {
                 let mut items = Vec::new();
+                let this = cx.entity().downgrade();
+                items.push(CommandItem::new().child(move |_, _| {
+                    let this = this.clone();
+                    Button::new("quick-search-in-search-view")
+                        .ghost()
+                        .xsmall()
+                        .label("Open in Search View")
+                        .on_click(move |_, _window, cx| {
+                            cx.stop_propagation();
+                            this.update_in(cx, |this, window, cx| this.quick_search_in_search_view(&QuickSearchInSearchView, window, cx)).ok();
+                        })
+                }));
                 if rest.is_empty() {
                     items.push(CommandItem::new().label("Type text after % to search in files"));
                 } else if let Some(results) = &self.ws.quick_search.results {
@@ -335,6 +360,7 @@ impl Antler {
                     .w(px(600.))
                     .shadow_lg()
                     .on_action(cx.listener(Self::close_go_to_file))
+                    .on_action(cx.listener(Self::quick_search_in_search_view))
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_go_to_file(&CloseGoToFile, window, cx)))
                     .child(command),
             ),
