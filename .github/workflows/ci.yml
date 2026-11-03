@@ -20,3 +20,21 @@ jobs:
       - if: contains(matrix.target, 'linux-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo check -p antler-server --target ${{ matrix.target }}
+
+  # the app on Windows (#40): the whole test suite, then a release check, which runs gpui-pre-windows' build
+  # script (only release builds compile the HLSL shaders, with the Windows SDK's fxc.exe; debug ones do it at run time)
+  app-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-app-windows-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-app-windows-
+      - run: cargo test --workspace
+      - run: cargo check --release -p antler
