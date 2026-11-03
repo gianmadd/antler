@@ -1,6 +1,6 @@
 # Antler
 
-Explorer, editor and diff viewer for macOS (Rust + GPUI) that shows all nested git repositories in a single panel. Requirements and features: see `README.md`.
+A minimal, fast IDE for macOS (Rust + GPUI): explorer, editor, git and remote over SSH; nested repositories under a folder all show up in one panel. Requirements and features: see `README.md`.
 
 ## Agent skills
 

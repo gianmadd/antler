@@ -2,9 +2,9 @@
 
 # Antler
 
-A fast, lightweight macOS editor that shows every git repository under a folder in one panel: browse, edit, review diffs, stage and commit across all of them.
+A minimal, fast IDE for macOS: explorer, editor, git and remote over SSH. Nested repositories under a folder all show up in one panel.
 
-Built in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui). Aimed at developers who work in folders with many nested repositories, and at anyone reviewing changes that code agents have made across them.
+Built in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 
 ## Screenshots
 

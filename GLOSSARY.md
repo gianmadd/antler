@@ -1,6 +1,6 @@
 # Antler
 
-Explorer, editor and diff viewer for macOS that shows all git repositories nested under a folder in a single panel. Replaces VS Code and Zed for people who work in folders with several repos.
+A minimal, fast IDE for macOS: explorer, editor, git and remote over SSH. Nested repositories under a folder all show up in one panel.
 
 ## Workspace
 
