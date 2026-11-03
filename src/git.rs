@@ -906,6 +906,21 @@ pub fn commit_diff(repo: &Path, sha: &str, path: &str) -> Result<String> {
     run(repo, &["show", "--format=", "--no-color", "--no-ext-diff", "--diff-merges=first-parent", sha, "--", path], None)
 }
 
+/// `diff -M <left> <right>`, where `left` and `right` are commit ids or tree ids.
+pub fn refs_patch(repo: &Path, left: &str, right: &str) -> Result<String> {
+    run(repo, &["diff", "-M", "--no-color", "--no-ext-diff", left, right], None)
+}
+
+/// The first parent of `sha`, or the empty tree for a root commit.
+pub fn commit_parent(repo: &Path, sha: &str) -> Result<String> {
+    let parents = run(repo, &["rev-list", "--parents", "-n", "1", sha], None)?;
+    if let Some(parent) = parents.split_whitespace().nth(1) {
+        Ok(parent.to_string())
+    } else {
+        run(repo, &["hash-object", "-t", "tree", "--stdin"], Some("")).map(|tree| tree.trim().to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,6 +934,49 @@ mod tests {
         fs::write(p.join("a.txt"), lines).unwrap();
         commit(p, "init", false, true).unwrap();
         dir
+    }
+
+    #[test]
+    fn refs_patch_direction_and_statuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        crate::testing::init(p);
+        fs::write(p.join("a.txt"), "original\n").unwrap();
+        fs::write(p.join("b.txt"), "deleted\n").unwrap();
+        commit(p, "init", false, true).unwrap();
+        fs::write(p.join("a.txt"), "modified\n").unwrap();
+        fs::remove_file(p.join("b.txt")).unwrap();
+        fs::write(p.join("added.txt"), "added\n").unwrap();
+        fs::write(p.join("rename-old.txt"), "rename\n").unwrap();
+        crate::testing::git(p, &["add", "-A"]);
+        commit(p, "second", false, false).unwrap();
+        let right = crate::testing::out(p, &["rev-parse", "HEAD"]);
+        let left = crate::testing::out(p, &["rev-parse", "HEAD^"]);
+        fs::rename(p.join("rename-old.txt"), p.join("rename-new.txt")).unwrap();
+        crate::testing::git(p, &["add", "-A"]);
+        commit(p, "third", false, false).unwrap();
+        let renamed = crate::testing::out(p, &["rev-parse", "HEAD"]);
+
+        let patch = refs_patch(p, &left, &right).unwrap();
+        assert!(patch.contains("diff --git a/a.txt b/a.txt") && patch.contains("+modified"));
+        assert!(patch.contains("diff --git a/b.txt b/b.txt") && patch.contains("deleted file mode"));
+        assert!(patch.contains("diff --git a/added.txt b/added.txt") && patch.contains("new file mode"));
+        let patch = refs_patch(p, &right, &renamed).unwrap();
+        assert!(patch.contains("rename from rename-old.txt") && patch.contains("rename to rename-new.txt"));
+        assert!(refs_patch(p, &renamed, &right).unwrap().contains("rename from rename-new.txt"));
+    }
+
+    #[test]
+    fn commit_parent_of_root_is_empty_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        crate::testing::init(p);
+        fs::write(p.join("root.txt"), "root\n").unwrap();
+        commit(p, "root", false, true).unwrap();
+        let sha = crate::testing::out(p, &["rev-parse", "HEAD"]);
+        let parent = commit_parent(p, &sha).unwrap();
+        assert_eq!(crate::testing::out(p, &["rev-parse", &format!("{parent}^{{tree}}")]), parent);
+        assert!(refs_patch(p, &parent, &sha).unwrap().contains("+root"));
     }
 
     /// Change `k` of `d` as Stage, Unstage (`reverse`, `cached`) or Discard (`reverse`) Block do it.

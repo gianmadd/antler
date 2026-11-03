@@ -600,7 +600,9 @@ impl Antler {
     fn tab_file(&self, ix: usize) -> PathBuf {
         match (&self.ws.tabs[ix].kind, self.ws.tabs[ix].path()) {
             (TabKind::Diff(d), _) => d.source.repo.join(&d.source.path),
-            (TabKind::MultiDiff(d), _) => match &d.source { workspace::MultiDiffSource::Group { repo, .. } => repo.clone() },
+            (TabKind::MultiDiff(d), _) => match &d.source {
+                workspace::MultiDiffSource::Group { repo, .. } | workspace::MultiDiffSource::Commit { repo, .. } => repo.clone(),
+            },
             (_, path) => path.unwrap_or(std::path::Path::new("")).to_path_buf(),
         }
     }
@@ -1009,19 +1011,27 @@ impl Antler {
                 diff.update(cx, |d, cx| if d.mode() != mode { d.set_mode(mode, cx) });
             },
         ).absolute().size_full();
-        let (repo, staged, this) = match &tab.source {
-            workspace::MultiDiffSource::Group { repo, staged } => (repo.clone(), *staged, cx.entity().downgrade()),
+        let (repo, staged, commit, this) = match &tab.source {
+            workspace::MultiDiffSource::Group { repo, staged } => (repo.clone(), *staged, None, cx.entity().downgrade()),
+            workspace::MultiDiffSource::Commit { repo, sha, .. } => (repo.clone(), false, Some(sha.clone()), cx.entity().downgrade()),
         };
         let view = Diff::new(self.diff_of(g))
             .soft_wrap(true)
             .render_header(move |file, _, _| {
                 let path = file.path().to_string();
                 let repo = repo.clone();
+                let commit = commit.clone();
                 let this = this.clone();
                 Button::new(format!("open-multi-diff-file-{path}")).ghost().xsmall().label(path.clone()).on_click(move |_, _window, cx| {
                     cx.stop_propagation();
+                    let (repo, path, commit) = (repo.clone(), path.clone(), commit.clone());
                     this.update_in(cx, |this, window, cx| {
-                        if let Some(section) = this.ws.section(&repo) {
+                        if let Some(sha) = commit {
+                            let source = workspace::DiffSource { repo: repo.clone(), path: path.clone(), staged, untracked: false, commit: Some(sha), compare: None };
+                            let source = this.ws.open_diff(source, true);
+                            this.sync_diff(cx);
+                            this.load_diff(source, window, cx);
+                        } else if let Some(section) = this.ws.section(&repo) {
                             this.open_file(section, staged, &path, false, window, cx);
                         }
                     }).ok();
