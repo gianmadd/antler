@@ -1089,7 +1089,7 @@ mod tests {
 
         git(root, &["tag", "v1"]);
         ws.refresh();
-        assert_eq!(ws.reload_graph(), Some(graph::Page { repo: root.to_path_buf(), skip: 0, filter: graph::RefFilter::Auto }));
+        assert_eq!(ws.reload_graph(), Some(graph::Page { repo: root.to_path_buf(), skip: 0, filter: graph::RefFilter::All }));
         ws.graph.loading = false;
         ws.refresh();
         assert_eq!(ws.reload_graph(), None, "once per change");
