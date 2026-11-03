@@ -20,6 +20,8 @@ const LIMIT: usize = 100;
 pub(crate) struct GoToPopup {
     state: Entity<CommandState>,
     matches: Vec<Match>,
+    /// Closes the popup when the focus leaves it (another view, ⇧⌘F…), like VS Code's Quick Open.
+    _focus_out: Subscription,
 }
 
 impl Antler {
@@ -48,8 +50,15 @@ impl Antler {
                 s.set_query(prefix.to_string(), window, cx);
             }
         });
+        let handle = state.read(cx).focus_handle(cx);
+        // no refocus: the focus already went where the user wanted
+        let _focus_out = cx.on_focus_out(&handle, window, |this, _, _, cx| {
+            this.ws.goto.open = false;
+            this.goto = None;
+            cx.notify();
+        });
         self.ws.goto.open = true;
-        self.goto = Some(GoToPopup { state, matches: Vec::new() });
+        self.goto = Some(GoToPopup { state, matches: Vec::new(), _focus_out });
         if self.ws.has_folder() {
             self.match_files(window, cx); // the last list, while the new one runs
             let job = self.ws.start_list_files();
