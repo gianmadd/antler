@@ -2,6 +2,7 @@
 //! what to run on the host to find its OS, install `antler-server` and start its proxy, and the connector that does
 //! it with the system `ssh` (one ControlMaster per host, so every command rides the same connection).
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
@@ -229,6 +230,7 @@ pub fn parse_uname(out: &str) -> Option<(Os, Arch)> {
     let os = match kernel {
         "Linux" => Os::Linux,
         "Darwin" => Os::Macos,
+        "Windows_NT" => Os::Windows, // the header of a Windows host's script (`probe_command`)
         k if k.starts_with("MINGW") || k.starts_with("MSYS") || k.starts_with("CYGWIN") => Os::Windows,
         _ => return None,
     };
@@ -281,12 +283,60 @@ fn win_dir(version: &str) -> String {
     format!("Join-Path $env:USERPROFILE '.antler-server\\{}'", checked(version))
 }
 
-/// Succeeds when the server of `version` is installed.
-pub fn check_command(os: Os, version: &str) -> String {
+/// The one command of every connection, run right after the handshake. It prints a header (`antler-info`, the host's
+/// `uname -sm`, its home folder, then `antler-proxy` or `antler-missing`) and, when the server of `version` is
+/// installed, becomes `antler-server proxy`: its stdout goes on after the header, so the protocol starts after the
+/// line `antler-proxy` on the same stdio. Without the server it ends after `antler-missing`.
+pub fn probe_command(os: Os, version: &str) -> String {
     match os {
-        Os::Windows => powershell(&format!("if (Test-Path (Join-Path ({}) 'antler-server.exe')) {{ exit 0 }} else {{ exit 1 }}", win_dir(version))),
-        _ => sh(&format!("test -x \"$HOME/.antler-server/{}/antler-server\"", checked(version))),
+        Os::Windows => powershell(&format!(
+            "$e = Join-Path ({}) 'antler-server.exe'; $o = [Console]::Out; $o.WriteLine('antler-info'); $o.WriteLine('Windows_NT ' + $env:PROCESSOR_ARCHITECTURE); $o.WriteLine($env:USERPROFILE); if (Test-Path $e) {{ $o.WriteLine('antler-proxy'); & $e proxy; exit $LASTEXITCODE }} else {{ $o.WriteLine('antler-missing') }}",
+            win_dir(version)
+        )),
+        _ => sh(&format!("echo antler-info; uname -sm; echo \"$HOME\"; d=\"$HOME/.antler-server/{}/antler-server\"; if test -x \"$d\"; then echo antler-proxy; exec \"$d\" proxy; fi; echo antler-missing", checked(version))),
     }
+}
+
+/// What the header of [`probe_command`] says.
+#[derive(Debug, PartialEq)]
+struct Probe {
+    info: HostInfo,
+    /// `antler-proxy`: the server is installed and the protocol follows on the same stream.
+    installed: bool,
+}
+
+/// One line, byte by byte: the reader is the server's stdout and must not swallow protocol bytes after the header.
+fn read_line(r: &mut impl Read) -> std::io::Result<Option<String>> {
+    let (mut line, mut b) = (Vec::new(), [0u8]);
+    while r.read(&mut b)? == 1 {
+        if b[0] == b'\n' {
+            return Ok(Some(String::from_utf8_lossy(&line).trim_end_matches('\r').to_string()));
+        }
+        line.push(b[0]);
+    }
+    Ok(None)
+}
+
+/// Reads the header up to the line that ends it. `Ok(None)`: the stream ended with no header (the host's shell did
+/// not run the Unix script: a Windows host). Lines before `antler-info` (a profile that prints) are skipped.
+fn read_probe(r: &mut impl Read) -> Result<Option<Probe>, String> {
+    let mut line = || read_line(r).map_err(|e| format!("cannot read from the host: {e}"));
+    loop {
+        match line()? {
+            None => return Ok(None),
+            Some(l) if l == "antler-info" => break,
+            Some(_) => {}
+        }
+    }
+    let mut next = || line().and_then(|l| l.ok_or_else(|| "the host cut its answer short".to_string()));
+    let (uname, home, state) = (next()?, next()?, next()?);
+    let (os, arch) = parse_uname(&uname).ok_or_else(|| format!("cannot tell the host's system: {uname}"))?;
+    let installed = match state.as_str() {
+        "antler-proxy" => true,
+        "antler-missing" => false,
+        other => return Err(format!("unexpected answer from the host: {other}")),
+    };
+    Ok(Some(Probe { info: HostInfo { os, arch, home: home.replace('\\', "/") }, installed }))
 }
 
 /// Reads the binary from stdin into place: to a temporary name first, so a cut connection leaves no half file.
@@ -313,7 +363,7 @@ pub fn proxy_command(os: Os, version: &str) -> String {
 
 // ---- the connection
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HostInfo {
     pub os: Os,
     pub arch: Arch,
@@ -332,7 +382,6 @@ pub struct SshConnector {
     /// Owner-only folder of the ControlMaster socket.
     control: PathBuf,
     info: Mutex<Option<HostInfo>>,
-    delivered: Mutex<bool>,
 }
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -350,7 +399,6 @@ impl SshConnector {
             cache: home.join("Library/Caches/Antler/server"),
             control,
             info: Mutex::new(None),
-            delivered: Mutex::new(false),
         }
     }
 
@@ -399,29 +447,14 @@ impl SshConnector {
         Ok(out)
     }
 
-    fn output(&self, remote: &str) -> Option<String> {
-        self.run(remote, None).ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    }
-
     /// The host's OS, architecture and home folder; the first call connects (and asks for passwords).
     pub fn host_info(&self) -> Result<HostInfo, String> {
         if let Some(i) = self.info.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Ok(i);
         }
-        let first = self.run(&sh("uname -sm && echo \"$HOME\""), None)?;
-        let text = String::from_utf8_lossy(&first.stdout).into_owned();
-        let found = if first.status.success() {
-            let (uname, home) = text.split_once('\n').unwrap_or((&text, ""));
-            parse_uname(uname).map(|(os, arch)| HostInfo { os, arch, home: home.trim().replace('\\', "/") })
-        } else {
-            // no `uname`: a Windows host, where the shell is cmd or PowerShell
-            let arch = self.output("cmd /c echo %PROCESSOR_ARCHITECTURE%").filter(|a| !a.contains('%')).or_else(|| self.output(&powershell("$env:PROCESSOR_ARCHITECTURE")));
-            let home = self.output("cmd /c echo %USERPROFILE%").filter(|h| !h.contains('%')).or_else(|| self.output(&powershell("$env:USERPROFILE")));
-            arch.and_then(|a| parse_windows_arch(&a)).zip(home).map(|((os, arch), home)| HostInfo { os, arch, home: home.replace('\\', "/") })
-        };
-        let info = found.ok_or_else(|| format!("cannot tell the host's system: {}", text.trim()))?;
-        *self.info.lock().unwrap_or_else(|e| e.into_inner()) = Some(info.clone());
-        Ok(info)
+        let (_, _, child) = self.connect()?;
+        child.into_iter().for_each(|mut c| drop((c.kill(), c.wait())));
+        self.info.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(|| "cannot tell the host's system".to_string())
     }
 
     /// The server binary for `info`: the dev override, or the release asset in the local cache (downloaded once).
@@ -443,32 +476,105 @@ impl SshConnector {
         Ok(cached)
     }
 
-    /// Installs the server of this version on the host unless it is there.
-    fn deliver(&self, info: &HostInfo) -> Result<(), String> {
-        let mut done = self.delivered.lock().unwrap_or_else(|e| e.into_inner());
-        if *done || self.run(&check_command(info.os, VERSION), None)?.status.success() {
-            *done = true;
-            return Ok(());
-        }
+    /// Installs the server of this version on the host.
+    fn install(&self, info: &HostInfo) -> Result<(), String> {
         let binary = self.server_binary(info)?;
         let out = self.run(&upload_command(info.os, VERSION), Some(&binary))?;
         if !out.status.success() {
             return Err(format!("cannot install the server on the host: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
-        *done = true;
         Ok(())
     }
 
-    /// One connection: delivery if needed, then `antler-server proxy` over ssh.
-    pub fn connect(&self) -> Result<Transport, String> {
-        let info = self.host_info()?;
-        self.deliver(&info)?;
+    /// Runs `remote` over ssh with its stdio piped; the process is the proxy once the server is there.
+    fn spawn(&self, remote: &str) -> Result<std::process::Child, String> {
         let mut c = self.command(&[]).map_err(|e| e.to_string())?;
-        c.arg(proxy_command(info.os, VERSION)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut child = c.spawn().map_err(|e| format!("cannot run ssh: {e}"))?;
-        let (i, o) = (child.stdout.take().unwrap(), child.stdin.take().unwrap());
-        Ok((Box::new(i), Box::new(o), Some(child)))
+        c.arg(remote).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        c.spawn().map_err(|e| format!("cannot run ssh: {e}"))
     }
+
+    /// One connection. The single command after the handshake (`probe_command`) tells the host's system and, with the
+    /// server installed, is already the proxy. Not installed: upload it and start the proxy. Unix first, then
+    /// Windows (no `sh` there: its output has no header), unless a connection already told the OS.
+    pub fn connect(&self) -> Result<Transport, String> {
+        let known = self.info.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|i| i.os);
+        let order: &[Os] = if known == Some(Os::Windows) { &[Os::Windows] } else { &[Os::Linux, Os::Windows] };
+        let mut last = String::new();
+        for &os in order {
+            let mut child = self.spawn(&probe_command(os, VERSION))?;
+            let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+            let Some(probe) = read_probe(&mut out)? else {
+                // the stream ended with no header: another kind of host, or ssh failed
+                let status = child.wait().ok();
+                let mut text = String::new();
+                err.read_to_string(&mut text).ok();
+                if status.and_then(|s| s.code()) == Some(255) {
+                    return Err(text.trim().to_string());
+                }
+                last = text.trim().to_string();
+                continue;
+            };
+            std::thread::spawn(move || drop(std::io::copy(&mut err, &mut std::io::sink()))); // the server's log must not fill the pipe
+            *self.info.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe.info.clone());
+            if probe.installed {
+                return Ok((Box::new(out), Box::new(child.stdin.take().unwrap()), Some(child)));
+            }
+            child.wait().ok();
+            self.install(&probe.info)?;
+            let mut child = self.spawn(&proxy_command(probe.info.os, VERSION))?;
+            let (i, o) = (child.stdout.take().unwrap(), child.stdin.take().unwrap());
+            std::thread::spawn({
+                let mut e = child.stderr.take().unwrap();
+                move || drop(std::io::copy(&mut e, &mut std::io::sink()))
+            });
+            return Ok((Box::new(i), Box::new(o), Some(child)));
+        }
+        Err(format!("cannot tell the host's system: {last}"))
+    }
+}
+
+// ---- the control folders
+
+/// Where the control folders live (see `SshConnector::new`).
+fn control_base() -> &'static Path {
+    Path::new(if cfg!(unix) { "/tmp" } else { "" })
+}
+
+/// The owner of a folder named `antler-ssh-<pid>-<n>`.
+fn control_owner(name: &str) -> Option<u32> {
+    name.strip_prefix("antler-ssh-")?.split_once('-')?.0.parse().ok()
+}
+
+/// Stops the master of every socket in the `antler-ssh-*` folders of `base` whose owner `gone` says is gone, and
+/// removes the folders. A folder of a live Antler is never touched.
+fn sweep_control_dirs(base: &Path, ssh: &Path, gone: impl Fn(u32) -> bool) {
+    for dir in std::fs::read_dir(base).into_iter().flatten().flatten() {
+        if !dir.file_name().to_str().and_then(control_owner).is_some_and(&gone) {
+            continue;
+        }
+        for socket in std::fs::read_dir(dir.path()).into_iter().flatten().flatten() {
+            // the destination is not looked at: an explicit ControlPath names the master
+            let mut c = Command::new(ssh);
+            c.arg("-o").arg(format!("ControlPath={}", socket.path().display())).args(["-O", "exit", "x"]);
+            c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().ok();
+        }
+        std::fs::remove_dir_all(dir.path()).ok();
+    }
+}
+
+fn ssh_path() -> PathBuf {
+    std::env::var_os("ANTLER_SSH").map(PathBuf::from).unwrap_or_else(|| "/usr/bin/ssh".into())
+}
+
+/// At startup: the folders a crashed or killed Antler left (their process is gone).
+pub fn sweep_stale() {
+    let alive = |pid: u32| Command::new("kill").args(["-0", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    sweep_control_dirs(control_base(), &ssh_path(), |pid| !alive(pid));
+}
+
+/// At quit: this process's folders (a connector that is never dropped leaves its own behind).
+pub fn sweep_own() {
+    sweep_control_dirs(control_base(), &ssh_path(), |pid| pid == std::process::id());
 }
 
 impl Drop for SshConnector {
@@ -565,16 +671,51 @@ Host first
         let up = upload_command(Os::Linux, "0.3.0");
         assert!(up.starts_with("sh -c '") && up.contains("cat > \"$HOME/.antler-server/0.3.0/antler-server.tmp\"") && up.contains("chmod +x") && up.contains("mv "), "{up}");
         assert_eq!(proxy_command(Os::Macos, "0.3.0"), "sh -c 'exec \"$HOME/.antler-server/0.3.0/antler-server\" proxy'");
-        assert!(check_command(Os::Linux, "0.3.0").contains("test -x"));
+        let probe = probe_command(Os::Linux, "0.3.0");
+        assert!(probe.starts_with("sh -c 'echo antler-info; uname -sm;") && probe.contains("test -x") && probe.contains("exec \"$d\" proxy"), "{probe}");
+        assert!(probe_command(Os::Windows, "0.3.0").starts_with("powershell -NoProfile"));
         // base64 of UTF-16LE "a" is "YQA="
         assert_eq!(powershell("a"), "powershell -NoProfile -NonInteractive -EncodedCommand YQA=");
         assert!(upload_command(Os::Windows, "0.3.0").starts_with("powershell -NoProfile"));
     }
 
     #[test]
+    fn the_header_ends_where_the_protocol_starts() {
+        let mut r = std::io::Cursor::new(b"motd\nantler-info\nLinux aarch64\n/home/dev\nantler-proxy\n\x00\x00protocol".to_vec());
+        let p = read_probe(&mut r).unwrap().unwrap();
+        assert_eq!((p.info, p.installed), (HostInfo { os: Os::Linux, arch: Arch::Aarch64, home: "/home/dev".into() }, true));
+        let mut rest = String::new();
+        r.read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "\0\0protocol", "the bytes after the header are the protocol's");
+        // version mismatch: nothing installed, the stream ends after the header
+        let p = read_probe(&mut &b"antler-info\nDarwin arm64\n/Users/a\nantler-missing\n"[..]).unwrap().unwrap();
+        assert!(!p.installed && p.info.os == Os::Macos);
+        // Windows script: CRLF, backslashes in the home
+        let p = read_probe(&mut &b"antler-info\r\nWindows_NT AMD64\r\nC:\\Users\\a\r\nantler-missing\r\n"[..]).unwrap().unwrap();
+        assert_eq!((p.info.os, p.info.arch, p.info.home.as_str()), (Os::Windows, Arch::X86_64, "C:/Users/a"));
+        // no header (a Windows host ran `sh`): not an error, the caller tries the next shell
+        assert_eq!(read_probe(&mut &b"'sh' is not recognized"[..]).unwrap(), None);
+        assert!(read_probe(&mut &b"antler-info\nLinux x86_64\n"[..]).is_err());
+        assert!(read_probe(&mut &b"antler-info\nPlan9 x\n/h\nantler-proxy\n"[..]).is_err());
+    }
+
+    #[test]
+    fn only_the_folders_of_dead_owners_are_swept() {
+        let tmp = tempfile::tempdir().unwrap();
+        for d in ["antler-ssh-10-0", "antler-ssh-10-1", "antler-ssh-20-0", "antler-ssh-x-0", "other"] {
+            std::fs::create_dir(tmp.path().join(d)).unwrap();
+            std::fs::write(tmp.path().join(d).join("sock"), "").unwrap();
+        }
+        sweep_control_dirs(tmp.path(), Path::new("/nonexistent/ssh"), |pid| pid == 10);
+        let mut left: Vec<String> = std::fs::read_dir(tmp.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["antler-ssh-20-0", "antler-ssh-x-0", "other"]);
+    }
+
+    #[test]
     #[should_panic]
     fn a_version_cannot_carry_shell_syntax() {
-        check_command(Os::Linux, "1.0\" ; rm -rf ~ #");
+        probe_command(Os::Linux, "1.0\" ; rm -rf ~ #");
     }
 
     /// Delivery and connection through the real code path with a stand-in for `ssh` that runs the command here
@@ -608,5 +749,12 @@ Host first
         assert!(!remote.list_dir(&home).is_empty() || remote.exists(&home.join(".antler-server")));
         let calls = std::fs::read_to_string(&log).unwrap();
         assert!(calls.contains("-p 2222") && calls.contains("ada@example.test"), "{calls}");
+        // installed: a connection is one command after the handshake (install = probe, upload, proxy)
+        assert_eq!(calls.lines().count(), 3, "{calls}");
+        let again = SshConnector::with(Target::parse("ada@example.test").unwrap(), tmp.path().join("fake-ssh"), tmp.path().join("none"), tmp.path().join("cache"));
+        let before = calls.lines().count();
+        again.connect().unwrap().2.map(|mut c| drop((c.kill(), c.wait())));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), before + 1);
+        assert_eq!(again.host_info().unwrap().home, home.to_str().unwrap());
     }
 }
