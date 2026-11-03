@@ -218,7 +218,7 @@ impl Antler {
             .child(Button::new("open").ghost().xsmall().icon(IconName::ExternalLink).tooltip("Open File").on_click(cx.listener(
                 move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.open_path(f1.clone(), None, false, cx);
+                    this.open_path(f1.clone(), None, None, false, cx);
                 },
             )))
             .child(Button::new("stage").ghost().xsmall().icon(IconName::Plus).tooltip("Stage Changes").on_click(cx.listener(
@@ -242,7 +242,7 @@ impl Antler {
             .tooltip(tip(format!("{}\nConflict", full.display())))
             .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                 this.ws.select(key.clone());
-                this.open_path(f2.clone(), None, ev.click_count() >= 2, cx);
+                this.open_path(f2.clone(), None, None, ev.click_count() >= 2, cx);
             }))
             .child(style::file_icon(&f.path))
             .child(div().flex_none().text_color(badge_color(f.badge)).child(name))
@@ -251,7 +251,7 @@ impl Antler {
             .child(badge(f.badge, cx))
             .context_menu(move |menu, _, _| {
                 let (open, p) = (full.clone(), p2.clone());
-                menu.item(menu_item(&this, "Open File", move |t, _, cx| t.open_path(open.clone(), None, false, cx)))
+                menu.item(menu_item(&this, "Open File", move |t, _, cx| t.open_path(open.clone(), None, None, false, cx)))
                     .item(menu_item(&this, "Stage Changes", move |t, window, cx| stage(t, &p, window, cx)))
             })
             .into_any_element()

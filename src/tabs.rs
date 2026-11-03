@@ -141,8 +141,8 @@ impl Antler {
                 });
                 self.minimaps.entry(f.path.clone()).or_default().version += 1;
             }
-            if let Some(line) = f.goto.take() {
-                editor.update(cx, |e, cx| e.set_cursor_position(Position::new(line.saturating_sub(1) as u32, 0), window, cx));
+            if let Some((line, column)) = f.goto.take() {
+                editor.update(cx, |e, cx| e.set_cursor_position(Position::new(line.saturating_sub(1) as u32, column as u32), window, cx));
             }
         }
         if std::mem::take(&mut self.focus_editor) {
@@ -287,8 +287,8 @@ impl Antler {
     }
 
     /// Opens a file in an editor tab (preview unless `pin`), optionally at a 1-based line.
-    pub(crate) fn open_path(&mut self, path: PathBuf, line: Option<usize>, pin: bool, cx: &mut Context<Self>) {
-        let ix = self.ws.open_path(&path, line, pin);
+    pub(crate) fn open_path(&mut self, path: PathBuf, line: Option<usize>, column: Option<usize>, pin: bool, cx: &mut Context<Self>) {
+        let ix = self.ws.open_path(&path, line, column, pin);
         self.sync_diff(cx);
         self.load_tab(ix, cx);
     }
@@ -1110,7 +1110,7 @@ impl Antler {
                         .xsmall()
                         .icon(IconName::ExternalLink)
                         .label("Open File")
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_path(file.clone(), None, false, cx))),
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_path(file.clone(), None, None, false, cx))),
                 )
                 .child(
                     h_flex()

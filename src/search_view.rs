@@ -288,7 +288,7 @@ impl Antler {
                                 .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                                     this.ws.select(key.clone());
                                     // a double click fires twice (count 1 then 2): preview, then pin
-                                    this.open_path(path.clone(), Some(number), ev.click_count() >= 2, cx);
+                                    this.open_path(path.clone(), Some(number), None, ev.click_count() >= 2, cx);
                                 }))
                                 .child(div().flex_1().min_w_0().truncate().font_family(mono.clone()).text_size(px(13.)).child(text))
                                 .group(group(ix))

@@ -5,6 +5,7 @@ pub enum Mode<'a> {
     Files,
     Commands(&'a str),
     Line(&'a str),
+    QuickSearch(&'a str),
 }
 
 /// What the text of the Quick Open field asks for, like VS Code: a leading `>` or `:` switches the mode.
@@ -12,6 +13,7 @@ pub fn mode(query: &str) -> Mode<'_> {
     match query.chars().next() {
         Some('>') => Mode::Commands(&query[1..]),
         Some(':') => Mode::Line(&query[1..]),
+        Some('%') => Mode::QuickSearch(&query[1..]),
         _ => Mode::Files,
     }
 }
@@ -49,6 +51,8 @@ mod tests {
         assert!(matches!(mode("src"), Mode::Files));
         assert!(matches!(mode(">save"), Mode::Commands("save")));
         assert!(matches!(mode(":42"), Mode::Line("42")));
+        assert!(matches!(mode("%text"), Mode::QuickSearch("text")));
+        assert!(matches!(mode("%"), Mode::QuickSearch("")));
         assert!(matches!(mode(""), Mode::Files));
     }
 

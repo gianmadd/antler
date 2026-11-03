@@ -780,6 +780,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::forward_a_port))
             .on_action(cx.listener(Self::stop_forwarding_port))
             .on_action(cx.listener(Self::go_to_file))
+            .on_action(cx.listener(Self::quick_text_search))
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::go_to_line))
             .on_action(cx.listener(Self::select_theme))
@@ -881,7 +882,7 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
                 antler.load_tab(ix, cx);
             }
             for path in bench_open.split(':').filter(|p| !p.is_empty()) {
-                antler.open_path(PathBuf::from(path), None, true, cx);
+                antler.open_path(PathBuf::from(path), None, None, true, cx);
             }
             antler
         })

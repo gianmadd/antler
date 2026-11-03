@@ -267,7 +267,7 @@ impl Antler {
             let full = full.clone();
             move |this, _, _, cx| {
                 cx.stop_propagation();
-                this.open_path(full.clone(), None, false, cx);
+                this.open_path(full.clone(), None, None, false, cx);
             }
         }));
         let (stage, unstage) = (Op::Stage { repo: repo.clone(), path: path.clone() }, Op::Unstage { repo: repo.clone(), path: path.clone() });
@@ -295,7 +295,7 @@ impl Antler {
             let (p, full, reveal) = (menu_path.clone(), menu_full.clone(), menu_full.clone());
             let menu = menu
                 .item(menu_item(&this, "Open Changes", move |t, window, cx| t.open_file(section, staged, &p, false, window, cx)))
-                .item(menu_item(&this, "Open File", move |t, _, cx| t.open_path(full.clone(), None, false, cx)))
+                .item(menu_item(&this, "Open File", move |t, _, cx| t.open_path(full.clone(), None, None, false, cx)))
                 .separator();
             let menu = if staged {
                 menu.item(run("Unstage Changes", &unstage))

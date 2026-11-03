@@ -12,7 +12,7 @@ use gpui_kit::*;
 use crate::branch_view::CloseBranch;
 use crate::explorer::*;
 use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
-use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
+use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine, QuickTextSearch};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
@@ -208,6 +208,7 @@ cmds![
     ("antler.toggleMinimapCharacters", "Render Characters", "", Global, ToggleRenderCharacters),
     // Go
     ("workbench.action.quickOpen", "Go to File…", "cmd-p", Global, GoToFile),
+    ("workbench.action.quickTextSearch", "Quick Text Search", "", Global, QuickTextSearch),
     ("workbench.action.gotoLine", "Go to Line…", "ctrl-g", Global, GoToLine),
     ("workbench.action.focusFirstEditorGroup", "Focus First Editor Group", "cmd-1", Global, FocusFirstGroup),
     ("workbench.action.focusSecondEditorGroup", "Focus Second Editor Group", "cmd-2", Global, FocusSecondGroup),

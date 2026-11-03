@@ -219,8 +219,8 @@ pub struct FileTab {
     pub disk: String,
     /// Why the file could not be read (binary, not UTF-8, missing); shown instead of the editor.
     pub error: Option<String>,
-    /// 1-based line to move the cursor to; the view takes it once applied.
-    pub goto: Option<usize>,
+    /// 1-based line and 0-based character column to move the cursor to; the view takes it once applied.
+    pub goto: Option<(usize, usize)>,
     /// When the text last changed, for the auto-save delay.
     pub edited: Option<Instant>,
     /// The disk content someone else wrote while this tab had unsaved edits: the view asks Reload / Keep Mine.
@@ -655,17 +655,18 @@ impl Workspace {
         }
     }
 
-    /// Opens file `path` (absolute) in an editor tab, preview unless `pin`, and makes it active; with `line`
-    /// (1-based) the cursor goes there. An already open file keeps its edits. Used by "Open File", Explorer and search.
+    /// Opens file `path` (absolute) in an editor tab, preview unless `pin`, and makes it active; with `line` (1-based)
+    /// and `column` (0-based characters) the cursor goes there. An already open file keeps its edits.
+    /// Used by "Open File", Explorer and search.
     /// A new tab is `loading`: read it off the UI thread with `FileTab::load`, then `set_file`.
-    pub fn open_path(&mut self, path: &Path, line: Option<usize>, pin: bool) -> usize {
+    pub fn open_path(&mut self, path: &Path, line: Option<usize>, column: Option<usize>, pin: bool) -> usize {
         let existing = self.find_here(|t| t.path() == Some(path));
         // open in another group: that tab's text (with its unsaved edits) is shown, not read again
         let shown = self.tabs.iter().find(|t| t.path() == Some(path) && matches!(t.kind, TabKind::File(_) | TabKind::Image(_))).and_then(|t| t.twin(self.group));
         let ix = self.show_tab(existing, || shown.map_or_else(|| TabKind::loading(path), |t| t.kind), pin);
         self.goto.opened(path);
         if let (Some(line), TabKind::File(f)) = (line, &mut self.tabs[ix].kind) {
-            f.goto = Some(line);
+            f.goto = Some((line, column.unwrap_or(0)));
         }
         ix
     }
@@ -706,7 +707,7 @@ impl Workspace {
     /// Blocking convenience (tests): open_path + load + set_file (or set_image).
     #[cfg(test)]
     pub fn open_path_now(&mut self, path: &Path, line: Option<usize>, pin: bool) -> usize {
-        let ix = self.open_path(path, line, pin);
+        let ix = self.open_path(path, line, None, pin);
         match ImageTab::is_image(path) {
             true => self.set_image(path, ImageTab::load(path)),
             false => self.set_file(path, FileTab::load(path)),
@@ -857,7 +858,7 @@ impl Workspace {
         match op {
             Op::Create { path, folder: false } => {
                 if !ImageTab::is_image(&path) {
-                    self.open_path(&path, None, true);
+                    self.open_path(&path, None, None, true);
                     self.set_file(&path, Ok(String::new())); // just made by `File::create_new`
                 }
                 self.select(tree_key(&path));
@@ -1058,7 +1059,7 @@ mod tests {
         fs::write(dir.join("new.txt"), "x\ny\n").unwrap();
         let mut ws = Workspace::open(tmp.path());
         for (name, kinds) in [("f.txt", vec![(git::ChangeKind::Modified, 1..2), (git::ChangeKind::Modified, 17..18)]), ("new.txt", vec![(git::ChangeKind::Added, 0..2)])] {
-            let ix = ws.open_path(&dir.join(name), None, true);
+            let ix = ws.open_path(&dir.join(name), None, None, true);
             let text = FileTab::load(&dir.join(name));
             ws.set_file(&dir.join(name), text);
             let source = ws.quick_source(&dir.join(name)).unwrap();
@@ -1159,11 +1160,21 @@ mod tests {
         let mut ws = Workspace::open(tmp.path());
         let a = tmp.path().join("a.txt");
         ws.open_path_now(&a, Some(1), false);
-        assert_eq!(file(&ws, 0).goto, Some(1));
+        assert_eq!(file(&ws, 0).goto, Some((1, 0)));
         ws.edit(0, "a\nmore\n".into());
         ws.open_path_now(&a, Some(2), false);
         assert_eq!(ws.tabs.len(), 1);
-        assert_eq!((file(&ws, 0).goto, file(&ws, 0).text.as_str()), (Some(2), "a\nmore\n"), "reopening keeps the edits");
+        assert_eq!((file(&ws, 0).goto, file(&ws, 0).text.as_str()), (Some((2, 0)), "a\nmore\n"), "reopening keeps the edits");
+    }
+
+    #[test]
+    fn open_path_at_a_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        let mut ws = Workspace::open(tmp.path());
+        let path = tmp.path().join("a.txt");
+        let ix = ws.open_path(&path, Some(2), Some(4), true);
+        assert_eq!(file(&ws, ix).goto, Some((2, 4)));
     }
 
     #[test]

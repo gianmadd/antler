@@ -407,7 +407,7 @@ impl Antler {
                                     cx.notify();
                                 } else {
                                     // a double click fires twice (count 1 then 2): preview, then pin
-                                    this.open_path(path.clone(), None, ev.click_count() >= 2, cx);
+                                    this.open_path(path.clone(), None, None, ev.click_count() >= 2, cx);
                                 }
                             }))
                             .when(!naming, |el| {

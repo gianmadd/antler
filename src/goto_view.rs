@@ -11,15 +11,18 @@ use crate::keys;
 use crate::palette::{self, Mode};
 use crate::style::{self, FG_DIM, FG_FAINT, GIT_M, c};
 
-actions!(antler, [GoToFile, CloseGoToFile, CommandPalette, GoToLine]);
+actions!(antler, [GoToFile, CloseGoToFile, CommandPalette, GoToLine, QuickTextSearch]);
 
 /// Most files the popup lists; type more to narrow it.
 const LIMIT: usize = 100;
+const QUICK_SEARCH_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// The open popup: its palette and the files it lists for the current query.
 pub(crate) struct GoToPopup {
     state: Entity<CommandState>,
     matches: Vec<Match>,
+    query_generation: u64,
+    quick_query: Option<String>,
     /// Closes the popup when the focus leaves it (another view, ⇧⌘F…), like VS Code's Quick Open.
     _focus_out: Subscription,
 }
@@ -42,6 +45,10 @@ impl Antler {
         self.open_quick(":", window, cx);
     }
 
+    pub(crate) fn quick_text_search(&mut self, _: &QuickTextSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_quick("%", window, cx);
+    }
+
     fn open_quick(&mut self, prefix: &str, window: &mut Window, cx: &mut Context<Self>) {
         let state = cx.new(|cx| CommandState::new(window, cx));
         state.update(cx, |s, cx| {
@@ -53,12 +60,13 @@ impl Antler {
         let handle = state.read(cx).focus_handle(cx);
         // no refocus: the focus already went where the user wanted
         let _focus_out = cx.on_focus_out(&handle, window, |this, _, _, cx| {
+            this.ws.cancel_quick_search();
             this.ws.goto.open = false;
             this.goto = None;
             cx.notify();
         });
         self.ws.goto.open = true;
-        self.goto = Some(GoToPopup { state, matches: Vec::new(), _focus_out });
+        self.goto = Some(GoToPopup { state, matches: Vec::new(), query_generation: 0, quick_query: None, _focus_out });
         if self.ws.has_folder() {
             self.match_files(window, cx); // the last list, while the new one runs
             let job = self.ws.start_list_files();
@@ -68,6 +76,7 @@ impl Antler {
     }
 
     pub(crate) fn close_go_to_file(&mut self, _: &CloseGoToFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.ws.cancel_quick_search();
         self.ws.goto.open = false;
         self.goto = None;
         self.focus.focus(window, cx);
@@ -102,8 +111,36 @@ impl Antler {
     fn match_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(popup) = &self.goto else { return };
         let query = popup.state.read(cx).query(cx);
-        if !matches!(palette::mode(&query), Mode::Files) {
-            return;
+        match palette::mode(&query) {
+            Mode::QuickSearch(text) => {
+                if popup.quick_query.as_deref() == Some(query.as_str()) { return; }
+                self.ws.cancel_quick_search();
+                let text = text.to_string();
+                let popup = self.goto.as_mut().unwrap();
+                popup.quick_query = Some(query.to_string());
+                popup.query_generation += 1;
+                let generation = popup.query_generation;
+                if text.is_empty() { cx.notify(); return; }
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(QUICK_SEARCH_DELAY).await;
+                    this.update_in(cx, |this, window, cx| {
+                        let current = this.goto.as_ref().is_some_and(|p| p.query_generation == generation && p.state.read(cx).query(cx) == format!("%{text}"));
+                        if current && let Some(job) = this.ws.start_quick_search(&text) {
+                            this.spawn_quick_search(job, window, cx);
+                        }
+                    }).ok();
+                }).detach();
+                return;
+            }
+            Mode::Files => {
+                self.ws.cancel_quick_search();
+                self.goto.as_mut().unwrap().quick_query = None;
+            }
+            Mode::Commands(_) | Mode::Line(_) => {
+                self.ws.cancel_quick_search();
+                self.goto.as_mut().unwrap().quick_query = None;
+                return;
+            }
         }
         let job = self.ws.start_match(&query, LIMIT);
         cx.spawn_in(window, async move |this, cx| {
@@ -120,6 +157,23 @@ impl Antler {
             .ok();
         })
         .detach();
+    }
+
+    fn spawn_quick_search(&mut self, job: crate::search::SearchJob, window: &mut Window, cx: &mut Context<Self>) {
+        let (tx, rx) = async_channel::unbounded();
+        cx.spawn_in(window, async move |this, cx| {
+            let bg = job.clone();
+            let walk = cx.background_spawn(async move { bg.run_chunked(&mut |files| drop(tx.send_blocking(files))) });
+            let mut files = Vec::new();
+            while let Ok(chunk) = rx.recv().await { files.extend(chunk); }
+            let mut results = walk.await;
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            results.files = files;
+            this.update(cx, |this, cx| {
+                this.ws.finish_quick_search(&job, results);
+                cx.notify();
+            }).ok();
+        }).detach();
     }
 
     /// The commands the palette lists for what follows the `>`, best first, with the matched bytes of each title.
@@ -171,13 +225,32 @@ impl Antler {
                     e.focus(window, cx);
                 });
             }
+            Mode::QuickSearch(_) => {
+                let Some((path, line, column)) = self.quick_location(row) else { return };
+                self.close_go_to_file(&CloseGoToFile, window, cx);
+                self.open_path(path, Some(line), Some(column), true, cx);
+            }
         }
+    }
+
+    fn quick_location(&self, mut row: usize) -> Option<(std::path::PathBuf, usize, usize)> {
+        for file in &self.ws.quick_search.results.as_ref()?.files {
+            if row == 0 { return None; }
+            row -= 1;
+            if row < file.lines.len() {
+                let hit = &file.lines[row];
+                let column = hit.ranges.first()?.start;
+                return Some((file.path.clone(), hit.line, hit.text[..column].chars().count()));
+            }
+            row -= file.lines.len();
+        }
+        None
     }
 
     fn open_match(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.goto.as_ref().and_then(|p| p.matches.get(row)).map(|m| m.path.clone()) else { return };
         self.close_go_to_file(&CloseGoToFile, window, cx);
-        self.open_path(path, None, true, cx);
+        self.open_path(path, None, None, true, cx);
     }
 
     /// The popup, drawn over everything; `None` while closed.
@@ -212,6 +285,33 @@ impl Antler {
                     None => "Open a text editor first to go to a line.".to_string(),
                 };
                 ("Type the line number to go to", vec![CommandItem::new().label(text)])
+            }
+            Mode::QuickSearch(rest) => {
+                let mut items = Vec::new();
+                if rest.is_empty() {
+                    items.push(CommandItem::new().label("Type text after % to search in files"));
+                } else if let Some(results) = &self.ws.quick_search.results {
+                    if let Some(error) = &results.error {
+                        items.push(CommandItem::new().label(error.clone()));
+                    } else if results.files.is_empty() {
+                        items.push(CommandItem::new().label("No results"));
+                    } else {
+                        for file in &results.files {
+                            let rel = file.path.strip_prefix(&self.ws.root).unwrap_or(&file.path).display().to_string();
+                            items.push(CommandItem::new().label(rel));
+                            for line in &file.lines {
+                                let (text, ranges) = (line.text.clone(), line.ranges.clone());
+                                items.push(CommandItem::new().child(move |_, _| {
+                                    div().min_w_0().truncate().child(StyledText::new(text.clone()).with_highlights(ranges.iter().map(|r| (r.clone(), mark))))
+                                }));
+                            }
+                        }
+                        if results.truncated { items.push(CommandItem::new().label("More results exist")); }
+                    }
+                } else {
+                    items.push(CommandItem::new().label("Searching…"));
+                }
+                ("Search text in files", items)
             }
             Mode::Files => ("Search files by name", Self::file_items(popup, mark)),
         };

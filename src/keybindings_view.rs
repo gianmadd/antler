@@ -177,7 +177,7 @@ impl Antler {
         });
         let json = Button::new("edit-keybindings-json").link().label("Open Keyboard Shortcuts (JSON)").on_click(cx.listener(|this, _, _, cx| {
             if let Some(file) = keys::ensure_file() {
-                this.open_path(file, None, true, cx);
+                this.open_path(file, None, None, true, cx);
             }
         }));
         div()
