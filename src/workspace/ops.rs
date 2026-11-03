@@ -349,34 +349,29 @@ impl Op {
             Op::Undo(op) | Op::Redo(op) => op.run(),
             Op::Create { path, folder } => {
                 // the outermost folder it makes is what an undo removes
-                let top = path.ancestors().take_while(|a| a.symlink_metadata().is_err()).last().unwrap_or(path).to_path_buf();
-                let made = std::fs::create_dir_all(path.parent().unwrap_or(path))
-                    .and_then(|()| if *folder { std::fs::create_dir(path) } else { std::fs::File::create_new(path).map(drop) });
-                made.map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
+                let top = host::current().create(path, *folder).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
                 Ok(Some(Op::Trash { path: top, unsaved: false }))
             }
             Op::Rename { from, to } => {
-                // `rename` replaces a file silently: an undo or redo must not (a change of case only is the same file)
-                use std::os::unix::fs::MetadataExt as _;
-                let (a, b) = (from.symlink_metadata(), to.symlink_metadata());
-                let case_only = matches!((&a, &b), (Ok(a), Ok(b)) if (a.dev(), a.ino()) == (b.dev(), b.ino()));
-                if !case_only && b.is_ok() {
-                    return Err(format!("Cannot move {} to {}: a file or folder with that name already exists.", from.display(), to.display()));
-                }
-                std::fs::rename(from, to).map_err(|e| format!("Cannot rename {}: {e}", from.display()))?;
+                // `Host::rename` does not replace a file silently, as an undo or redo must not
+                host::current().rename(from, to).map_err(|e| match e.kind() {
+                    std::io::ErrorKind::AlreadyExists => format!("Cannot move {} to {}: a file or folder with that name already exists.", from.display(), to.display()),
+                    _ => format!("Cannot rename {}: {e}", from.display()),
+                })?;
                 Ok(Some(Op::Rename { from: to.clone(), to: from.clone() }))
             }
             Op::Copy { from, to } => {
-                if to.symlink_metadata().is_ok() {
+                let host = host::current();
+                if host.exists(to) {
                     return Err(format!("Cannot copy {} to {}: a file or folder with that name already exists.", from.display(), to.display()));
                 }
-                copy_all(from, to).map_err(|e| format!("Cannot copy {}: {e}", from.display()))?;
+                host.copy(from, to).map_err(|e| format!("Cannot copy {}: {e}", from.display()))?;
                 Ok(Some(Op::Trash { path: to.clone(), unsaved: false }))
             }
             Op::Batch(_) => unreachable!("ScanJob::run runs a batch's ops one by one"),
             Op::Trash { path, .. } => {
-                let trashed = move_to_trash(path).map_err(|e| format!("Cannot move {} to the Trash: {e}", path.display()))?;
-                Ok(Some(Op::Rename { from: trashed, to: path.clone() }))
+                let trashed = host::current().trash(path).map_err(|e| format!("Cannot move {} to the Trash: {e}", path.display()))?;
+                Ok(trashed.map(|trashed| Op::Rename { from: trashed, to: path.clone() }))
             }
             git => git.run_git().map(|()| None),
         }
@@ -397,7 +392,8 @@ impl Op {
             Op::RevertLines { repo, patch, .. } => git::apply_patch(repo, patch, false, true),
             Op::Ignore { repo, path } => {
                 let file = repo.join(".gitignore");
-                let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+                let host = host::current();
+                let mut text = host.read_to_string(&file).unwrap_or_default();
                 if text.lines().any(|l| l.trim() == path) {
                     return Ok(());
                 }
@@ -405,7 +401,7 @@ impl Op {
                     text.push('\n');
                 }
                 text += &format!("{path}\n");
-                std::fs::write(&file, text).map_err(|e| format!("Cannot write {}: {e}", file.display()))
+                host.write(&file, text.as_bytes()).map_err(|e| format!("Cannot write {}: {e}", file.display()))
             }
             Op::Stash { repo, message, untracked, staged } => git::stash(repo, message, *untracked, *staged),
             Op::StashApply { repo, index, pop } => git::stash_apply(repo, *index, *pop),
@@ -445,44 +441,6 @@ impl Op {
     }
 }
 
-/// Moves `path` to the macOS Trash (Finder's Put Back works) and returns where it now is. Blocking.
-#[cfg(not(test))]
-fn move_to_trash(path: &Path) -> Result<PathBuf, String> {
-    use objc2_foundation::{NSFileManager, NSURL};
-    let url = NSURL::from_file_path(path).ok_or("not a file path")?;
-    let mut at = None;
-    NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, Some(&mut at)).map_err(|e| e.localizedDescription().to_string())?;
-    at.and_then(|u| u.to_file_path()).ok_or_else(|| "the Trash gave no location".into())
-}
-
-/// Tests never touch the user's Trash: the item moves to a folder of this test run in the temp folder.
-#[cfg(test)]
-fn move_to_trash(path: &Path) -> Result<PathBuf, String> {
-    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let at = std::env::temp_dir().join(format!("antler-test-trash-{}/{n}", std::process::id()));
-    std::fs::create_dir_all(&at).map_err(|e| e.to_string())?;
-    let at = at.join(path.file_name().unwrap_or_default());
-    std::fs::rename(path, &at).map_err(|e| e.to_string())?;
-    Ok(at)
-}
-
-/// Copies `from` to `to`, a folder with everything in it; links stay links. Blocking.
-fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
-    let meta = from.symlink_metadata()?;
-    if meta.is_symlink() {
-        std::os::unix::fs::symlink(std::fs::read_link(from)?, to)
-    } else if meta.is_dir() {
-        std::fs::create_dir(to)?;
-        std::fs::read_dir(from)?.try_for_each(|e| {
-            let e = e?;
-            copy_all(&e.path(), &to.join(e.file_name()))
-        })
-    } else {
-        std::fs::copy(from, to).map(drop)
-    }
-}
-
 /// Where a copy of `name` lands in `dir`, like VS Code's default `explorer.incrementalNaming`: the name itself if
 /// free, else `x copy.ts`, `x copy 2.ts`... (a folder's name has no extension). `taken`: targets of the same paste.
 pub(super) fn copy_target(dir: &Path, name: &std::ffi::OsStr, folder: bool, taken: &[PathBuf]) -> PathBuf {
@@ -492,7 +450,7 @@ pub(super) fn copy_target(dir: &Path, name: &std::ffi::OsStr, folder: bool, take
         None => (name.to_string(), ""),
     };
     let mut path = dir.join(&*name);
-    while path.symlink_metadata().is_ok() || taken.contains(&path) {
+    while host::current().exists(&path) || taken.contains(&path) {
         let counted = stem.rsplit_once(" copy ").and_then(|(base, n)| Some((base.to_string(), n.parse::<u32>().ok()?)));
         stem = match counted {
             Some((base, n)) => format!("{base} copy {}", n + 1),
@@ -507,7 +465,7 @@ pub(super) fn copy_target(dir: &Path, name: &std::ffi::OsStr, folder: bool, take
 /// Force Checkout's discard of one file of "Changes": restored from the index, or (untracked) moved to the Trash.
 fn force_discard(repo: &Path, file: &FileEntry) -> git::Result<()> {
     if file.is_untracked() {
-        move_to_trash(&repo.join(&file.path)).map(drop).map_err(|e| format!("Cannot move {} to the Trash: {e}", file.path))
+        host::current().trash(&repo.join(&file.path)).map(drop).map_err(|e| format!("Cannot move {} to the Trash: {e}", file.path))
     } else {
         discard(repo, &file.path, false)
     }
@@ -1563,6 +1521,9 @@ mod transfer_tests {
 
     #[test]
     fn deleting_several_entries_asks_once_and_one_undo_brings_them_all_back() {
+        if crate::testing::over_remote() {
+            return; // the Trash is local: a remote deletes for good
+        }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let mut ws = four(root);

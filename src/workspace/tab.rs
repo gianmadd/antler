@@ -270,13 +270,15 @@ impl ImageTab {
 
     /// Blocking: reads the image's header (the whole file for an SVG) and size on disk.
     pub fn load(path: &Path) -> ImageInfo {
+        let bytes = crate::host::current().read(path).ok();
         let size = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
-            let svg = std::fs::read(path).ok().and_then(|b| usvg::Tree::from_data(&b, &usvg::Options::default()).ok());
+            let svg = bytes.and_then(|b| usvg::Tree::from_data(&b, &usvg::Options::default()).ok());
             svg.map(|t| (t.size().width().round() as u32, t.size().height().round() as u32))
         } else {
-            image::image_dimensions(path).ok()
+            // shortcut: reads the whole image to get its header; a remote host should answer with the size alone.
+            bytes.and_then(|b| image::ImageReader::new(std::io::Cursor::new(b)).with_guessed_format().ok()?.into_dimensions().ok())
         };
-        ImageInfo { size, bytes: std::fs::metadata(path).map_or(0, |m| m.len()) }
+        ImageInfo { size, bytes: crate::host::current().metadata(path).map_or(0, |m| m.size) }
     }
 }
 
@@ -291,6 +293,7 @@ fn on_save(text: &str, trim: bool, final_newline: bool) -> String {
 
 /// A save to run off the UI thread, from `Workspace::save` or `auto_save`; `Send`.
 pub struct SaveJob {
+    host: Arc<dyn Host>,
     pub path: PathBuf,
     text: String,
     /// From auto-save: the same error twice is reported once.
@@ -300,7 +303,7 @@ pub struct SaveJob {
 impl SaveJob {
     /// Blocking.
     pub fn run(&self) -> Result<(), String> {
-        std::fs::write(&self.path, &self.text).map_err(|e| format!("Cannot save {}: {e}", self.path.display()))
+        self.host.write(&self.path, self.text.as_bytes()).map_err(|e| format!("Cannot save {}: {e}", self.path.display()))
     }
 }
 
@@ -352,7 +355,7 @@ impl FileTab {
 
     /// Blocking: the file's text, or why it cannot be opened: "Binary file" (a NUL byte or not UTF-8), or the read error.
     pub fn load(path: &Path) -> Result<String, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+        let bytes = crate::host::current().read(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
         match String::from_utf8(bytes) {
             Ok(text) if !text.contains('\0') => Ok(text),
             _ => Err("Binary file".into()),
@@ -750,7 +753,7 @@ impl Workspace {
         }
         let f = self.tabs[ix].file_mut().filter(|f| !f.untitled)?; // an Untitled file needs a path first: `save_untitled_as`
         f.saving = Some(f.text.clone());
-        Some(SaveJob { path: f.path.clone(), text: f.text.clone(), auto: false })
+        Some(SaveJob { host: self.host.clone(), path: f.path.clone(), text: f.text.clone(), auto: false })
     }
 
     /// Installs a finished write; `false` with `last_error` set if it failed (the edits stay). Text typed

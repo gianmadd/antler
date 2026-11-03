@@ -104,8 +104,9 @@ impl Antler {
     /// VS Code's branch name box at the top, with its live "already exists" / "will be" line: it reads the local
     /// branches first. `then` gets the name sanitized by `branch_name`; an empty one does nothing, like dismissing the box.
     fn ask_name(&mut self, repo: PathBuf, value: String, window: &mut Window, cx: &mut Context<Self>, then: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static) {
+        let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let refs = cx.background_spawn(async move { crate::git::checkout_refs(&repo) }).await;
+            let refs = cx.background_spawn(async move { crate::host::scoped(&host, || crate::git::checkout_refs(&repo)) }).await;
             this.update_in(cx, |this, window, cx| match refs {
                 Err(e) => window.push_notification(Notification::error(e).title("git"), cx),
                 Ok(refs) => {
@@ -134,9 +135,10 @@ impl Antler {
 
     /// Lists the refs off the UI thread, then opens the picker.
     fn pick_ref(&mut self, repo: PathBuf, purpose: Purpose, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             let dir = repo.clone();
-            let refs = cx.background_spawn(async move { crate::git::checkout_refs(&dir).map(|r| (r, crate::git::branch(&dir))) }).await;
+            let refs = cx.background_spawn(async move { crate::host::scoped(&host, || crate::git::checkout_refs(&dir).map(|r| (r, crate::git::branch(&dir)))) }).await;
             this.update_in(cx, |this, window, cx| match refs {
                 Err(e) => window.push_notification(Notification::error(e).title("git"), cx),
                 Ok((refs, current)) => this.open_branch_popup(repo, purpose, refs, &current, window, cx),

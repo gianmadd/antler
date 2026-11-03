@@ -56,7 +56,7 @@ cargo test
 
 ## Project status
 
-Young and moving fast. macOS on Apple Silicon only, for now. Releases are published on GitHub (`v0.x`) and are ad-hoc signed.
+Young and moving fast. macOS on Apple Silicon only, for now. Releases are published on GitHub (`v0.x`) and are ad-hoc signed; each also carries `antler-server` for Linux, macOS and Windows (x86_64 and aarch64), which the app installs on a Remote host.
 
 ## Contributing
 
@@ -68,4 +68,4 @@ Young and moving fast. macOS on Apple Silicon only, for now. Releases are publis
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
 
-File and folder icons are from [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) (MIT, Material Extensions); see `assets/material-icons/`.
+The built-in file icon theme is Seti, from [Visual Studio Code](https://github.com/microsoft/vscode/tree/main/extensions/theme-seti) (MIT) and [seti-ui](https://github.com/jesseweed/seti-ui) (MIT, Jesse Weed); see `assets/seti/ThirdPartyNotices.txt`. Other icon and color themes install from a `.vsix` (for example from [Open VSX](https://open-vsx.org/?category=Themes)) and keep their own licenses.

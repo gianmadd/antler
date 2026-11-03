@@ -49,9 +49,10 @@ impl Antler {
 
     /// Reads the index and the file for the right side of `source`'s diff, off the UI thread.
     pub(crate) fn load_right(&mut self, source: DiffSource, cx: &mut Context<Self>) {
+        let host = self.ws.host.clone();
         cx.spawn(async move |this, cx| {
             let src = source.clone();
-            let (index, file) = cx.background_spawn(async move { src.load_right() }).await;
+            let (index, file) = cx.background_spawn(async move { crate::host::scoped(&host, || src.load_right()) }).await;
             this.update(cx, |this, cx| {
                 this.ws.set_right(&source, index, file);
                 this.sync_diff(cx);
@@ -86,9 +87,8 @@ impl Antler {
             if s.left.read(cx).value().as_ref() != index {
                 s.left.update(cx, |e, cx| e.set_value(index.to_string(), window, cx));
             }
-            let fill = |r: Range<usize>, hex: u32| {
-                let colour: Hsla = rgb(hex).into();
-                RangeDecoration::new(r).with_style(RangeDecorationStyle::Fill).with_color(colour.opacity(0.2))
+            let fill = |r: Range<usize>, key: usize| {
+                RangeDecoration::new(r).with_style(RangeDecorationStyle::Fill).with_color(c(key).opacity(0.2))
             };
             // shortcut: line starts rebuilt each frame (O(text)), as the quick diff's margin does
             let added = d.parsed.changes().into_iter().map(|c| c.lines);

@@ -1,15 +1,16 @@
-//! File and folder icons from Material Icon Theme (`assets/material-icons`), matched the way VS Code does.
-//! The SVGs are embedded and served under `material-icons/` by [`Assets`], next to gpui-kit's own icons.
+//! Assets (gpui-kit's icons, the toolbar icons it lacks, the deer mark) and the file icon theme in force (`workbench.iconTheme`):
+//! Seti built in, themes installed from a `.vsix`, or none. Lookups are `icon_themes`'; this module loads the theme,
+//! registers its font with the text system and draws the icon of a file or folder.
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
 use gpui_kit::{AssetSource, Result, SharedString};
-use serde::Deserialize;
 
-#[derive(rust_embed::RustEmbed)]
-#[folder = "assets/material-icons/icons"]
-struct Icons;
+use crate::icon_themes::{self, Icon, IconTheme};
 
 // Lucide icons outside gpui-kit's default bundle (Explorer and Git view header buttons).
 gpui_kit::assets::icon_assets!(Extra, [FilePlus, FolderPlus, CopyMinus, ListTree, List, CloudUpload, ListFilter]);
@@ -17,7 +18,7 @@ gpui_kit::assets::icon_assets!(Extra, [FilePlus, FolderPlus, CopyMinus, ListTree
 /// Asset path of the deer watermark of the empty tabs area; swap here (and in `load`) for the future SVG.
 pub const MARK: &str = "mark.png";
 
-/// gpui-kit's bundled icons plus the Material ones and the [`MARK`].
+/// gpui-kit's bundled icons plus the toolbar ones and the [`MARK`].
 pub struct Assets;
 
 impl AssetSource for Assets {
@@ -25,13 +26,10 @@ impl AssetSource for Assets {
         if path == MARK {
             return Ok(Some(Cow::Borrowed(include_bytes!("../assets/mark.png")))); // from assets/mark.svg, exported at 512px
         }
-        match path.strip_prefix("material-icons/") {
-            Some(file) => Ok(Icons::get(file).map(|f| f.data)),
-            // Extra first: gpui-kit's Assets answers a path it lacks with an Err, not None, so it can't come before
-            None => match Extra.load(path)? {
-                Some(svg) => Ok(Some(svg)),
-                None => gpui_kit::assets::Assets.load(path),
-            },
+        // Extra first: gpui-kit's Assets answers a path it lacks with an Err, not None, so it can't come before
+        match Extra.load(path)? {
+            Some(svg) => Ok(Some(svg)),
+            None => gpui_kit::assets::Assets.load(path),
         }
     }
 
@@ -40,156 +38,164 @@ impl AssetSource for Assets {
     }
 }
 
-/// The parts of the manifest (`dist/material-icons.json`) and of `languages.json` Antler reads.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Theme {
-    #[serde(default)]
-    icon_definitions: HashMap<String, Def>,
-    file_names: HashMap<String, String>,
-    file_extensions: HashMap<String, String>,
-    #[serde(default)]
-    folder_names: HashMap<String, String>,
-    #[serde(default)]
-    folder_names_expanded: HashMap<String, String>,
-    #[serde(default)]
-    file: String,
-    #[serde(default)]
-    folder: String,
-    #[serde(default)]
-    folder_expanded: String,
-    #[serde(default)]
-    root_folder: String,
-    #[serde(default)]
-    root_folder_expanded: String,
+/// An icon theme the user can pick: the id is the value of `workbench.iconTheme`.
+#[derive(Clone, Copy)]
+pub struct Entry {
+    pub id: &'static str,
+    pub label: &'static str,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Def {
-    icon_path: String,
-}
+static INSTALLED: RwLock<Vec<(Entry, PathBuf)>> = RwLock::new(Vec::new());
 
-/// VS Code matches names case-insensitively.
-fn lower(map: &mut HashMap<String, String>) {
-    *map = map.drain().map(|(k, v)| (k.to_lowercase(), v)).collect();
-}
-
-struct Tables {
-    theme: Theme,
-    langs: Theme,
-    /// Folder keys with a `/`, longest first: they match the end of a path.
-    nested: Vec<String>,
-}
-
-static TABLES: LazyLock<Tables> = LazyLock::new(|| {
-    let parse = |json| -> Theme {
-        let mut t: Theme = serde_json::from_str(json).expect("bundled icon tables are valid");
-        for map in [&mut t.file_names, &mut t.file_extensions, &mut t.folder_names, &mut t.folder_names_expanded] {
-            lower(map);
-        }
-        t
-    };
-    let theme = parse(include_str!("../assets/material-icons/material-icons.json"));
-    let langs = parse(include_str!("../assets/material-icons/languages.json"));
-    let mut nested: Vec<String> = theme.folder_names.keys().filter(|k| k.contains('/')).cloned().collect();
-    nested.sort_by_key(|k| std::cmp::Reverse(k.len()));
-    Tables { theme, langs, nested }
-});
-
-/// The dotted suffixes of a file name, longest first: `x.g.dart` gives `g.dart`, `dart`; `.env` gives `env`.
-fn suffixes(name: &str) -> impl Iterator<Item = &str> {
-    name.match_indices('.').map(move |(i, _)| &name[i + 1..])
-}
-
-/// Icon id for a file name: exact name, then longest extension, then VS Code language, then the generic file.
-pub fn file_icon(name: &str) -> &'static str {
-    let Tables { theme, langs, .. } = &*TABLES;
-    let name = name.to_lowercase();
-    let by_ext = |t: &'static Theme| suffixes(&name).find_map(|e| t.file_extensions.get(e));
-    theme.file_names.get(&name).or_else(|| by_ext(theme)).or_else(|| langs.file_names.get(&name)).or_else(|| by_ext(langs)).unwrap_or(&theme.file)
-}
-
-/// Icon id for a folder: keys with `/` against the end of the path, then the name, then the generic folder.
-pub fn folder_icon(path: &str, open: bool, root: bool) -> &'static str {
-    let Tables { theme, nested, .. } = &*TABLES;
-    if root {
-        return if open { &theme.root_folder_expanded } else { &theme.root_folder };
+/// The installed extensions' icon themes (see `themes::reload_installed`); the theme in force is loaded again at the next `apply`.
+/// shortcut: ids and labels are leaked (a settings dropdown wants `&'static str`), a few bytes per install.
+pub fn set_installed(list: Vec<crate::vsix::IconThemeEntry>) {
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    let list = list.into_iter().map(|t| (Entry { id: leak(t.id), label: leak(t.label) }, t.file)).collect();
+    if let Ok(mut l) = INSTALLED.write() {
+        *l = list;
     }
-    let path = path.to_lowercase();
-    let names = if open { &theme.folder_names_expanded } else { &theme.folder_names };
-    let name = path.rsplit('/').next().unwrap_or(&path);
-    // path keys before the bare name: the theme adds them to override it (`prisma/schema` over `schema`), as VS Code does
-    nested
-        .iter()
-        .find(|k| path == **k || path.ends_with(&format!("/{k}")))
-        .and_then(|k| names.get(k))
-        .or_else(|| names.get(name))
-        .unwrap_or(if open { &theme.folder_expanded } else { &theme.folder })
+    if let Ok(mut a) = ACTIVE.write() {
+        a.loaded = None; // same id, maybe new files
+    }
 }
 
-/// Asset path of an icon id, for `img`.
-pub fn path(icon: &str) -> SharedString {
-    let file = TABLES.theme.icon_definitions.get(icon).map_or("file.svg", |d| d.icon_path.rsplit('/').next().unwrap_or_default());
-    format!("material-icons/{file}").into()
+/// Seti, then the installed ones: what the pickers list (None is the picker's own row).
+pub fn themes() -> Vec<Entry> {
+    let installed = INSTALLED.read().map(|l| l.iter().map(|(e, _)| *e).collect::<Vec<_>>()).unwrap_or_default();
+    [Entry { id: icon_themes::SETI, label: "Seti (Visual Studio Code)" }].into_iter().chain(installed).collect()
+}
+
+struct Active {
+    /// The setting this was loaded for (`None`: no icons) and the colour mode.
+    loaded: Option<Option<String>>,
+    light: bool,
+    theme: Option<Arc<IconTheme>>,
+    /// Font id of the theme -> the family the text system knows it by.
+    families: HashMap<String, String>,
+}
+
+static ACTIVE: LazyLock<RwLock<Active>> = LazyLock::new(|| RwLock::new(Active { loaded: None, light: false, theme: None, families: HashMap::new() }));
+
+/// Font file (or "seti") -> family, so a font is registered once however often its theme is selected.
+static FAMILIES: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+
+/// Registers the font at `path` (the built-in Seti when `dir` is `None`) and returns its family name.
+fn register_font(path: &str, dir: Option<&Path>, cx: &App) -> Option<String> {
+    let file = dir.map_or_else(|| PathBuf::from("seti"), |d| d.join(path));
+    let mut known = FAMILIES.lock().ok()?;
+    if let Some((_, family)) = known.iter().find(|(f, _)| *f == file) {
+        return Some(family.clone());
+    }
+    let bytes = match dir {
+        None => icon_themes::SETI_FONT.to_vec(),
+        Some(_) => std::fs::read(&file).ok()?,
+    };
+    let sfnt = crate::woff::to_sfnt(&bytes)?;
+    let text = cx.text_system();
+    let before = text.all_font_names();
+    text.add_fonts(vec![Cow::Owned(sfnt)]).ok()?;
+    let family = text.all_font_names().into_iter().find(|n| !before.contains(n))?;
+    known.push((file, family.clone()));
+    Some(family)
+}
+
+/// Makes the theme `setting` names the one the icons come from (`None`: no icons; an unknown id: Seti), for the colour mode
+/// `light`; windows repaint when it changed. Cheap when nothing changed.
+pub fn apply(setting: Option<&str>, light: bool, cx: &mut App) {
+    let key = setting.map(str::to_owned);
+    {
+        let a = ACTIVE.read().expect("icon theme lock");
+        if a.loaded.as_ref() == Some(&key) && a.light == light {
+            return;
+        }
+    }
+    let installed = INSTALLED.read().ok().and_then(|l| l.iter().find(|(e, _)| Some(e.id) == setting).map(|(_, f)| f.clone()));
+    let loaded = match (setting, installed) {
+        (None, _) => None,
+        (Some(_), Some(file)) => {
+            let dir = file.parent().unwrap_or(Path::new("")).to_path_buf();
+            std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|j| IconTheme::parse(&j, &dir)).ok().map(|t| (t, Some(dir)))
+        }
+        (Some(_), None) => IconTheme::parse(icon_themes::SETI_JSON, Path::new("")).ok().map(|t| (t, None)),
+    };
+    let mut families = HashMap::new();
+    if let Some((theme, dir)) = &loaded {
+        for (id, font) in &theme.fonts {
+            families.extend(register_font(&font.path, dir.as_deref(), cx).map(|f| (id.clone(), f)));
+        }
+    }
+    if let Ok(mut a) = ACTIVE.write() {
+        *a = Active { loaded: Some(key), light, theme: loaded.map(|(t, _)| Arc::new(t)), families };
+    }
+    cx.refresh_windows();
+}
+
+/// 16px box with the icon of `pick`, or nothing at all when the theme has none (the row keeps its own alignment).
+fn draw(pick: impl Fn(&IconTheme, bool) -> Option<&Icon>) -> Div {
+    let a = ACTIVE.read().expect("icon theme lock");
+    let icon = a.theme.as_deref().and_then(|t| pick(t, a.light));
+    let Some(icon) = icon else { return div() };
+    let boxed = div().size(px(16.)).flex_none().flex().items_center().justify_center();
+    match icon {
+        // `img`, not `svg`: `svg` draws an alpha mask in the text colour, `img` keeps the SVG's colours
+        Icon::Image(path) => boxed.child(img(path.clone()).size(px(16.)).flex_none()),
+        Icon::Glyph { ch, color, font, size } => {
+            // 13px is the base size of VS Code's explorer labels, which a font's `size` percentage scales
+            let family = a.families.get(font).cloned();
+            boxed
+                .when_some(family, |el, f| el.font_family(f))
+                .text_size(px(13. * size / 100.))
+                .line_height(px(16.))
+                .text_color(color.map_or_else(|| crate::style::c(crate::style::FG), |c| rgb(c).into()))
+                .child(ch.to_string())
+        }
+    }
+}
+
+/// The file icon of a bare file name.
+pub fn file(name: &str) -> Div {
+    draw(|t, light| t.file(name, light))
+}
+
+/// The folder icon of a folder name.
+pub fn folder(name: &str, open: bool) -> Div {
+    draw(|t, light| t.folder(name, open, light))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::prelude::v1::test;
     use gpui_kit::assets::IconName;
 
+    /// The built-in Seti font through the real macOS text system: it registers, resolves by family and has the glyphs the theme uses.
     #[test]
-    fn files_match_name_then_longest_extension_then_generic() {
-        for (name, icon) in [
-            ("AGENTS.md", "agent"),
-            ("CLAUDE.md", "claude"),
-            ("SKILL.md", "skill"),
-            ("Cargo.toml", "toml"),
-            ("package.json", "nodejs"),
-            ("Dockerfile", "docker"),
-            (".env.local", "tune"),
-            ("x.g.dart", "dart_generated"),
-            ("main.dart", "dart"),
-            ("notes.md", "markdown"),
-            ("unknown.zzqq", "file"),
-            ("RECORD", "file"),
-        ] {
-            assert_eq!(file_icon(name), icon, "{name}");
+    fn seti_glyphs_resolve_in_the_real_text_system() {
+        use ::gpui::PlatformTextSystem as _;
+        let ts = gpui_apple::AppleTextSystem::new();
+        let before = ts.all_font_names();
+        ts.add_fonts(vec![Cow::Owned(crate::woff::to_sfnt(icon_themes::SETI_FONT).unwrap())]).unwrap();
+        let family = ts.all_font_names().into_iter().find(|n| !before.contains(n)).expect("a new family");
+        let id = ts.font_id(&::gpui::font(family.clone())).unwrap();
+        let theme = IconTheme::parse(icon_themes::SETI_JSON, Path::new("")).unwrap();
+        for name in ["a.md", "a.json", "Cargo.toml", "a.rs"] {
+            let Some(Icon::Glyph { ch, .. }) = theme.file(name, false) else { panic!("{name}: no glyph") };
+            assert!(ts.glyph_for_char(id, *ch).is_some(), "{name}: U+{:04X} missing in family {family}", *ch as u32);
         }
     }
 
     #[test]
-    fn language_is_the_fallback_after_extensions() {
-        // `.mxx` is not in the manifest's extensions; VS Code calls it C++
-        assert_eq!(file_icon("a.mxx"), "cpp");
-    }
-
-    #[test]
-    fn folders_match_path_suffix_then_name_then_generic() {
-        assert_eq!(folder_icon("/r/.github/workflows", false, false), "folder-gh-workflows");
-        assert_eq!(folder_icon("/r/.github/workflows", true, false), "folder-gh-workflows-open");
-        assert_eq!(folder_icon("/r/app/workflows", false, false), "folder");
-        assert_eq!(folder_icon("/r/prisma/schema", false, false), "folder-prisma", "a path key wins over the bare name");
-        assert_eq!(folder_icon("/r/app/schema", false, false), "folder-class");
-        assert_eq!(folder_icon("/r/node_modules", false, false), "folder-node");
-        assert_eq!(folder_icon("/r/src", true, false), "folder-src-open");
-        assert_eq!(folder_icon("/r/Services", false, false), "folder-controller");
-        assert_eq!(folder_icon("/r/zzqq", false, false), "folder");
-        assert_eq!(folder_icon("/r/zzqq", true, false), "folder-open");
-        assert_eq!(folder_icon("/r", false, true), "folder-root");
-        assert_eq!(folder_icon("/r", true, true), "folder-root-open");
-    }
-
-    #[test]
-    fn every_icon_path_is_embedded() {
-        for icon in ["agent", "latex", "folder-root-open"] {
-            assert!(Icons::get(path(icon).strip_prefix("material-icons/").unwrap()).is_some(), "{icon}");
-        }
+    fn the_toolbar_icons_and_the_mark_are_embedded() {
         // the Explorer / Git view header buttons: icons outside gpui-kit's default bundle
         for icon in [IconName::FilePlus, IconName::FolderPlus, IconName::CopyMinus, IconName::ListTree, IconName::List, IconName::CloudUpload, IconName::ListFilter, IconName::RefreshCw, IconName::Search] {
             assert!(Assets.load(&icon.path()).is_ok_and(|svg| svg.is_some()), "{}", icon.path());
         }
         assert!(Assets.load(MARK).unwrap().is_some_and(|png| png.starts_with(b"\x89PNG")));
+    }
+
+    #[test]
+    fn seti_comes_first_in_the_list() {
+        assert_eq!(themes()[0].id, "vs-seti");
     }
 }

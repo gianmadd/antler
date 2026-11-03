@@ -31,13 +31,13 @@ pub(crate) struct ConflictMarks {
 /// VS Code's `merge.*` colours: current #40C8AE, incoming #40A6FF, common ancestor #606060; headers at 50%
 /// (common 40%), content at 40% of that.
 fn colours(c: &Conflict) -> Vec<RangeDecoration> {
-    let fill = |r: &std::ops::Range<usize>, hex: u32, alpha: f32| {
-        let colour: Hsla = rgb(hex).into();
-        RangeDecoration::new(r.clone()).with_style(RangeDecorationStyle::Fill).with_color(colour.opacity(alpha))
+    let fill = |r: &std::ops::Range<usize>, key: usize, alpha: f32| {
+        RangeDecoration::new(r.clone()).with_style(RangeDecorationStyle::Fill).with_color(style::c(key).opacity(alpha))
     };
-    let mut out = vec![fill(&c.current_header, 0x40c8ae, 0.5), fill(&c.current, 0x40c8ae, 0.2)];
-    out.extend(c.base.as_ref().map(|b| fill(b, 0x606060, 0.16)));
-    out.extend([fill(&c.incoming, 0x40a6ff, 0.2), fill(&c.incoming_header, 0x40a6ff, 0.5)]);
+    let (cur, inc, base) = (style::MERGE_CUR, style::MERGE_INC, style::MERGE_BASE);
+    let mut out = vec![fill(&c.current_header, cur, 0.5), fill(&c.current, cur, 0.2)];
+    out.extend(c.base.as_ref().map(|b| fill(b, base, 0.16)));
+    out.extend([fill(&c.incoming, inc, 0.2), fill(&c.incoming_header, inc, 0.5)]);
     out
 }
 

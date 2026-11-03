@@ -20,6 +20,7 @@ Single-context: `GLOSSARY.md` + `docs/adr/` at the root. See `docs/agents/domain
 
 - Verified notes on the GPUI / gpui-component APIs the project uses: `docs/agents/gpui-notes.md` (read them before writing UI code; add what you discover).
 - Git: every feature behaves like VS Code with default settings (`docs/adr/0003-behave-like-vscode.md`); the same principle applies to the Explorer, the editor and tabs. Deliberate differences: `docs/vscode-differences.md`.
+- Files and git of the Root go through `host::Host` (crates `antler-host`, `antler-server`; rules and protocol: `docs/agents/remote.md`).
 - Tests cover the model (`src/workspace/` and the pure modules); the GPUI interface is checked by running the app.
 
 <!-- agents-repo-setup -->

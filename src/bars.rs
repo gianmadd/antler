@@ -65,6 +65,7 @@ impl Antler {
             .child(item(View::Explorer, style::files_icon(), "Explorer", "workbench.view.explorer", 0))
             .child(item(View::Git, style::git_icon(), "Git", "workbench.view.scm", count))
             .child(item(View::Search, Icon::new(IconName::Search), "Search", "workbench.view.search", 0))
+            .when(self.remote.is_some(), |el| el.child(item(View::Ports, Icon::new(IconName::Globe), "Ports", "~remote.forwardedPorts.focus", 0)))
             .child(div().flex_1())
             .child(self.manage_button(cx))
     }
@@ -74,23 +75,40 @@ impl Antler {
         let this = cx.entity().downgrade();
         let updates = cx.global::<crate::update::Enabled>().0;
         let palette = crate::keys::label(cx, "Command Palette", "workbench.action.showCommands");
+        let connect = crate::keys::label(cx, "Connect to Host…", "remote.ssh.connect");
         let (settings, check) = (crate::keys::label(cx, "Settings", "workbench.action.openSettings"), "Check for Updates…");
         let shortcuts = crate::keys::label(cx, "Keyboard Shortcuts", "workbench.action.openGlobalKeybindings");
+        let theme = crate::keys::label(cx, "Color Theme", "workbench.action.selectTheme");
+        let icon_theme = crate::keys::label(cx, "File Icon Theme", "workbench.action.selectIconTheme");
+        let install = crate::keys::label(cx, "Install Theme from VSIX…", "antler.installThemeFromVsix");
         div().w(px(48.)).h(px(44.)).flex().items_center().justify_center().child(
             Button::new("manage")
                 .ghost()
                 .icon(IconName::Settings)
                 .tooltip("Manage")
                 .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                    let (a, b, p, k) = (this.clone(), this.clone(), this.clone(), this.clone());
+                    let (a, b, p, k, th) = (this.clone(), this.clone(), this.clone(), this.clone(), this.clone());
+                    let (ic, vs, cn) = (this.clone(), this.clone(), this.clone());
                     let menu = menu.item(PopupMenuItem::new(palette.clone()).on_click(move |_, window, cx| {
                         p.update(cx, |t, cx| t.command_palette(&crate::goto_view::CommandPalette, window, cx)).ok();
+                    }));
+                    let menu = menu.item(PopupMenuItem::new(connect.clone()).on_click(move |_, window, cx| {
+                        cn.update(cx, |t, cx| t.connect_to_host(&crate::ConnectToHost, window, cx)).ok();
                     }));
                     let menu = menu.item(PopupMenuItem::new(settings.clone()).on_click(move |_, window, cx| {
                         a.update(cx, |t, cx| t.open_settings(&crate::OpenSettings, window, cx)).ok();
                     }));
                     let menu = menu.item(PopupMenuItem::new(shortcuts.clone()).on_click(move |_, window, cx| {
                         k.update(cx, |t, cx| t.open_keyboard_shortcuts(&crate::OpenKeyboardShortcuts, window, cx)).ok();
+                    }));
+                    let menu = menu.item(PopupMenuItem::new(theme.clone()).on_click(move |_, window, cx| {
+                        th.update(cx, |t, cx| t.select_theme(&crate::theme_view::SelectTheme, window, cx)).ok();
+                    }));
+                    let menu = menu.item(PopupMenuItem::new(icon_theme.clone()).on_click(move |_, window, cx| {
+                        ic.update(cx, |t, cx| t.select_icon_theme(&crate::theme_view::SelectIconTheme, window, cx)).ok();
+                    }));
+                    let menu = menu.item(PopupMenuItem::new(install.clone()).on_click(move |_, window, cx| {
+                        vs.update(cx, |t, cx| t.install_theme(&crate::theme_view::InstallThemeFromVsix, window, cx)).ok();
                     }));
                     menu.when(updates, |menu| {
                         menu.item(PopupMenuItem::new(check).on_click(move |_, window, cx| {
@@ -139,6 +157,8 @@ impl Antler {
             .border_color(c(LINE_SOFT))
             .text_color(c(FG_DIM))
             .text_size(px(11.5))
+            .children(self.remote_indicator(cx))
+            .children(self.ports_indicator(cx))
             .when_some(section, |el, s| {
                 let sync = self.sync_button("status-sync", s, cx);
                 let repo = s.repo.path.clone();
@@ -156,6 +176,42 @@ impl Antler {
             })
             .child(div().flex_1())
             .children(right.into_iter().map(|t| div().flex_none().child(t)))
+    }
+}
+
+impl Antler {
+    /// The bottom-left item of a Remote window, like VS Code's: the host (or what the connection is doing); a click
+    /// opens Connect to Host… and Close Remote Connection.
+    fn remote_indicator(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        use antler_host::remote::Status;
+        let r = self.remote.as_ref()?;
+        let text = match &r.status {
+            Status::Connected => format!("SSH: {}", r.host),
+            Status::Reconnecting { .. } if !r.started => format!("Connecting to {}…", r.host),
+            Status::Reconnecting { .. } => format!("Reconnecting to {}…", r.host),
+            Status::GaveUp(_) => format!("Disconnected from {}", r.host),
+        };
+        let this = cx.entity().downgrade();
+        let connect = crate::keys::label(cx, "Connect to Host…", "remote.ssh.connect");
+        Some(
+            div().flex_none().h_full().mx(px(-10.)).child(
+                Button::new("remote-indicator")
+                    .ghost()
+                    .compact()
+                    .label(text)
+                    .bg(c(ACCENT))
+                    .text_color(c(crate::style::ON_ACCENT))
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                        let (a, b) = (this.clone(), this.clone());
+                        menu.item(PopupMenuItem::new(connect.clone()).on_click(move |_, window, cx| {
+                            a.update(cx, |t, cx| t.connect_to_host(&crate::ConnectToHost, window, cx)).ok();
+                        }))
+                        .item(PopupMenuItem::new("Close Remote Connection").on_click(move |_, window, cx| {
+                            b.update(cx, |t, cx| t.close_remote_connection(&crate::CloseRemoteConnection, window, cx)).ok();
+                        }))
+                    }),
+            ),
+        )
     }
 }
 

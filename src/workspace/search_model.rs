@@ -50,7 +50,7 @@ impl Workspace {
             return None;
         }
         let repos = self.sections.iter().map(|s| s.repo.path.clone()).collect();
-        Some(SearchJob { id: self.search.last, root: self.root.clone(), repos, query, limit: search::LIMIT, cancel: self.search.cancel.clone() })
+        Some(SearchJob { id: self.search.last, host: self.host.clone(), root: self.root.clone(), repos, query, limit: search::LIMIT, cancel: self.search.cancel.clone() })
     }
 
     /// After a rescan: with the Search view open and a query typed, the same search again (files may have changed).
@@ -107,7 +107,7 @@ impl Workspace {
                     Err(e) => self.last_error = Some(e),
                     }
                 }
-                None => jobs.push(search::ReplaceJob { path, query: query.clone(), with: with.clone(), preserve_case, line: line.map(|l| l.0) }),
+                None => jobs.push(search::ReplaceJob { host: self.host.clone(), path, query: query.clone(), with: with.clone(), preserve_case, line: line.map(|l| l.0) }),
             }
         }
         jobs

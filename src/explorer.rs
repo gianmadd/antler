@@ -50,9 +50,10 @@ impl ExplorerState {
 impl Antler {
     /// Reads an expanded Explorer folder off the UI thread.
     pub(crate) fn read_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let host = self.ws.host.clone();
         cx.spawn(async move |this, cx| {
             let d = dir.clone();
-            let entries = cx.background_spawn(async move { workspace::read_dir(&d) }).await;
+            let entries = cx.background_spawn(async move { crate::host::scoped(&host, || workspace::read_dir(&d)) }).await;
             this.update(cx, |this, cx| {
                 if let Some(next) = this.ws.set_dir(dir, entries) {
                     this.read_dir(next, cx);

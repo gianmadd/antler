@@ -2,16 +2,19 @@ mod bars;
 mod branch_view;
 mod conflict_view;
 mod dialogs;
-mod discovery;
+use antler_host::discovery;
 mod editing;
 mod explorer;
 mod git;
 mod git_panel;
 mod goto;
+mod host;
 mod goto_view;
 mod palette;
+mod ports_view;
 mod graph;
 mod graph_view;
+mod icon_themes;
 mod icons;
 mod keybindings_view;
 mod keys;
@@ -21,16 +24,23 @@ mod quick_diff;
 mod search;
 mod search_view;
 mod recent;
+mod remote_view;
 mod settings;
 mod settings_view;
+mod ssh;
 mod side_diff;
 mod stash_view;
 mod state;
 mod style;
 mod sync_view;
 mod tabs;
+mod theme_import;
+mod theme_view;
+mod themes;
 mod update;
+mod vsix;
 mod windows;
+mod woff;
 #[cfg(test)]
 mod testing;
 mod workspace;
@@ -39,7 +49,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use notify::Watcher as _;
 
 use gpui_kit::component::{
     TitleBar, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex,
@@ -58,6 +67,7 @@ use workspace::{GitRow, Op, View, Workspace};
 actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch]);
 actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts]);
 actions!(antler, [NewWindow, CloseWindow, MinimizeWindow, FocusNextWindow]);
+use remote_view::{CloseRemoteConnection, ConnectToHost, RemoteWin};
 
 /// File → Open Recent → a folder.
 #[derive(Clone, PartialEq, Action)]
@@ -89,7 +99,7 @@ fn set_menus(cx: &mut App) {
         keys::checked_item("antler.toggleMinimapCharacters", cx.global::<minimap_view::RenderCharacters>().0),
     ]);
     let layout = Menu::new("Editor Layout").items([keys::item("workbench.action.splitEditor"), keys::item("workbench.action.splitEditorDown")]);
-    let mut windows: Vec<MenuItem> = cx.global::<Windows>().0.iter().map(|e| MenuItem::action(windows::title(&e.root), FocusWindow(e.id))).collect();
+    let mut windows: Vec<MenuItem> = cx.global::<Windows>().0.iter().map(|e| MenuItem::action(windows::title(e.host.as_deref(), &e.root), FocusWindow(e.id))).collect();
     let (mut recent, mut minimap, mut layout) = (Some(open_recent), Some(minimap), Some(layout));
     // the first menu is the macOS app menu
     let app = Menu::new("Antler").items(
@@ -141,6 +151,10 @@ struct Antler {
     /// The window's id in `Windows`.
     id: u64,
     ws: Workspace,
+    /// A Remote window: its host and connection (the Workspace's host is the same connection).
+    remote: Option<RemoteWin>,
+    /// The Connect to Host… popup while it is open.
+    picker: Option<remote_view::Picker>,
     loading: bool,
     /// A rescan was asked for during the running one (e.g. an auto-save): run another when it ends.
     stale: bool,
@@ -171,7 +185,7 @@ struct Antler {
     /// ...and whether that session started on a word (empty selection): it then matches whole words, with case.
     cursors_word: bool,
     /// Watches the Root; replaced when the Root changes, dropping it stops its events.
-    watcher: Option<notify::RecommendedWatcher>,
+    watcher: Option<host::WatchGuard>,
     /// Search view: the query field (its text becomes `ws.search.query.text`).
     query: (Entity<InputState>, Subscription),
     /// Search view: the Replace, "files to include" and "files to exclude" fields.
@@ -188,6 +202,9 @@ struct Antler {
     git_picked: Option<(String, PathBuf, String)>,
     /// The Cmd+P popup while it is open.
     goto: Option<goto_view::GoToPopup>,
+    /// The Color Theme picker while it is open.
+    theme_popup: Option<theme_view::ThemePopup>,
+    icon_popup: Option<theme_view::IconPopup>,
     /// The ids of the commands run from the Command palette, newest first.
     palette_recent: Vec<String>,
     /// The stash message box or picker while it is open.
@@ -209,10 +226,12 @@ struct Antler {
     /// The Keyboard Shortcuts tab: its search field, the chosen row and the key capture.
     shortcuts: keybindings_view::State,
     _settings_sub: Subscription,
+    /// With `window.autoDetectColorScheme`, the theme follows the macOS appearance.
+    _appearance_sub: Subscription,
 }
 
 impl Antler {
-    fn new(ws: Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(ws: Workspace, remote: Option<RemoteWin>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx); // so Cmd+W reaches `close_tab` before anything else has focus
         let this = cx.entity().downgrade();
@@ -229,11 +248,13 @@ impl Antler {
         let initial = cx.global::<settings::Current>().0.clone();
         let id = window.window_handle().window_id().as_u64();
         let me = (window.window_handle(), cx.entity().downgrade());
-        cx.global_mut::<Windows>().0.add(id, ws.root.clone(), me);
+        cx.global_mut::<Windows>().0.add(id, remote.as_ref().map(|r| r.host.clone()), ws.root.clone(), me);
         set_menus(cx);
         let mut this = Antler {
             id,
             ws,
+            remote,
+            picker: None,
             loading: false,
             stale: false,
             group_ui: HashMap::new(),
@@ -260,6 +281,8 @@ impl Antler {
             git_focus: cx.focus_handle(),
             git_picked: None,
             goto: None,
+            theme_popup: None,
+            icon_popup: None,
             palette_recent: ws_recent,
             stash: None,
             switcher: None,
@@ -271,12 +294,21 @@ impl Antler {
             applied: initial,
             shortcuts: keybindings_view::State::new(window, cx),
             _settings_sub: cx.observe_global_in::<settings::Current>(window, |this, window, cx| this.apply_settings(window, cx)),
+            _appearance_sub: window.observe_window_appearance(|window, cx| style::apply(window.appearance() == WindowAppearance::Dark, cx)),
         };
         this.sync_diff(cx); // the first group's diff view
-        if this.ws.has_folder() {
+        // a Remote window that is not connected yet (restored) starts when `remote_status` says so
+        if this.ws.has_folder() && this.remote.as_ref().is_none_or(|r| r.remote.is_connected()) {
+            if let Some(r) = &mut this.remote {
+                r.started = true;
+            }
             this.watch(window, cx);
+            if this.remote.is_some() {
+                this.start_ports(window, cx); // `remote_status` only does it for the first connection it sees
+            }
             this.refresh(window, cx);
         }
+        this.supervise_remote(window, cx);
         this.auto_fetch(window, cx);
         if cx.global::<update::Enabled>().0 {
             this.auto_update_check(window, cx);
@@ -286,7 +318,14 @@ impl Antler {
 
     /// What this window keeps across a restart.
     fn window_save(&self) -> WindowSave {
-        WindowSave { root: self.ws.root.clone(), layout: self.ws.layout_state(), untitled: self.ws.untitled_state() }
+        WindowSave {
+            host: self.remote.as_ref().map(|r| r.host.clone()),
+            root: self.ws.root.clone(),
+            // a restored Remote window that never connected still has the layout it was given
+            layout: self.ws.layout_state().or_else(|| self.remote.as_ref().and_then(|r| r.layout.clone())),
+            untitled: self.ws.untitled_state(),
+            forwarded: self.remote.as_ref().map(|r| r.ports.user_targets()).unwrap_or_default(),
+        }
     }
 
     /// ⇧⌘W or the red button: asks about unsaved tabs (Untitled files too), then closes this window only; the app stays,
@@ -362,13 +401,9 @@ impl Antler {
     /// once the model's debounce has passed.
     fn watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (tx, rx) = async_channel::unbounded();
-        let watcher = notify::recommended_watcher(move |e: notify::Result<notify::Event>| {
-            for path in e.map(|e| e.paths).unwrap_or_default() {
-                tx.send_blocking(path).ok();
-            }
-        });
+        let watcher = self.ws.host.watch(&self.ws.root, Box::new(move |path| drop(tx.send_blocking(path))));
         // replacing the old watcher drops its sender, which ends its loop below
-        self.watcher = match watcher.and_then(|mut w| w.watch(&self.ws.root, notify::RecursiveMode::Recursive).map(|()| w)) {
+        self.watcher = match watcher {
             Ok(w) => Some(w),
             Err(e) => {
                 let e = format!("Cannot watch {} for changes: {e}", self.ws.root.display());
@@ -416,6 +451,10 @@ impl Antler {
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.ws.has_folder() {
             return; // Close Folder while a scan ran: nothing left to scan
+        }
+        // a scan with no connection finds nothing, which would empty the panels; the reconnect refreshes
+        if self.remote.as_ref().is_some_and(|r| !r.remote.is_connected()) {
+            return;
         }
         if self.loading {
             self.stale = true;
@@ -520,6 +559,9 @@ impl Antler {
 
     /// Cmd+O / File → Open Folder…: the chosen folder replaces the Root in this window.
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            return self.open_remote_folder(window, cx); // a folder of the same host, not of this Mac
+        }
         let options = PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open".into()) };
         let picked = cx.prompt_for_paths(options);
         cx.spawn_in(window, async move |this, cx| {
@@ -539,13 +581,15 @@ impl Antler {
     /// Replaces the Root with `root` (asking about unsaved tabs first) and puts it on top of the recent folders.
     fn open_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // a folder shown by another window is focused there, like VS Code
-        if let Some(other) = cx.global::<Windows>().0.with_folder(&root).filter(|e| e.id != self.id).map(|e| e.view.0) {
+        if let Some(other) = cx.global::<Windows>().0.with_folder(self.remote.as_ref().map(|r| r.host.as_str()), &root).filter(|e| e.id != self.id).map(|e| e.view.0) {
             other.update(cx, |_, window, _| window.activate_window()).ok();
             return;
         }
         self.confirm_unsaved(self.ws.dirty_tabs(), window, cx, move |this, window, cx| {
             this.ws.set_root(root.clone());
-            recent::add(&recent::default_path(), &root);
+            if this.remote.is_none() {
+                recent::add(&recent::default_path(), &root); // shortcut: no recent folders on a host
+            }
             cx.global_mut::<Windows>().0.set_root(this.id, root.clone());
             set_menus(cx);
             this.watch(window, cx);
@@ -645,6 +689,7 @@ impl Render for Antler {
             }
             Some(View::Explorer) => Some(self.explorer(cx).into_any_element()),
             Some(View::Search) => Some(self.search_view(cx).into_any_element()),
+            Some(View::Ports) => Some(self.ports_view(cx).into_any_element()),
             None => None,
         };
         let content = match side {
@@ -656,6 +701,10 @@ impl Render for Antler {
         };
         let status = self.status_bar(cx);
         let name = self.ws.root.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = match &self.remote {
+            Some(r) => format!("{name} [SSH: {}]", r.host),
+            None => name,
+        };
         v_flex()
             .size_full()
             .track_focus(&self.focus)
@@ -670,6 +719,8 @@ impl Render for Antler {
             .on_action(cx.listener(Self::open_keyboard_shortcuts))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_recent))
+            .on_action(cx.listener(Self::connect_to_host))
+            .on_action(cx.listener(Self::close_remote_connection))
             // only with a folder open: File → Close Folder is greyed out otherwise (the menu asks if the action is available)
             .when(self.ws.has_folder(), |el| el.on_action(cx.listener(Self::close_folder)))
             .on_action(cx.listener(Self::show_explorer))
@@ -677,9 +728,15 @@ impl Render for Antler {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::show_search))
+            .on_action(cx.listener(Self::show_ports))
+            .on_action(cx.listener(Self::forward_a_port))
+            .on_action(cx.listener(Self::stop_forwarding_port))
             .on_action(cx.listener(Self::go_to_file))
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::go_to_line))
+            .on_action(cx.listener(Self::select_theme))
+            .on_action(cx.listener(Self::select_icon_theme))
+            .on_action(cx.listener(Self::install_theme))
             .on_action(cx.listener(Self::toggle_minimap))
             .on_action(cx.listener(Self::toggle_render_characters))
             .map(|el| Self::tab_actions(el, cx))
@@ -701,6 +758,9 @@ impl Render for Antler {
             })
             .child(status)
             .children(self.go_to_popup(cx))
+            .children(self.picker_popup(cx))
+            .children(self.theme_popup(cx))
+            .children(self.icon_popup(cx))
             .children(self.stash_popup(cx))
             .children(self.recent_popup(cx))
             .children(self.branch_popup(cx))
@@ -710,12 +770,39 @@ impl Render for Antler {
 /// Opens a window for `save`: a workspace with the settings, the saved Untitled files and editor groups, the graph's
 /// branch choices. Each new window is offset from the last, like VS Code's.
 fn new_window(cx: &mut App, save: WindowSave, error: Option<String>) {
+    open_window(cx, save, error, None);
+}
+
+/// A Remote window on `root` of `host`, over the connection the picker made.
+fn new_remote_window(cx: &mut App, host: String, root: PathBuf, remote: std::sync::Arc<antler_host::remote::Remote>) {
+    open_window(cx, WindowSave { host: Some(host), ..WindowSave::folder(root) }, None, Some(remote));
+}
+
+/// `live`: the connection of a Remote window being opened from the picker; a saved one reconnects by itself.
+fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, live: Option<std::sync::Arc<antler_host::remote::Remote>>) {
+    let mut link = None;
+    if let Some(host) = save.host.clone() {
+        match live.map(Ok).unwrap_or_else(|| ssh::Target::parse(&host).map(|t| {
+            let c = std::sync::Arc::new(ssh::SshConnector::new(t));
+            std::sync::Arc::new(antler_host::remote::Remote::lazy(std::sync::Arc::new(move || c.connect())))
+        })) {
+            Ok(remote) => link = Some(RemoteWin { host, remote, status: antler_host::remote::Status::Connected, started: false, layout: None, ports: Default::default(), restore: std::mem::take(&mut save.forwarded) }),
+            Err(e) => {
+                error = Some(format!("Cannot reopen the window on {host}: {e}"));
+                save = WindowSave::default();
+            }
+        }
+    }
     let s = cx.global::<settings::Current>().0.clone();
-    let root = std::fs::canonicalize(&save.root).unwrap_or(save.root); // watcher events carry canonical paths
+    // watcher events carry canonical paths; a path on a host is the host's to say
+    let root = if link.is_some() { save.root } else { std::fs::canonicalize(&save.root).unwrap_or(save.root) };
     if std::env::var_os("ANTLER_DEBUG").is_some() {
         eprintln!("antler: new window on {:?}", root);
     }
     let mut ws = Workspace::new(root);
+    if let Some(l) = &link {
+        ws.host = l.remote.clone();
+    }
     let mut restored = Vec::new(); // the tabs of a split layout, to read once there is a window
     ws.apply_settings(&s);
     ws.last_error = error; // shown after the first scan
@@ -723,7 +810,12 @@ fn new_window(cx: &mut App, save: WindowSave, error: Option<String>) {
     ws.state_file = state::default_path();
     if let Some(f) = ws.state_file.clone() {
         ws.graph.load_filters(&state::graph_filters(&f));
-        restored = save.layout.map(|l| ws.restore_layout(&l)).unwrap_or_default();
+        match &mut link {
+            // reading the tabs needs the connection: `remote_status` does it
+            Some(l) if !l.remote.is_connected() => l.layout = save.layout,
+            // shortcut: `restore_layout` asks the host about each file on the UI thread (a round trip each)
+            _ => restored = save.layout.map(|l| ws.restore_layout(&l)).unwrap_or_default(),
+        }
     }
     ws.restore_untitled(save.untitled);
     // the system title bar is hidden; `TitleBar` draws a dark one under the traffic lights
@@ -735,7 +827,7 @@ fn new_window(cx: &mut App, save: WindowSave, error: Option<String>) {
     let bench_open = std::env::var("ANTLER_BENCH_OPEN").unwrap_or_default();
     gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| {
-            let mut antler = Antler::new(ws, window, cx);
+            let mut antler = Antler::new(ws, link, window, cx);
             for ix in restored {
                 antler.load_tab(ix, cx);
             }
@@ -756,7 +848,7 @@ fn open_folder_window(cx: &mut App, root: PathBuf) {
         return;
     }
     recent::add(&recent::default_path(), &root);
-    match cx.global::<Windows>().0.with_folder(&root).map(|e| e.view.0) {
+    match cx.global::<Windows>().0.with_folder(None, &root).map(|e| e.view.0) {
         Some(handle) => {
             if std::env::var_os("ANTLER_DEBUG").is_some() {
                 eprintln!("antler: focus the window on {:?}", root);
@@ -811,9 +903,11 @@ fn main() {
     });
     app.run(move |cx| {
         gpui_kit::init(cx);
-        style::apply(cx);
-        gpui_kit::component::Theme::update(cx, |t| t.font_size = px(s.ui_font_size));
         cx.set_global(settings::Current(s));
+        themes::reload_installed();
+        style::apply(cx.window_appearance() == WindowAppearance::Dark, cx);
+        // a theme change in settings.json (or the picker's write) reaches every window at once; the system appearance matters with autoDetectColorScheme
+        cx.observe_global::<settings::Current>(|cx| style::apply(cx.window_appearance() == WindowAppearance::Dark, cx)).detach();
         if !file.as_os_str().is_empty() {
             settings::watch(cx, file);
         }

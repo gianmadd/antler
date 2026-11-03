@@ -11,9 +11,15 @@ use crate::settings::RestoreWindows;
 /// groups of a split, the Untitled files.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WindowSave {
+    /// A Remote window: the host (`Host` of ssh_config or `user@host:port`); `root` is then a path on that host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     pub root: PathBuf,
     #[serde(default)]
     pub layout: Option<serde_json::Value>,
+    /// A Remote window: the ports the user forwarded (`host:port`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwarded: Vec<String>,
     #[serde(default)]
     pub untitled: Vec<(String, String)>,
 }
@@ -31,6 +37,7 @@ impl WindowSave {
 
 pub struct Entry<V> {
     pub id: u64,
+    pub host: Option<String>,
     /// Empty: the window has no folder.
     pub root: PathBuf,
     pub view: V,
@@ -46,9 +53,9 @@ impl<V> Default for Registry<V> {
 }
 
 impl<V> Registry<V> {
-    pub fn add(&mut self, id: u64, root: PathBuf, view: V) {
+    pub fn add(&mut self, id: u64, host: Option<String>, root: PathBuf, view: V) {
         self.remove(id);
-        self.0.push(Entry { id, root, view });
+        self.0.push(Entry { id, host, root, view });
     }
 
     pub fn remove(&mut self, id: u64) {
@@ -69,9 +76,9 @@ impl<V> Registry<V> {
         self.0.len()
     }
 
-    /// The window that shows `root`.
-    pub fn with_folder(&self, root: &Path) -> Option<&Entry<V>> {
-        (!root.as_os_str().is_empty()).then(|| self.0.iter().find(|e| e.root == root)).flatten()
+    /// The window that shows `root` (of `host`: the same path on two machines is two folders).
+    pub fn with_folder(&self, host: Option<&str>, root: &Path) -> Option<&Entry<V>> {
+        (!root.as_os_str().is_empty()).then(|| self.0.iter().find(|e| e.root == root && e.host.as_deref() == host)).flatten()
     }
 
     /// ⌘`: the window opened after `id`, wrapping around; none when it is the only one.
@@ -81,11 +88,15 @@ impl<V> Registry<V> {
     }
 }
 
-/// The Window menu's label for a window.
-pub fn title(root: &Path) -> String {
-    match root.file_name() {
+/// The label of a window (Window menu, title bar): the folder's name, `[SSH: host]` after it for a Remote window.
+pub fn title(host: Option<&str>, root: &Path) -> String {
+    let name = match root.file_name() {
         Some(name) => name.to_string_lossy().into_owned(),
         None => "No Folder".into(),
+    };
+    match host {
+        Some(host) => format!("{name} [SSH: {host}]"),
+        None => name,
     }
 }
 
@@ -98,11 +109,12 @@ pub fn startup_windows(mode: &RestoreWindows, saved: Vec<WindowSave>, open: Opti
     let mut seen = HashSet::new();
     let mut list: Vec<WindowSave> = saved
         .into_iter()
-        .map(|w| if w.root.as_os_str().is_empty() || w.root.is_dir() { w } else { WindowSave { untitled: w.untitled, ..Default::default() } })
-        .filter(|w| !w.is_empty() && (w.root.as_os_str().is_empty() || seen.insert(w.root.clone())))
+        // a Remote window's folder cannot be checked here: it reconnects, and says so if the folder is gone
+        .map(|w| if w.host.is_some() || w.root.as_os_str().is_empty() || w.root.is_dir() { w } else { WindowSave { untitled: w.untitled, ..Default::default() } })
+        .filter(|w| !w.is_empty() && (w.root.as_os_str().is_empty() || seen.insert((w.host.clone(), w.root.clone()))))
         .collect();
     if let Some(root) = open {
-        match list.iter().position(|w| w.root == root) {
+        match list.iter().position(|w| w.host.is_none() && w.root == root) {
             Some(i) => {
                 let w = list.remove(i);
                 list.push(w);
@@ -139,7 +151,7 @@ mod tests {
     fn registry(roots: &[&str]) -> Registry<()> {
         let mut r = Registry::default();
         for (i, root) in roots.iter().enumerate() {
-            r.add(i as u64 + 1, PathBuf::from(root), ());
+            r.add(i as u64 + 1, None, PathBuf::from(root), ());
         }
         r
     }
@@ -147,13 +159,13 @@ mod tests {
     #[test]
     fn finds_the_window_that_has_a_folder() {
         let mut r = registry(&["/a", "", "/b"]);
-        assert_eq!(r.with_folder(Path::new("/b")).map(|e| e.id), Some(3));
-        assert!(r.with_folder(Path::new("/c")).is_none());
-        assert!(r.with_folder(Path::new("")).is_none(), "windows with no folder do not match each other");
+        assert_eq!(r.with_folder(None, Path::new("/b")).map(|e| e.id), Some(3));
+        assert!(r.with_folder(None, Path::new("/c")).is_none());
+        assert!(r.with_folder(None, Path::new("")).is_none(), "windows with no folder do not match each other");
         r.set_root(2, "/c".into());
-        assert_eq!(r.with_folder(Path::new("/c")).map(|e| e.id), Some(2));
+        assert_eq!(r.with_folder(None, Path::new("/c")).map(|e| e.id), Some(2));
         r.remove(2);
-        assert!(r.with_folder(Path::new("/c")).is_none());
+        assert!(r.with_folder(None, Path::new("/c")).is_none());
     }
 
     #[test]
@@ -166,8 +178,9 @@ mod tests {
 
     #[test]
     fn titles_are_the_folder_name() {
-        assert_eq!(title(Path::new("/x/antler")), "antler");
-        assert_eq!(title(Path::new("")), "No Folder");
+        assert_eq!(title(None, Path::new("/x/antler")), "antler");
+        assert_eq!(title(None, Path::new("")), "No Folder");
+        assert_eq!(title(Some("dev"), Path::new("/x/antler")), "antler [SSH: dev]");
     }
 
     fn dirs(names: &[&str]) -> (tempfile::TempDir, Vec<PathBuf>) {
@@ -206,6 +219,19 @@ mod tests {
         let list = startup_windows(&RestoreWindows::All, vec![gone, gone_empty, WindowSave::folder(d[0].clone()), WindowSave::folder(d[0].clone())], None);
         assert_eq!(roots(&list), [PathBuf::new(), d[0].clone()]);
         assert_eq!(list[0].untitled.len(), 1);
+    }
+
+    #[test]
+    fn a_remote_window_is_not_checked_on_this_disk_and_is_not_the_local_folder_of_the_same_path() {
+        let remote = WindowSave { host: Some("dev".into()), root: "/no/such/folder/here".into(), ..Default::default() };
+        let list = startup_windows(&RestoreWindows::All, vec![remote.clone(), remote.clone()], None);
+        assert_eq!(list, [remote.clone()], "kept (and once)");
+        let mut r = registry(&["/a"]);
+        r.add(2, Some("dev".into()), "/a".into(), ());
+        assert_eq!(r.with_folder(Some("dev"), Path::new("/a")).map(|e| e.id), Some(2));
+        assert_eq!(r.with_folder(None, Path::new("/a")).map(|e| e.id), Some(1));
+        let json = serde_json::to_string(&WindowSave::folder("/a".into())).unwrap();
+        assert!(!json.contains("host"), "a local window saves as before");
     }
 
     #[test]

@@ -297,9 +297,10 @@ impl Antler {
     pub(crate) fn load_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(path) = self.ws.tabs[ix].path().map(std::path::Path::to_path_buf) else { return };
         if self.ws.tabs[ix].image().is_some_and(|i| i.info.is_none()) {
+            let host = self.ws.host.clone();
             cx.spawn(async move |this, cx| {
                 let p = path.clone();
-                let info = cx.background_spawn(async move { workspace::ImageTab::load(&p) }).await;
+                let info = cx.background_spawn(async move { crate::host::scoped(&host, || workspace::ImageTab::load(&p)) }).await;
                 this.update(cx, |this, cx| {
                     this.ws.set_image(&path, info);
                     cx.notify();
@@ -308,9 +309,10 @@ impl Antler {
             })
             .detach();
         } else if self.ws.tabs[ix].file().is_some_and(|f| f.loading) {
+            let host = self.ws.host.clone();
             cx.spawn(async move |this, cx| {
                 let p = path.clone();
-                let text = cx.background_spawn(async move { workspace::FileTab::load(&p) }).await;
+                let text = cx.background_spawn(async move { crate::host::scoped(&host, || workspace::FileTab::load(&p)) }).await;
                 this.update(cx, |this, cx| {
                     this.ws.set_file(&path, text);
                     this.load_quick(path, cx);
@@ -495,9 +497,10 @@ impl Antler {
 
     /// Loads `source`'s diff on a background thread into its tab.
     pub(crate) fn load_diff(&mut self, source: workspace::DiffSource, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.ws.host.clone();
         cx.spawn_in(window, async move |this, cx| {
             let src = source.clone();
-            let patch = cx.background_spawn(async move { src.load() }).await;
+            let patch = cx.background_spawn(async move { crate::host::scoped(&host, || src.load()) }).await;
             this.update_in(cx, |this, window, cx| {
                 this.ws.set_diff(&source, patch);
                 if let Some(e) = this.ws.last_error.take() {
@@ -1146,13 +1149,13 @@ fn image_view(tab: &workspace::ImageTab) -> AnyElement {
         let scale = (bounds.size.width.as_f32() / w).min(bounds.size.height.as_f32() / h).min(1.);
         let (w, h) = (w * scale, h * scale);
         let image = Bounds::new(bounds.center() - point(px(w / 2.), px(h / 2.)), size(px(w), px(h)));
-        window.paint_quad(fill(image, rgb(0x2a2a2a)));
+        window.paint_quad(fill(image, c(style::CHECK_A)));
         let cell = 8.;
         let (cols, rows) = ((w / cell).ceil() as usize, (h / cell).ceil() as usize);
         for (x, y) in (0..rows).flat_map(|y| (0..cols).map(move |x| (x, y))).filter(|(x, y)| (x + y) % 2 == 0) {
             let origin = image.origin + point(px(x as f32 * cell), px(y as f32 * cell));
             let cell = size(px(cell).min(image.right() - origin.x), px(cell).min(image.bottom() - origin.y));
-            window.paint_quad(fill(Bounds::new(origin, cell), rgb(0x3a3a3a)));
+            window.paint_quad(fill(Bounds::new(origin, cell), c(style::CHECK_B)));
         }
     });
     let missing = || div().text_color(c(FG_FAINT)).child("Cannot show this image.").into_any_element();

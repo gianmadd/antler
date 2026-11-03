@@ -1,3 +1,0 @@
-Icons and `material-icons.json` from [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) tag `v5.40.0` (commit `045291ff033062a25441dd297fd51546326866f2`), MIT, see `LICENSE`. `material-icons.json` is the release's generated manifest (`dist/material-icons.json`), unchanged; `icons/` holds every SVG it defines except the `_light` variants.
-
-`languages.json` folds VS Code 1.144's built-in language contributions (file names and extensions to language id) into Material icon names, keeping only the entries the manifest does not already match: the theme's `languageIds` step.

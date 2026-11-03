@@ -45,3 +45,35 @@ pub fn init(dir: &Path) {
         git(dir, &["config", key, value]);
     }
 }
+
+/// The host new test workspaces use: this machine's, or, with `ANTLER_TEST_REMOTE=1`, one `antler-server` child
+/// process shared by the whole run (the model tests then go through the protocol; docs/agents/remote.md).
+pub fn host() -> std::sync::Arc<dyn crate::host::Host> {
+    use std::sync::{Arc, OnceLock};
+    static REMOTE: OnceLock<Arc<dyn crate::host::Host>> = OnceLock::new();
+    if std::env::var_os("ANTLER_TEST_REMOTE").is_none() {
+        return crate::host::local();
+    }
+    REMOTE.get_or_init(|| Arc::new(antler_remote(&mut Command::new("cargo"))) as _).clone()
+}
+
+/// The server binary next to the test executable, built first if it is not there.
+pub fn server_binary(cargo: &mut Command) -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let server = exe.parent().and_then(Path::parent).unwrap().join(format!("antler-server{}", std::env::consts::EXE_SUFFIX));
+    if !server.exists() {
+        assert!(cargo.args(["build", "-q", "-p", "antler-server"]).status().unwrap().success(), "cannot build antler-server");
+    }
+    server
+}
+
+/// A `Remote` to the server binary next to the test executable, built first if it is not there.
+pub fn antler_remote(cargo: &mut Command) -> antler_host::remote::Remote {
+    antler_host::remote::Remote::spawn(Command::new(server_binary(cargo))).unwrap()
+}
+
+/// Whether the model tests run through `Remote` (`ANTLER_TEST_REMOTE`): a remote has no Trash, so the tests of
+/// undoing a delete cannot apply.
+pub fn over_remote() -> bool {
+    std::env::var_os("ANTLER_TEST_REMOTE").is_some()
+}

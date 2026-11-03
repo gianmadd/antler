@@ -46,7 +46,36 @@ fn exclude_json(typed: &str) -> serde_json::Value {
     map.into()
 }
 
+/// `workbench.iconTheme`: the themes on offer and None, which the file stores as `null`.
+fn icon_theme_item() -> SettingItem {
+    let options = [("none".into(), "None".into())].into_iter().chain(crate::icons::themes().into_iter().map(|e| (e.id.into(), e.label.into()))).collect();
+    let field = SettingField::dropdown(
+        options,
+        |cx| cx.global::<Current>().0.icon_theme.clone().unwrap_or_else(|| "none".into()).into(),
+        |v: SharedString, cx| put(cx, "workbench.iconTheme", if v.as_ref() == "none" { serde_json::Value::Null } else { json!(v.as_ref() as &str) }),
+    )
+    .default_value(crate::icon_themes::SETI.to_string());
+    SettingItem::new("File Icon Theme", field).description("The icons of files and folders (File Icon Theme in the Command Palette previews them).").keywords(["workbench.iconTheme"])
+}
+
+/// `remote.otherPortsAttributes`: only `onAutoForward`, kept inside the object the file has.
+fn on_auto_forward_item() -> SettingItem {
+    let options = [("notify", "Notify"), ("openBrowser", "Open Browser"), ("silent", "Silent"), ("ignore", "Ignore")].map(|(v, l)| (v.into(), l.into())).to_vec();
+    let get = |s: &Values| -> SharedString {
+        match s.remote_other_ports_attributes.on_auto_forward {
+            settings::OnAutoForward::Notify => "notify",
+            settings::OnAutoForward::OpenBrowser => "openBrowser",
+            settings::OnAutoForward::Silent => "silent",
+            settings::OnAutoForward::Ignore => "ignore",
+        }
+        .into()
+    };
+    let field = SettingField::dropdown(options, move |cx| get(&cx.global::<Current>().0), |v: SharedString, cx| put(cx, "remote.otherPortsAttributes", json!({"onAutoForward": v.as_ref() as &str}))).default_value(get(&Values::default()));
+    SettingItem::new("Other Ports: On Auto Forward", field).description("What happens to a port that was forwarded by itself: show a notification, open the browser, nothing, or do not forward it.").keywords(["remote.otherPortsAttributes", "onAutoForward"])
+}
+
 fn pages() -> Vec<SettingPage> {
+    let themes: Vec<(&'static str, &'static str)> = crate::themes::all().into_iter().map(|t| (t.name, t.name)).collect();
     let page = |title: &'static str, items: Vec<SettingItem>| SettingPage::new(title).default_open(true).group(SettingGroup::new().items(items));
     vec![
         page(
@@ -93,9 +122,23 @@ fn pages() -> Vec<SettingPage> {
         ),
         page(
             "Window",
-            vec![choice("Restore Windows", "On start without a folder, reopen the last one.", "window.restoreWindows", &[("all", "Reopen the last folder"), ("none", "Start empty")], |s| {
+            vec![
+                choice("Color Theme", "The theme of the whole window (Cmd+K Cmd+T previews them).", "workbench.colorTheme", &themes, |s| s.color_theme.clone()),
+                icon_theme_item(),
+                on_off("Auto Detect Color Scheme", "Follow the macOS appearance with the two preferred themes below.", "window.autoDetectColorScheme", |s| s.auto_detect_color_scheme),
+                choice("Preferred Dark Color Theme", "Used with Auto Detect Color Scheme when macOS is dark.", "workbench.preferredDarkColorTheme", &themes, |s| s.preferred_dark_color_theme.clone()),
+                choice("Preferred Light Color Theme", "Used with Auto Detect Color Scheme when macOS is light.", "workbench.preferredLightColorTheme", &themes, |s| s.preferred_light_color_theme.clone()),
+                choice("Restore Windows", "On start without a folder, reopen the last one.", "window.restoreWindows", &[("all", "Reopen the last folder"), ("none", "Start empty")], |s| {
                 (if s.restore_windows == settings::RestoreWindows::All { "all" } else { "none" }).into()
-            })],
+            }),
+            ],
+        ),
+        page(
+            "Remote",
+            vec![
+                on_off("Auto Forward Ports", "In a Remote window, forward the ports the host starts listening on to this Mac's localhost.", "remote.autoForwardPorts", |s| s.remote_auto_forward_ports),
+                on_auto_forward_item(),
+            ],
         ),
     ]
 }
@@ -111,6 +154,8 @@ impl Antler {
             }
             this.open_path(file, None, true, cx);
         }));
-        v_flex().size_full().child(h_flex().px_4().py_2().child(link)).child(div().flex_1().min_h_0().child(Settings::new("settings").pages(pages()))).into_any_element()
+        let more = Button::new("more-themes").link().label("Get more themes").on_click(|_, _, cx| cx.open_url("https://open-vsx.org/?category=Themes"));
+        let install = Button::new("install-vsix").link().label("Install Theme from VSIX…").on_click(cx.listener(|this, _, window, cx| this.install_theme(&crate::theme_view::InstallThemeFromVsix, window, cx)));
+        v_flex().size_full().child(h_flex().px_4().py_2().gap_4().child(link).child(more).child(install)).child(div().flex_1().min_h_0().child(Settings::new("settings").pages(pages()))).into_any_element()
     }
 }

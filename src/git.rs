@@ -1,8 +1,7 @@
 //! Thin layer over the system `git` CLI (see docs/adr/0001).
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Branch name reported when HEAD is detached.
 pub const DETACHED: &str = "HEAD (detached)";
@@ -14,31 +13,7 @@ fn run(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
 }
 
 fn run_env(repo: &Path, args: &[&str], stdin: Option<&str>, envs: &[(&str, &std::ffi::OsStr)]) -> Result<String> {
-    let mut child = Command::new("git")
-        .envs(envs.iter().copied())
-        .env("GIT_OPTIONAL_LOCKS", "0") // status must not rewrite .git/index: the watcher would see it and rescan forever
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run git: {e}"))?;
-    if let Some(input) = stdin {
-        // git may exit before reading all of it (Broken pipe); its stderr below says why
-        child.stdin.take().unwrap().write_all(input.as_bytes()).ok();
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    // `diff --no-index` exits 1 when files differ; that is not an error.
-    if out.status.success() || (args.contains(&"--no-index") && out.status.code() == Some(1)) {
-        Ok(stdout)
-    } else {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        // a conflict (stash pop, cherry-pick) is reported on stdout only
-        Err(if err.is_empty() { stdout.trim().to_string() } else { err })
-    }
+    crate::host::current().git(repo, args, stdin, envs)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,11 +73,12 @@ impl Operation {
 pub fn operation(repo: &Path) -> Option<Operation> {
     let dot_git = repo.join(".git");
     // a linked worktree's `.git` is a file pointing at its own git dir
-    let dir = match std::fs::read_to_string(&dot_git) {
+    let host = crate::host::current();
+    let dir = match host.read_to_string(&dot_git) {
         Ok(text) => repo.join(text.trim().strip_prefix("gitdir:")?.trim()),
         Err(_) => dot_git,
     };
-    let has = |name: &str| dir.join(name).exists();
+    let has = |name: &str| host.metadata(&dir.join(name)).is_ok();
     if has("rebase-merge") || has("rebase-apply") {
         Some(Operation::Rebase)
     } else if has("MERGE_HEAD") {
@@ -486,7 +462,8 @@ pub fn diff_texts(old: &str, new: &str) -> Result<String> {
         .and_then(|()| std::fs::write(dir.join("current"), old))
         .and_then(|()| std::fs::write(dir.join("incoming"), new));
     let patch = written.map_err(|e| e.to_string()).and_then(|()| {
-        run(&dir, &["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "current", "incoming"], None)
+        // the files are in this machine's temp folder, whatever the Root's host
+        crate::host::local().git(&dir, &["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "current", "incoming"], None, &[])
     });
     std::fs::remove_dir_all(&dir).ok();
     patch
@@ -519,7 +496,7 @@ pub fn unstage_file(repo: &Path, path: &str) -> Result<()> {
 /// Discards working-tree changes; untracked files are deleted.
 pub fn discard_file(repo: &Path, file: &FileStatus) -> Result<()> {
     if file.is_untracked() {
-        std::fs::remove_file(repo.join(&file.path)).map_err(|e| e.to_string())
+        crate::host::current().remove_file(&repo.join(&file.path)).map_err(|e| e.to_string())
     } else {
         run(repo, &["restore", "--worktree", "--", &file.path], None).map(drop)
     }
@@ -731,16 +708,23 @@ pub const ASKPASS_ENV: &str = "ANTLER_ASKPASS";
 /// (the Keychain) answers first, as always; then, with `interactive`, the antler binary asks with a dialog
 /// (`askpass`), like VS Code's `GIT_ASKPASS`; without it (auto-fetch) the question fails at once.
 fn network(repo: &Path, args: &[&str], interactive: bool) -> Result<String> {
-    let exe = std::env::current_exe().map(|p| p.into_os_string()).unwrap_or_default();
-    let helper: &std::ffi::OsStr = if interactive && !exe.is_empty() { &exe } else { "/usr/bin/false".as_ref() };
-    let envs = [
-        ("GIT_TERMINAL_PROMPT", "0".as_ref()),
-        ("GIT_ASKPASS", helper),
-        ("SSH_ASKPASS", helper),
-        ("SSH_ASKPASS_REQUIRE", "force".as_ref()), // ssh would otherwise read the passphrase from the tty, if any
-        (ASKPASS_ENV, "1".as_ref()),
-    ];
+    let envs = askpass_envs(interactive);
+    let envs: Vec<(&str, &std::ffi::OsStr)> = envs.iter().map(|(k, v)| (*k, v.as_os_str())).collect();
     run_env(repo, args, None, &envs)
+}
+
+/// The environment that makes git and ssh ask through the antler binary (see `askpass`); without `interactive`
+/// the helper is `false`, so a question fails at once.
+pub fn askpass_envs(interactive: bool) -> Vec<(&'static str, std::ffi::OsString)> {
+    let exe = std::env::current_exe().map(|p| p.into_os_string()).unwrap_or_default();
+    let helper = if interactive && !exe.is_empty() { exe } else { "/usr/bin/false".into() };
+    vec![
+        ("GIT_TERMINAL_PROMPT", "0".into()),
+        ("GIT_ASKPASS", helper.clone()),
+        ("SSH_ASKPASS", helper),
+        ("SSH_ASKPASS_REQUIRE", "force".into()), // ssh would otherwise read the passphrase from the tty, if any
+        (ASKPASS_ENV, "1".into()),
+    ]
 }
 
 /// osascript's arguments for a native input dialog showing `prompt`; passwords and passphrases are hidden.

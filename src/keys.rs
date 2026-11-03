@@ -11,10 +11,13 @@ use gpui_kit::*;
 
 use crate::branch_view::CloseBranch;
 use crate::explorer::*;
+use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
 use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
+use crate::ports_view::{ForwardPort, ShowPorts, StopForwardingPort};
+use crate::remote_view::{CloseRemoteConnection, ConnectToHost};
 use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleSidebar, set_menus};
 
 /// Where a binding applies: a GPUI key context, and the name `when` uses in keybindings.json.
@@ -133,6 +136,11 @@ cmds![
     ("workbench.action.files.saveAll", "Save All", "alt-cmd-s", Global, SaveAll),
     ("workbench.action.files.openFolder", "Open Folder…", "cmd-o", Global, OpenFolder),
     ("workbench.action.closeFolder", "Close Folder", "cmd-k f", Global, CloseFolder),
+    ("remote.ssh.connect", "Connect to Host…", "", Global, ConnectToHost),
+    ("workbench.action.remote.close", "Close Remote Connection", "", Global, CloseRemoteConnection),
+    ("remote.tunnel.forwardCommandPalette", "Forward a Port", "", Global, ForwardPort),
+    ("remote.tunnel.closeCommandPalette", "Stop Forwarding Port", "", Global, StopForwardingPort),
+    ("~remote.forwardedPorts.focus", "Ports: Focus on Ports View", "", Global, ShowPorts),
     ("workbench.action.closeWindow", "Close Window", "shift-cmd-w", Global, CloseWindow),
     ("antler.minimizeWindow", "Minimize", "cmd-m", Global, MinimizeWindow),
     ("antler.focusNextWindow", "Next Window", "cmd-`", Global, FocusNextWindow),
@@ -148,6 +156,9 @@ cmds![
     ("antler.checkForUpdates", "Check for Updates…", "", Global, CheckForUpdates),
     ("workbench.action.openSettings", "Settings…", "cmd-,", Global, OpenSettings),
     ("workbench.action.openGlobalKeybindings", "Keyboard Shortcuts", "cmd-k cmd-s", Global, OpenKeyboardShortcuts),
+    ("workbench.action.selectTheme", "Color Theme", "cmd-k cmd-t", Global, SelectTheme),
+    ("workbench.action.selectIconTheme", "File Icon Theme", "", Global, SelectIconTheme),
+    ("antler.installThemeFromVsix", "Install Theme from VSIX…", "", Global, InstallThemeFromVsix),
     // Edit (the first five belong to the focused text field)
     ("undo", "Undo", "", Input, Undo),
     ("redo", "Redo", "", Input, Redo),
@@ -609,6 +620,7 @@ pub(crate) const MENUS: &[(&str, &[&str])] = &[
             "-",
             "workbench.action.files.openFolder",
             "@recent",
+            "remote.ssh.connect",
             "workbench.action.closeFolder",
             "workbench.action.closeWindow",
             "-",

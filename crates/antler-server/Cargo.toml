@@ -1,0 +1,14 @@
+[package]
+name = "antler-server"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Antler's server for a Remote host (docs/adr/0005): files, git and watching over stdin/stdout"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gianmadd/antler"
+
+[dependencies]
+antler-host = { path = "../antler-host" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

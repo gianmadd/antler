@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::search;
 use crate::workspace::Workspace;
 
 /// State of the Go to File popup.
@@ -26,6 +25,7 @@ pub struct GoTo {
 /// Lists the files of the Root: `Send`, run it off the UI thread, then give it to `Workspace::finish_list_files`.
 pub struct FilesJob {
     id: u64,
+    host: Arc<dyn crate::host::Host>,
     pub root: PathBuf,
     repos: Vec<PathBuf>,
 }
@@ -33,7 +33,7 @@ pub struct FilesJob {
 impl FilesJob {
     pub fn run(&self) -> Vec<String> {
         let rel = |p: &Path| p.strip_prefix(&self.root).ok().map(|p| p.to_string_lossy().into_owned());
-        let mut files: Vec<String> = search::walk(&self.root, &self.repos).filter_map(|e| rel(e.path())).collect();
+        let mut files: Vec<String> = self.host.files(&self.root, &self.repos).iter().filter_map(|p| rel(p)).collect();
         files.sort_unstable();
         files
     }
@@ -61,7 +61,7 @@ impl Workspace {
     pub fn start_list_files(&mut self) -> FilesJob {
         self.goto.last += 1;
         let repos = self.sections.iter().map(|s| s.repo.path.clone()).collect();
-        FilesJob { id: self.goto.last, root: self.root.clone(), repos }
+        FilesJob { id: self.goto.last, host: self.host.clone(), root: self.root.clone(), repos }
     }
 
     /// After a rescan: with the popup open, list the files again (some may be new or gone).

@@ -13,6 +13,11 @@ fi
 tag=v$version
 repo=gianmadd/antler
 tap=gianmadd/homebrew-tap
+# the release carries the app zip and antler-server for every host (src/ssh.rs asset_name)
+server_assets=()
+for t in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64 windows-x86_64.exe windows-aarch64.exe; do
+    server_assets+=("antler-server-$version-$t")
+done
 
 # run: executes the command, or only prints it with --dry-run
 run() { if $dry; then echo "[dry-run] $*"; else "$@"; fi; }
@@ -32,6 +37,7 @@ run git tag "$tag"
 run git push origin main "$tag"
 
 if $dry; then
+    echo "[dry-run] expected assets in the release: Antler-$version-arm64.zip ${server_assets[*]}"
     echo "[dry-run] gh run watch the $tag run, download Antler-$version-arm64.zip, update Casks/antler.rb in $tap"
     exit 0
 fi
@@ -45,6 +51,11 @@ for _ in $(seq 30); do
 done
 [[ -n $run_id ]] || { echo "no workflow run found for $tag" >&2; exit 1; }
 gh run watch "$run_id" -R $repo --exit-status
+
+have=$(gh release view "$tag" -R $repo --json assets -q '.assets[].name')
+for a in "Antler-$version-arm64.zip" "${server_assets[@]}"; do
+    grep -qxF "$a" <<<"$have" || { echo "release $tag lacks the asset $a" >&2; exit 1; }
+done
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
