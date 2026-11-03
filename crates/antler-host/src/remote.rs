@@ -19,7 +19,7 @@ use crate::discovery::Repo;
 use crate::host::{Envs, Host, Meta, WatchGuard};
 use crate::ports::{ListeningPort, bind_local};
 use crate::protocol::*;
-use crate::search::{Query, Results};
+use crate::search::{FileMatches, Query, Results};
 
 type Answer = (Res, Vec<u8>);
 
@@ -130,6 +130,8 @@ impl Inner {
                         }
                     }
                     Res::Closed => drop(lock(&sinks.streams).remove(&id).map(|s| s.shutdown(Shutdown::Write))),
+                    // part of an answer: the waiter stays registered until the closing frame
+                    res @ (Res::FilesChunk { .. } | Res::SearchChunk { .. }) => drop(lock(&reader.pending).1.get(&id).map(|tx| tx.send((res, body)))),
                     res => {
                         if let Some(tx) = lock(&reader.pending).1.remove(&id) {
                             tx.send((res, body)).ok();
@@ -418,6 +420,11 @@ impl Inner {
 
     /// Sends a request and waits for its answer; `cancel`, once set, sends a `Cancel` (the answer still comes).
     fn call(&self, req: Req, body: &[u8], cancel: Option<&AtomicBool>) -> io::Result<Answer> {
+        self.call_chunked(req, body, cancel, &mut |_| {})
+    }
+
+    /// `call` for an answer that comes in chunks: `on_chunk` gets each one, in order, before the closing answer.
+    fn call_chunked(&self, req: Req, body: &[u8], cancel: Option<&AtomicBool>, on_chunk: &mut dyn FnMut(Res)) -> io::Result<Answer> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let rx = self.register(id)?;
         self.send(id, req, body).inspect_err(|_| drop(self.shared.pending.lock().unwrap_or_else(|e| e.into_inner()).1.remove(&id)))?;
@@ -429,6 +436,7 @@ impl Inner {
             }
             match rx.recv_timeout(Duration::from_millis(25)) {
                 Ok((Res::Err { kind, msg }, _)) => return Err(io::Error::new(kind_from_name(&kind), msg)),
+                Ok((chunk @ (Res::FilesChunk { .. } | Res::SearchChunk { .. }), _)) => on_chunk(chunk),
                 Ok(answer) => return Ok(answer),
                 Err(RecvTimeoutError::Disconnected) => return Err(lost()),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -530,19 +538,30 @@ impl Host for Remote {
         }
     }
 
-    fn files(&self, root: &Path, repos: &[PathBuf]) -> Vec<PathBuf> {
-        match self.inner().call(Req::Files { root: wire_path(root), repos: strings(repos), exclude: exclude() }, &[], None) {
-            Ok((Res::Files { files }, _)) => files.into_iter().map(PathBuf::from).collect(),
-            _ => Vec::new(),
+    fn files_chunked(&self, root: &Path, repos: &[PathBuf], cancel: &AtomicBool, on_chunk: &mut dyn FnMut(Vec<PathBuf>)) {
+        if cancel.load(Ordering::Relaxed) {
+            return;
         }
+        let req = Req::Files { root: wire_path(root), repos: strings(repos), exclude: exclude() };
+        // a lost connection ends the list where it is
+        drop(self.inner().call_chunked(req, &[], Some(cancel), &mut |c| {
+            if let Res::FilesChunk { files } = c {
+                on_chunk(files.into_iter().map(PathBuf::from).collect());
+            }
+        }));
     }
 
-    fn search(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool) -> Results {
+    fn search_chunked(&self, root: &Path, repos: &[PathBuf], query: &Query, limit: usize, cancel: &AtomicBool, on_files: &mut dyn FnMut(Vec<FileMatches>)) -> Results {
         if cancel.load(Ordering::Relaxed) {
             return Results::default(); // like the walk that stops before its first file
         }
         let req = Req::Search { root: wire_path(root), repos: strings(repos), query: query.clone(), limit, exclude: exclude() };
-        match self.inner().call(req, &[], Some(cancel)) {
+        let chunk = |c| {
+            if let Res::SearchChunk { files } = c {
+                on_files(files.into_iter().map(|(path, lines)| FileMatches { path: PathBuf::from(path), lines }).collect());
+            }
+        };
+        match self.inner().call_chunked(req, &[], Some(cancel), &mut { chunk }) {
             Ok((Res::Results(r), _)) => r.into(),
             Ok(_) => Results { error: Some("unexpected answer to search".into()), ..Default::default() },
             Err(e) => Results { error: Some(e.to_string()), ..Default::default() },
