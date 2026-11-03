@@ -79,6 +79,8 @@ pub struct Settings {
     /// Hide what `.gitignore` ignores in the Explorer.
     #[serde(rename = "explorer.excludeGitIgnore")]
     pub explorer_exclude_git_ignore: bool,
+    #[serde(rename = "git.blame.statusBarItem.enabled")]
+    pub git_blame_status_bar_enabled: bool,
     #[serde(rename = "git.autofetch")]
     pub git_autofetch: bool,
     /// Seconds.
@@ -194,6 +196,7 @@ impl Default for Settings {
             insert_final_newline: false,
             files_exclude: default_exclude(),
             explorer_exclude_git_ignore: false,
+            git_blame_status_bar_enabled: false,
             git_autofetch: false,
             git_autofetch_period: 180,
             confirm_discard: true,

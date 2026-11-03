@@ -782,6 +782,7 @@ impl Workspace {
             }
         }
         if result.is_ok() {
+            if self.blame.as_ref().is_some_and(|b| b.path == job.path) { self.clear_blame(); }
             self.disk_changed(&job.path, Instant::now());
         }
         result.is_ok()

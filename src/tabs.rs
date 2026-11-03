@@ -80,7 +80,24 @@ impl Render for DraggedTab {
 impl Antler {
     /// Creates an editor for each new file tab, drops those of closed tabs, and pushes model-side changes
     /// (reload, "open at line") into them.
+    fn load_blame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !cx.global::<crate::settings::Current>().0.git_blame_status_bar_enabled { self.ws.clear_blame(); return; }
+        let Some((repo, path, text)) = self.ws.blame_target() else { self.ws.clear_blame(); return; };
+        let absolute = repo.join(&path);
+        if !self.ws.needs_blame(&absolute) { return; }
+        self.ws.request_blame(absolute.clone());
+        let host = self.ws.host.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let lines = cx.background_spawn(async move { crate::host::scoped(&host, || crate::git::blame(&repo, &path)) }).await;
+            this.update_in(cx, |this, _, cx| {
+                if let Ok(lines) = lines { this.ws.set_blame(absolute, text, lines); } else { this.ws.clear_blame(); }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
     pub(crate) fn sync_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_blame(window, cx);
         if self.ws.groups().iter().any(|g| !self.group_ui.contains_key(g)) {
             self.sync_diff(cx);
         }
