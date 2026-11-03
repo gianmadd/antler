@@ -75,6 +75,14 @@ _Avoid_: Command menu, actions list
 A contiguous group of changed lines in a diff, the smallest unit of stage, unstage and revert alongside selected lines.
 _Avoid_: Chunk
 
+**Multi-file diff**:
+A tab showing the diffs of several files one under the other: every file of one change group of a Section, or every file that differs between two refs.
+_Avoid_: Project diff, multi diff editor, changes view
+
+**Blame**:
+Who last changed a line, in which commit and when.
+_Avoid_: Annotate, praise
+
 **Partial staging**:
 Staging only some Hunks or lines of a file.
 _Avoid_: Partial add, patch add
