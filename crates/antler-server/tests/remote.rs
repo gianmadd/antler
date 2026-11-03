@@ -24,7 +24,7 @@ fn git(dir: &Path, args: &[&str]) {
 /// A Root with two repos (one nested in a folder), a skipped folder and a few files; canonical, like the app's Root.
 fn fixture() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
-    let root = fs::canonicalize(tmp.path()).unwrap();
+    let root = antler_host::host::canonical(tmp.path()).unwrap();
     for (rel, text) in [("a/x.txt", "needle one\nhay\n"), ("a/y.rs", "fn needle() {}\n"), ("b/z.txt", "none here\n"), ("top.txt", "Needle on top\n"), ("skipme/s.txt", "needle\n")] {
         fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
         fs::write(root.join(rel), text).unwrap();
@@ -39,7 +39,8 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn debug(r: &impl std::fmt::Debug) -> String {
-    format!("{r:?}")
+    // a Windows path: the remote keeps the wire's `/`, Local has `\` (equal as paths, not as text)
+    format!("{r:?}").replace(r"\\", "/")
 }
 
 #[test]

@@ -121,7 +121,7 @@ pub(crate) fn palette_commands(has_editor: bool) -> Vec<&'static Cmd> {
 }
 
 macro_rules! cmds {
-    ($(($id:literal, $title:literal, $key:literal, $ctx:ident, $action:expr)),* $(,)?) => {
+    ($(($id:literal, $title:expr, $key:literal, $ctx:ident, $action:expr)),* $(,)?) => {
         pub(crate) static COMMANDS: &[Cmd] = &[$(Cmd { id: $id, title: $title, key: $key, ctx: Ctx::$ctx, action: || Box::new($action) }),*];
     };
 }
@@ -226,7 +226,7 @@ cmds![
     // the active file (VS Code's cmd-k chords, which work anywhere), and the selected row of the Explorer or Git view
     ("workbench.action.files.copyPathOfActiveFile", "Copy Path of Active File", "cmd-k alt-cmd-c", Global, CopyTabPath),
     ("workbench.action.files.copyRelativePathOfActiveFile", "Copy Relative Path of Active File", "cmd-k shift-alt-cmd-c", Global, CopyRelativeTabPath),
-    ("workbench.action.files.revealActiveFileInWindows", "Reveal Active File in Finder", "cmd-k r", Global, RevealTabInFinder),
+    ("workbench.action.files.revealActiveFileInWindows", if cfg!(windows) { "Reveal Active File in File Explorer" } else { "Reveal Active File in Finder" }, "cmd-k r", Global, RevealTabInFinder),
     ("antler.revealActiveFileInExplorer", "Reveal Active File in Explorer", "", Global, RevealTabInExplorer),
     ("copyFilePath", "Copy Path", "alt-cmd-c", Explorer, CopyEntryPath),
     ("copyFilePath", "Copy Path", "alt-cmd-c", Git, CopyEntryPath),
@@ -251,6 +251,9 @@ cmds![
     ("antler.closeBranchPicker", "Close Branch Picker", "escape", Branch, CloseBranch),
     ("antler.closeStashPicker", "Close Stash Picker", "escape", Stash, CloseStash),
 ];
+
+/// The context menus' item that shows a file in the system's file manager (VS Code's words).
+pub(crate) const REVEAL_IN_OS: &str = if cfg!(windows) { "Reveal in File Explorer" } else { "Reveal in Finder" };
 
 /// One key of one command in one context, as the user's keybindings.json leaves it.
 #[derive(Clone)]
@@ -303,7 +306,44 @@ fn from_vscode(key: &str) -> Option<String> {
 }
 
 fn default_bindings() -> Vec<Binding> {
-    COMMANDS.iter().filter(|c| !c.key.is_empty()).filter_map(|cmd| Some(Binding { cmd, key: from_gpui(cmd.key)?, ctx: cmd.ctx, user: false })).collect()
+    defaults(cfg!(windows))
+}
+
+/// The table's keys, or with `windows` VS Code's Windows defaults (see [`windows_key`]).
+fn defaults(windows: bool) -> Vec<Binding> {
+    let key = |cmd: &Cmd| if windows { windows_key(cmd.id, cmd.key) } else { cmd.key.to_string() };
+    COMMANDS.iter().map(|cmd| (cmd, key(cmd))).filter(|(_, k)| !k.is_empty()).filter_map(|(cmd, k)| Some(Binding { cmd, key: from_gpui(&k)?, ctx: cmd.ctx, user: false })).collect()
+}
+
+/// Commands whose Windows key in VS Code is not the Mac one with Ctrl for Cmd ("" = no key there).
+const WINDOWS_KEYS: &[(&str, &str)] = &[
+    ("workbench.action.files.saveAll", "ctrl-k s"),
+    ("workbench.action.files.openFolder", "ctrl-k ctrl-o"),
+    ("antler.minimizeWindow", ""),
+    ("antler.focusNextWindow", ""),
+    ("workbench.action.closeOtherEditors", ""),
+    ("editor.action.startFindReplace", "ctrl-h"),
+    ("editor.action.nextMatchFindAction", "f3"),
+    ("editor.action.previousMatchFindAction", "shift-f3"),
+    ("editor.unfold", "ctrl-shift-]"),
+    ("workbench.action.nextEditor", "ctrl-pagedown"),
+    ("workbench.action.previousEditor", "ctrl-pageup"),
+    ("workbench.action.files.copyPathOfActiveFile", "shift-alt-c"),
+    ("workbench.action.files.copyRelativePathOfActiveFile", "ctrl-k ctrl-shift-c"),
+    ("copyFilePath", "shift-alt-c"),
+    ("copyRelativeFilePath", "ctrl-k ctrl-shift-c"),
+    ("renameFile", "f2"),
+    ("moveFileToTrash", "delete"),
+    ("antler.explorer.redo", "ctrl-y"),
+];
+
+/// The Windows default of a command whose Mac key is `mac`: VS Code's own where it differs ([`WINDOWS_KEYS`]),
+/// otherwise Ctrl in place of Cmd (GPUI's `cmd` is the Windows key there).
+fn windows_key(id: &str, mac: &str) -> String {
+    match WINDOWS_KEYS.iter().find(|(i, _)| *i == id) {
+        Some((_, k)) => k.to_string(),
+        None => mac.split(' ').map(|chord| chord.split('-').map(|m| if m == "cmd" { "ctrl" } else { m }).collect::<Vec<_>>().join("-")).collect::<Vec<_>>().join(" "),
+    }
 }
 
 /// A chord sequence ("cmd-k cmd-w") in canonical spelling.
@@ -364,7 +404,7 @@ fn resolve(user: Option<&str>) -> (Vec<Binding>, Vec<String>) {
 
 /// `~/.config/antler/keybindings.json`; `None` without a home directory.
 pub(crate) fn default_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/antler/keybindings.json"))
+    crate::paths::config("keybindings.json")
 }
 
 /// Binds the defaults and the user's file (a missing one is fine) over what is bound now; returns warnings to show.
@@ -446,6 +486,27 @@ pub(crate) fn label(cx: &App, text: &str, id: &str) -> String {
 }
 
 fn pretty(k: &Keystroke) -> String {
+    if cfg!(windows) { pretty_words(k) } else { pretty_mac(k) }
+}
+
+/// VS Code's labels on Windows: "Ctrl+Shift+G", "Ctrl+K Ctrl+S" (chords joined by the caller).
+fn pretty_words(k: &Keystroke) -> String {
+    let m = &k.modifiers;
+    let key = match k.key.as_str() {
+        "up" => "UpArrow".to_string(),
+        "down" => "DownArrow".into(),
+        "left" => "LeftArrow".into(),
+        "right" => "RightArrow".into(),
+        "pageup" => "PageUp".into(),
+        "pagedown" => "PageDown".into(),
+        k if k.chars().count() <= 1 => k.to_uppercase(),
+        k => k[..1].to_uppercase() + &k[1..], // Enter, Escape, Backspace, Delete, Tab, F3
+    };
+    let mods = [(m.control, "Ctrl"), (m.shift, "Shift"), (m.alt, "Alt"), (m.platform, "Win")];
+    mods.iter().filter(|(on, _)| *on).map(|(_, n)| *n).chain([key.as_str()]).collect::<Vec<_>>().join("+")
+}
+
+fn pretty_mac(k: &Keystroke) -> String {
     let m = &k.modifiers;
     let key = match k.key.as_str() {
         "enter" => "↵".to_string(),
@@ -709,13 +770,43 @@ mod tests {
 
     #[test]
     fn no_key_is_bound_to_two_commands_in_the_same_context() {
-        let mut seen: Vec<(String, Ctx, &str)> = Vec::new();
-        for b in default_bindings() {
-            if let Some((_, _, id)) = seen.iter().find(|(k, c, _)| *k == b.key && *c == b.ctx) {
-                assert_eq!(*id, b.cmd.id, "{} is bound twice in {:?}", b.key, b.ctx);
+        for windows in [false, true] {
+            let mut seen: Vec<(String, Ctx, &str)> = Vec::new();
+            for b in defaults(windows) {
+                if let Some((_, _, id)) = seen.iter().find(|(k, c, _)| *k == b.key && *c == b.ctx) {
+                    assert_eq!(*id, b.cmd.id, "{} is bound twice in {:?} (windows: {windows})", b.key, b.ctx);
+                }
+                seen.push((b.key, b.ctx, b.cmd.id));
             }
-            seen.push((b.key, b.ctx, b.cmd.id));
         }
+    }
+
+    fn default_key(windows: bool, id: &str) -> Vec<String> {
+        defaults(windows).into_iter().filter(|b| b.cmd.id == id).map(|b| b.key).collect()
+    }
+
+    #[test]
+    fn windows_takes_ctrl_for_cmd_and_vs_codes_own_keys_where_they_differ() {
+        assert_eq!(default_key(true, "workbench.action.files.save"), ["ctrl-s"]);
+        assert_eq!(default_key(true, "workbench.action.closeAllEditors"), ["ctrl-k ctrl-w"]);
+        assert_eq!(default_key(true, "editor.action.fontZoomOut"), ["ctrl--"]);
+        assert_eq!(default_key(true, "workbench.view.scm"), ["ctrl-shift-g"], "already Ctrl on the Mac");
+        assert_eq!(default_key(true, "renameFile"), ["f2"]);
+        assert_eq!(default_key(true, "moveFileToTrash"), ["delete"]);
+        assert_eq!(default_key(true, "editor.action.nextMatchFindAction"), ["f3"], "ctrl-g is Go to Line");
+        assert!(default_key(true, "antler.focusNextWindow").is_empty(), "no default key on Windows");
+        assert_eq!(default_key(false, "workbench.action.files.save"), ["cmd-s"], "the Mac keeps the table");
+        assert!(defaults(true).iter().all(|b| !b.key.contains("cmd")), "GPUI's cmd is the Windows key");
+    }
+
+    #[test]
+    fn windows_labels_spell_the_keys_out_like_vs_code() {
+        let label = |k: &str| pretty_words(&parse(k).unwrap());
+        assert_eq!(label("ctrl-shift-g"), "Ctrl+Shift+G");
+        assert_eq!(label("f3"), "F3");
+        assert_eq!(label("ctrl-pagedown"), "Ctrl+PageDown");
+        assert_eq!(label("shift-alt-up"), "Shift+Alt+UpArrow");
+        assert_eq!(label("ctrl-enter"), "Ctrl+Enter");
     }
 
     #[test]
@@ -752,6 +843,11 @@ mod tests {
         assert_eq!(from_vscode(""), None);
     }
 
+    /// A Mac default key as this OS has it (Ctrl for Cmd on Windows).
+    fn primary(mac: &str) -> String {
+        if cfg!(windows) { windows_key("", mac) } else { mac.to_string() }
+    }
+
     fn keys_of<'a>(b: &'a [Binding], id: &str) -> Vec<(&'a str, Ctx)> {
         b.iter().filter(|b| b.cmd.id == id).map(|b| (b.key.as_str(), b.ctx)).collect()
     }
@@ -759,12 +855,12 @@ mod tests {
     #[test]
     fn a_rule_rebinds_and_a_minus_command_removes() {
         let user = r#"[
-            { "key": "cmd+b", "command": "-workbench.action.toggleSidebarVisibility" },
+            { "key": "PRIMARY+b", "command": "-workbench.action.toggleSidebarVisibility" },
             { "key": "cmd+j", "command": "workbench.action.toggleSidebarVisibility", "when": "editor" },
-            { "key": "cmd+d", "command": "-editor.action.addSelectionToNextFindMatch" },
+            { "key": "PRIMARY+d", "command": "-editor.action.addSelectionToNextFindMatch" },
             { "key": "", "command": "-editor.action.selectHighlights" }
-        ]"#;
-        let (b, warnings) = resolve(Some(user));
+        ]"#.replace("PRIMARY", if cfg!(windows) { "ctrl" } else { "cmd" });
+        let (b, warnings) = resolve(Some(&user));
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(keys_of(&b, "workbench.action.toggleSidebarVisibility"), [("cmd-j", Ctx::Editor)]);
         assert!(keys_of(&b, "editor.action.addSelectionToNextFindMatch").is_empty());
@@ -787,7 +883,9 @@ mod tests {
         assert_eq!((b.len(), warnings.len()), (default_bindings().len(), 1));
     }
 
+    /// The default row of `id` whose Mac key is `key` (its Windows key on Windows).
     fn row(id: &str, key: &str) -> Row {
+        let key = if cfg!(windows) { windows_key(id, key) } else { key.to_string() };
         rows_of(&default_bindings()).into_iter().find(|r| r.cmd.id == id && r.key == key).unwrap()
     }
 
@@ -821,14 +919,14 @@ mod tests {
         let text = change_key(&text, rows.iter().find(|r| r.cmd.id == "workbench.action.files.save").unwrap(), "cmd-k cmd-s").unwrap();
         assert_eq!(keys_of(&resolve(Some(&text)).0, "workbench.action.files.save"), [("cmd-k cmd-s", Ctx::Global)]);
         let text = reset_command(&text, "workbench.action.files.save").unwrap();
-        assert_eq!(keys_of(&resolve(Some(&text)).0, "workbench.action.files.save"), [("cmd-s", Ctx::Global)]);
+        assert_eq!(keys_of(&resolve(Some(&text)).0, "workbench.action.files.save"), [(primary("cmd-s").as_str(), Ctx::Global)]);
         assert!(change_key("not json", &row("workbench.action.files.save", "cmd-s"), "cmd-j").is_err());
     }
 
     #[test]
     fn a_key_in_use_is_reported_in_the_same_context_only() {
         let rows = rows_of(&default_bindings());
-        assert_eq!(conflicts(&rows, "workbench.action.files.saveAll", "cmd-s", Ctx::Global), ["Save"]);
+        assert_eq!(conflicts(&rows, "workbench.action.files.saveAll", &primary("cmd-s"), Ctx::Global), ["Save"]);
         assert!(conflicts(&rows, "workbench.action.files.save", "cmd-s", Ctx::Global).is_empty());
         assert!(conflicts(&rows, "workbench.action.files.saveAll", "cmd-s", Ctx::Editor).is_empty());
     }
@@ -839,8 +937,9 @@ mod tests {
         let ids = |q| filter(&rows, q).iter().map(|r| r.cmd.id).collect::<Vec<_>>();
         assert!(ids("toggle sidebar").contains(&"workbench.action.toggleSidebarVisibility"));
         assert!(ids("openGlobalKey").contains(&"workbench.action.openGlobalKeybindings"));
-        assert!(ids("cmd+b").contains(&"workbench.action.toggleSidebarVisibility"));
-        assert!(ids("⌘B").contains(&"workbench.action.toggleSidebarVisibility"));
+        let (vscode, label) = if cfg!(windows) { ("ctrl+b", "Ctrl+B") } else { ("cmd+b", "⌘B") };
+        assert!(ids(vscode).contains(&"workbench.action.toggleSidebarVisibility"));
+        assert!(ids(label).contains(&"workbench.action.toggleSidebarVisibility"));
         assert_eq!(filter(&rows, "").len(), rows.len());
     }
 
@@ -853,7 +952,7 @@ mod tests {
 
     #[test]
     fn keys_show_as_on_a_mac() {
-        let k = |s| pretty(&Keystroke::parse(s).unwrap());
+        let k = |s| pretty_mac(&Keystroke::parse(s).unwrap());
         assert_eq!(k("cmd-enter"), "⌘↵");
         assert_eq!(k("ctrl-shift-g"), "⌃⇧G");
         assert_eq!(k("alt-f5"), "⌥F5");

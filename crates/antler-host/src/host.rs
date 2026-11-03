@@ -135,6 +135,61 @@ impl Default for Local {
     }
 }
 
+/// A path as Windows' `canonicalize` gives it, without the `\\?\` prefix it adds (`\\?\C:\x` is `C:\x`,
+/// `\\?\UNC\server\share` is `\\server\share`), so it matches what the file watcher, git and the user write.
+/// Other paths come back as they are.
+fn simplify(path: PathBuf) -> PathBuf {
+    let Some(s) = path.to_str() else { return path };
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
+/// `std::fs::canonicalize` without Windows' verbatim prefix (see [`simplify`]): what a Root opened on this
+/// machine is set to.
+pub fn canonical(path: &Path) -> io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(simplify)
+}
+
+/// A console program started by the app opens no console window of its own (Windows' `CREATE_NO_WINDOW`; the
+/// release app has no console to share). Nothing elsewhere.
+pub fn no_console(c: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(c, 0x0800_0000);
+    c
+}
+
+/// Moves `path` (a file or a folder with everything in it) to the Windows Recycle Bin, with no dialog of the
+/// shell's own (the app has asked already).
+#[cfg(windows)]
+pub fn recycle(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW, SHFileOperationW};
+    if path.symlink_metadata().is_err() {
+        return Err(format!("{}: not found", path.display()));
+    }
+    // an absolute path, and a list ended by two NULs
+    let full = std::path::absolute(path).map_err(|e| e.to_string())?;
+    let from: Vec<u16> = full.as_os_str().encode_wide().chain([0, 0]).collect();
+    // SAFETY: every pointer field is null or `from`, which outlives the call
+    let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.as_ptr();
+    op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as _;
+    let code = unsafe { SHFileOperationW(&mut op) };
+    if code != 0 {
+        return Err(format!("the Recycle Bin refused it (error {code:#x})"));
+    }
+    if op.fAnyOperationsAborted != 0 {
+        return Err("cancelled".into());
+    }
+    Ok(())
+}
+
 /// Deletes a file or a folder with everything in it, for good (a link goes, not its target).
 pub fn remove_all(path: &Path) -> io::Result<()> {
     if path.symlink_metadata()?.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }
@@ -212,7 +267,14 @@ impl Host for Local {
         Ok(Some(at))
     }
 
-    #[cfg(not(any(target_os = "macos", test, feature = "test-trash")))]
+    /// Windows: the Recycle Bin, like VS Code's Delete there (Explorer's Restore works). The shell gives no
+    /// location back, so there is nothing for Undo to move back.
+    #[cfg(all(windows, not(any(test, feature = "test-trash"))))]
+    fn trash(&self, path: &Path) -> Result<Option<PathBuf>, String> {
+        recycle(path).map(|()| None)
+    }
+
+    #[cfg(not(any(target_os = "macos", windows, test, feature = "test-trash")))]
     fn trash(&self, path: &Path) -> Result<Option<PathBuf>, String> {
         remove_all(path).map(|()| None).map_err(|e| e.to_string())
     }
@@ -266,7 +328,7 @@ impl Host for Local {
     fn git(&self, repo: &Path, args: &[&str], stdin: Option<&str>, envs: Envs) -> Result<String, String> {
         use std::io::Write as _;
         use std::process::{Command, Stdio};
-        let mut child = Command::new("git")
+        let mut child = no_console(&mut Command::new("git"))
             .envs(envs.iter().copied())
             .env("GIT_OPTIONAL_LOCKS", "0") // status must not rewrite .git/index: the watcher would see it and rescan forever
             .arg("-C")
@@ -297,6 +359,38 @@ impl Host for Local {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_verbatim_windows_path_loses_its_prefix() {
+        assert_eq!(simplify(PathBuf::from(r"\\?\C:\Users\x\repo")), PathBuf::from(r"C:\Users\x\repo"));
+        assert_eq!(simplify(PathBuf::from(r"\\?\UNC\server\share\repo")), PathBuf::from(r"\\server\share\repo"));
+        assert_eq!(simplify(PathBuf::from(r"\\?\Volume{1234}\x")), PathBuf::from(r"\\?\Volume{1234}\x"), "no drive letter: kept");
+        assert_eq!(simplify(PathBuf::from("/Users/x/repo")), PathBuf::from("/Users/x/repo"));
+    }
+
+    /// Touches the user's real Recycle Bin (one empty temp file), so it only runs when asked:
+    /// `cargo test -p antler-host recycle -- --ignored`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn recycle_moves_a_file_and_a_folder_out_of_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, dir) = (tmp.path().join("antler-recycle-test.txt"), tmp.path().join("antler-recycle-dir"));
+        std::fs::write(&file, b"").unwrap();
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+        recycle(&file).unwrap();
+        recycle(&dir).unwrap();
+        assert!(!file.exists() && !dir.exists());
+        assert!(recycle(&file).is_err(), "a missing file is an error, not a silent success");
+    }
+
+    #[test]
+    fn canonical_gives_a_plain_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = canonical(tmp.path()).unwrap();
+        assert!(c.is_absolute() && !c.to_string_lossy().starts_with(r"\\?\"), "{c:?}");
+        assert_eq!(std::fs::canonicalize(&c).unwrap(), std::fs::canonicalize(tmp.path()).unwrap());
+    }
 
     #[test]
     fn create_returns_the_outermost_new_folder_and_rename_refuses_to_replace() {

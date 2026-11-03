@@ -125,9 +125,9 @@ fn pages() -> Vec<SettingPage> {
             vec![
                 choice("Color Theme", "The theme of the whole window (Cmd+K Cmd+T previews them).", "workbench.colorTheme", &themes, |s| s.color_theme.clone()),
                 icon_theme_item(),
-                on_off("Auto Detect Color Scheme", "Follow the macOS appearance with the two preferred themes below.", "window.autoDetectColorScheme", |s| s.auto_detect_color_scheme),
-                choice("Preferred Dark Color Theme", "Used with Auto Detect Color Scheme when macOS is dark.", "workbench.preferredDarkColorTheme", &themes, |s| s.preferred_dark_color_theme.clone()),
-                choice("Preferred Light Color Theme", "Used with Auto Detect Color Scheme when macOS is light.", "workbench.preferredLightColorTheme", &themes, |s| s.preferred_light_color_theme.clone()),
+                on_off("Auto Detect Color Scheme", "Follow the OS appearance with the two preferred themes below.", "window.autoDetectColorScheme", |s| s.auto_detect_color_scheme),
+                choice("Preferred Dark Color Theme", "Used with Auto Detect Color Scheme when the OS is dark.", "workbench.preferredDarkColorTheme", &themes, |s| s.preferred_dark_color_theme.clone()),
+                choice("Preferred Light Color Theme", "Used with Auto Detect Color Scheme when the OS is light.", "workbench.preferredLightColorTheme", &themes, |s| s.preferred_light_color_theme.clone()),
                 choice("Restore Windows", "On start without a folder, reopen the last one.", "window.restoreWindows", &[("all", "Reopen the last folder"), ("none", "Start empty")], |s| {
                 (if s.restore_windows == settings::RestoreWindows::All { "all" } else { "none" }).into()
             }),

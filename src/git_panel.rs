@@ -305,7 +305,7 @@ impl Antler {
             menu.separator()
                 .item(run("Add to .gitignore", &ignore))
                 .separator()
-                .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+                .item(PopupMenuItem::new(crate::keys::REVEAL_IN_OS).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
                 .item(copy_item("Copy Path", menu_full.display().to_string()))
                 .item(copy_item("Copy Relative Path", rel.clone()))
         };

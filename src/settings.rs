@@ -309,7 +309,7 @@ pub fn set(file: &Path, key: &str, value: serde_json::Value) -> Result<(), Strin
 
 /// `~/.config/antler/settings.json`; `None` without a home directory (treated as a missing file).
 pub fn default_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/antler/settings.json"))
+    crate::paths::config("settings.json")
 }
 
 /// The startup configuration: the Root from the command line (if any), the settings, and an error to show

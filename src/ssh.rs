@@ -109,7 +109,7 @@ pub fn config_hosts(config: &Path) -> Vec<ConfigHost> {
             includes.iter().flat_map(|i| include_files(i, base, home)).for_each(|f| walk(&f, base, home, depth + 1, out));
         }
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = crate::paths::home().unwrap_or_default();
     let mut out = Vec::new();
     walk(config, config.parent().unwrap_or(Path::new("")), &home, 0, &mut out);
     let mut seen = std::collections::HashSet::new();
@@ -117,9 +117,9 @@ pub fn config_hosts(config: &Path) -> Vec<ConfigHost> {
     out
 }
 
-/// `~/.ssh/config`; `ANTLER_SSH_CONFIG` replaces it (for trying Antler without touching the real one).
+/// `~/.ssh/config` (`%USERPROFILE%\.ssh\config` on Windows, where Win32-OpenSSH reads it); `ANTLER_SSH_CONFIG`
 pub fn config_path() -> PathBuf {
-    std::env::var_os("ANTLER_SSH_CONFIG").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ssh/config"))
+    std::env::var_os("ANTLER_SSH_CONFIG").map(PathBuf::from).unwrap_or_else(|| crate::paths::home().unwrap_or_default().join(".ssh").join("config"))
 }
 
 // ---- what the user types
@@ -253,6 +253,11 @@ pub fn asset_url(version: &str, os: Os, arch: Arch) -> String {
 
 /// Windows has no `sh`: the script travels as `-EncodedCommand` (base64 of UTF-16LE), which no shell mangles.
 fn powershell(script: &str) -> String {
+    format!("powershell -NoProfile -NonInteractive -EncodedCommand {}", encoded(script))
+}
+
+/// PowerShell's `-EncodedCommand` value for `script`: base64 of its UTF-16LE.
+pub(crate) fn encoded(script: &str) -> String {
     const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let mut out = String::new();
@@ -262,7 +267,7 @@ fn powershell(script: &str) -> String {
             out.push(if i <= chunk.len() { B64[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
         }
     }
-    format!("powershell -NoProfile -NonInteractive -EncodedCommand {out}")
+    out
 }
 
 /// A Unix command line for the login shell, whatever it is (bash, zsh, fish): one single-quoted word for `sh -c`.
@@ -329,8 +334,8 @@ pub struct SshConnector {
     /// A local server binary to install instead of downloading (`ANTLER_SERVER_BINARY`).
     binary: Option<PathBuf>,
     cache: PathBuf,
-    /// Owner-only folder of the ControlMaster socket.
-    control: PathBuf,
+    /// Owner-only folder of the ControlMaster socket; `None` on Windows, whose OpenSSH has no ControlMaster.
+    control: Option<PathBuf>,
     info: Mutex<Option<HostInfo>>,
     delivered: Mutex<bool>,
 }
@@ -339,15 +344,15 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 impl SshConnector {
     pub fn new(target: Target) -> Self {
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
         // /tmp, not $TMPDIR: a unix socket path must stay under ~100 bytes and macOS's temp dir is long
-        let control = Path::new(if cfg!(unix) { "/tmp" } else { "" }).join(format!("antler-ssh-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
+        let control = cfg!(unix).then(|| Path::new("/tmp").join(format!("antler-ssh-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed))));
         SshConnector {
             target,
-            ssh: std::env::var_os("ANTLER_SSH").map(PathBuf::from).unwrap_or_else(|| "/usr/bin/ssh".into()),
+            // Windows: the OpenSSH client of the system (System32\OpenSSH, on PATH), as VS Code finds it
+            ssh: std::env::var_os("ANTLER_SSH").map(PathBuf::from).unwrap_or_else(|| if cfg!(windows) { "ssh.exe".into() } else { "/usr/bin/ssh".into() }),
             config: std::env::var_os("ANTLER_SSH_CONFIG").map(PathBuf::from),
             binary: std::env::var_os("ANTLER_SERVER_BINARY").map(PathBuf::from),
-            cache: home.join("Library/Caches/Antler/server"),
+            cache: crate::paths::cache().join("server"),
             control,
             info: Mutex::new(None),
             delivered: Mutex::new(false),
@@ -355,7 +360,7 @@ impl SshConnector {
     }
 
     /// For tests: another `ssh`, a local server binary, a cache folder.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn with(target: Target, ssh: PathBuf, binary: PathBuf, cache: PathBuf) -> Self {
         let mut c = SshConnector::new(target);
         (c.ssh, c.binary, c.cache, c.config) = (ssh, Some(binary), cache, None);
@@ -364,19 +369,22 @@ impl SshConnector {
 
     /// `ssh` with the shared options, `opts` (before the destination) and the destination.
     fn command(&self, opts: &[&str]) -> std::io::Result<Command> {
-        let mut dir = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
-        match dir.create(&self.control) {
-            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
-            _ => {}
+        if let Some(control) = &self.control {
+            #[allow(unused_mut)] // the mode is Unix's
+            let mut dir = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+            match dir.create(control) {
+                Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+                _ => {}
+            }
         }
         let mut c = Command::new(&self.ssh);
+        antler_host::host::no_console(&mut c);
         if let Some(f) = &self.config {
             c.arg("-F").arg(f);
         }
-        c.args(["-T", "-o", "BatchMode=no", "-o", "ControlMaster=auto", "-o", "ControlPersist=10m", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=30"]);
-        c.arg("-o").arg(format!("ControlPath={}/%C", self.control.display()));
+        c.args(ssh_options(self.control.as_deref()));
         c.args(opts).args(self.target.ssh_args());
         // passwords, passphrases and host key questions: a dialog (git.rs)
         c.envs(crate::git::askpass_envs(true));
@@ -434,7 +442,10 @@ impl SshConnector {
             std::fs::create_dir_all(&self.cache).map_err(|e| e.to_string())?;
             let tmp = cached.with_extension("download");
             let url = asset_url(VERSION, info.os, info.arch);
-            let done = Command::new("/usr/bin/curl").args(["-fsSL", "--retry", "2", "-o"]).arg(&tmp).arg(&url).output().map_err(|e| format!("cannot run curl: {e}"))?;
+            // Windows 10 and 11 ship curl.exe in System32
+            let mut curl = Command::new(if cfg!(windows) { "curl.exe" } else { "/usr/bin/curl" });
+            antler_host::host::no_console(&mut curl);
+            let done = curl.args(["-fsSL", "--retry", "2", "-o"]).arg(&tmp).arg(&url).output().map_err(|e| format!("cannot run curl: {e}"))?;
             if !done.status.success() {
                 return Err(format!("cannot download {url}: {}", String::from_utf8_lossy(&done.stderr).trim()));
             }
@@ -473,18 +484,38 @@ impl SshConnector {
 
 impl Drop for SshConnector {
     fn drop(&mut self) {
+        let Some(control) = &self.control else { return };
         // the master would idle for ten minutes
         if let Ok(mut c) = self.command(&["-O", "exit"]) {
             c.stdout(Stdio::null()).stderr(Stdio::null()).status().ok();
         }
-        std::fs::remove_dir_all(&self.control).ok();
+        std::fs::remove_dir_all(control).ok();
     }
+}
+
+/// The options of every `ssh` run. With a `control` folder, one ControlMaster per host carries every command;
+/// without one (Windows: Win32-OpenSSH has no ControlMaster, VS Code does the same there) each run connects anew.
+fn ssh_options(control: Option<&Path>) -> Vec<String> {
+    let mut o: Vec<String> = ["-T", "-o", "BatchMode=no", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=30"].map(String::from).to_vec();
+    if let Some(dir) = control {
+        o.extend(["-o".into(), "ControlMaster=auto".into(), "-o".into(), "ControlPersist=10m".into(), "-o".into(), format!("ControlPath={}/%C", dir.display())]);
+    }
+    o
 }
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_control_folder_shares_one_connection_and_without_one_each_run_connects() {
+        let shared = ssh_options(Some(Path::new("/tmp/antler-ssh-1-0"))).join(" ");
+        assert!(shared.contains("ControlMaster=auto") && shared.contains("ControlPath=/tmp/antler-ssh-1-0/%C"), "{shared}");
+        let alone = ssh_options(None).join(" ");
+        assert!(!alone.contains("Control"), "Win32-OpenSSH has no ControlMaster: {alone}");
+        assert!(alone.starts_with("-T") && alone.contains("BatchMode=no") && alone.contains("ServerAliveInterval=15"), "{alone}");
+    }
 
     #[test]
     fn config_hosts_skip_wildcards_and_collect_where_they_go() {
@@ -584,7 +615,7 @@ Host first
     fn installs_the_server_and_connects_through_a_stand_in_ssh() {
         use antler_host::host::Host;
         let tmp = tempfile::tempdir().unwrap();
-        let home = std::fs::canonicalize(tmp.path()).unwrap().join("home");
+        let home = antler_host::host::canonical(tmp.path()).unwrap().join("home");
         std::fs::create_dir(&home).unwrap();
         let fake = tmp.path().join("fake-ssh");
         let log = tmp.path().join("calls");

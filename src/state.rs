@@ -7,7 +7,7 @@ use crate::windows::WindowSave;
 
 /// `~/.config/antler/state.json`; `None` without a home directory.
 pub fn default_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/antler/state.json"))
+    crate::paths::config("state.json")
 }
 
 /// The graph's branch choice per repo (`Graph::load_filters` reads it); a missing or broken file is no choices.

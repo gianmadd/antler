@@ -177,7 +177,7 @@ mod tests {
         repo(&tmp.path().join("app/api")); // depth 2
         repo(&tmp.path().join("work/x/y/wt")); // depth 4: beyond the default 3
         let mut ws = Workspace::open(tmp.path());
-        let names: Vec<_> = ws.sections.iter().map(|s| s.name.as_str()).collect();
+        let names: Vec<_> = ws.sections.iter().map(|s| s.name.replace('\\', "/")).collect();
         assert_eq!(names, ["app/api"]);
 
         ws.depth = 4;
@@ -203,7 +203,7 @@ mod tests {
     fn worktrees_submodules_and_detached_heads_are_labelled() {
         let tmp = tempfile::tempdir().unwrap();
         // git writes canonical paths into worktree `.git` files (/private/var on macOS), as main.rs does for the Root.
-        let root = fs::canonicalize(tmp.path()).unwrap();
+        let root = antler_host::host::canonical(tmp.path()).unwrap();
         let api = root.join("app/api");
         repo(&api);
         fs::write(api.join(".gitignore"), "ignored/\n").unwrap();
@@ -214,7 +214,7 @@ mod tests {
 
         let ws = Workspace::open(&root);
 
-        let names: Vec<_> = ws.sections.iter().map(|s| s.name.as_str()).collect();
+        let names: Vec<_> = ws.sections.iter().map(|s| s.name.replace('\\', "/")).collect();
         assert_eq!(names, ["app/api", "app/api/ignored", "app/api/sub", "lib", "wt"]);
         let wt = &ws.sections[4];
         assert_eq!(wt.worktree_label.as_deref(), Some("worktree of app/api"));

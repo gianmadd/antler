@@ -717,32 +717,82 @@ fn network(repo: &Path, args: &[&str], interactive: bool) -> Result<String> {
 /// the helper is `false`, so a question fails at once.
 pub fn askpass_envs(interactive: bool) -> Vec<(&'static str, std::ffi::OsString)> {
     let exe = std::env::current_exe().map(|p| p.into_os_string()).unwrap_or_default();
-    let helper = if interactive && !exe.is_empty() { exe } else { "/usr/bin/false".into() };
+    // Windows has no `false`: the antler binary in its never-asking mode stands in
+    let (helper, mode) = match (interactive && !exe.is_empty(), cfg!(windows)) {
+        (true, _) => (exe, "1"),
+        (false, true) => (exe, ASKPASS_NEVER),
+        (false, false) => ("/usr/bin/false".into(), "1"),
+    };
     vec![
         ("GIT_TERMINAL_PROMPT", "0".into()),
         ("GIT_ASKPASS", helper.clone()),
         ("SSH_ASKPASS", helper),
         ("SSH_ASKPASS_REQUIRE", "force".into()), // ssh would otherwise read the passphrase from the tty, if any
-        (ASKPASS_ENV, "1".into()),
+        (ASKPASS_ENV, mode.into()),
     ]
+}
+
+/// `ASKPASS_ENV`'s value when the question must fail at once.
+const ASKPASS_NEVER: &str = "never";
+
+/// A password, passphrase or PIN is asked for: the answer is hidden. Only the request counts, not the URL or key
+/// path after it.
+fn asks_secret(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    let request = lower.split('\'').next().unwrap_or_default(); // what follows is the URL or key path
+    ["password", "passphrase", "pin"].iter().any(|w| request.contains(w))
 }
 
 /// osascript's arguments for a native input dialog showing `prompt`; passwords and passphrases are hidden.
 /// The prompt goes in as an argument, so no quoting can break the script.
 pub fn askpass_args(prompt: &str) -> Vec<String> {
-    let lower = prompt.to_lowercase();
-    let request = lower.split('\'').next().unwrap_or_default(); // what follows is the URL or key path
-    let hidden = if ["password", "passphrase", "pin"].iter().any(|w| request.contains(w)) { " with hidden answer" } else { "" };
+    let hidden = if asks_secret(prompt) { " with hidden answer" } else { "" };
     let dialog = format!("text returned of (display dialog (item 1 of argv) default answer \"\" with title \"Antler\"{hidden})");
     ["-e", "on run argv", "-e", dialog.as_str(), "-e", "end run", "--", prompt].map(String::from).to_vec()
 }
 
+/// Windows: a PowerShell WinForms dialog. The prompt comes in through `ANTLER_ASKPASS_PROMPT`, never inside
+/// the script, so no quoting can break it; the answer is written as UTF-8 without a newline.
+fn askpass_powershell(hidden: bool) -> String {
+    let hidden = if hidden { "$true" } else { "$false" };
+    [
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8",
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "[Windows.Forms.Application]::EnableVisualStyles()",
+        "$f = New-Object Windows.Forms.Form -Property @{ Text = 'Antler'; ClientSize = New-Object Drawing.Size(420, 120); StartPosition = 'CenterScreen'; TopMost = $true; FormBorderStyle = 'FixedDialog'; MaximizeBox = $false; MinimizeBox = $false }",
+        "$l = New-Object Windows.Forms.Label -Property @{ Text = $env:ANTLER_ASKPASS_PROMPT; Left = 12; Top = 10; Width = 396; Height = 36 }",
+        &format!("$t = New-Object Windows.Forms.TextBox -Property @{{ Left = 12; Top = 50; Width = 396; UseSystemPasswordChar = {hidden} }}"),
+        "$ok = New-Object Windows.Forms.Button -Property @{ Text = 'OK'; Left = 252; Top = 84; DialogResult = 'OK' }",
+        "$no = New-Object Windows.Forms.Button -Property @{ Text = 'Cancel'; Left = 333; Top = 84; DialogResult = 'Cancel' }",
+        "$f.Controls.AddRange(@($l, $t, $ok, $no)); $f.AcceptButton = $ok; $f.CancelButton = $no",
+        "if ($f.ShowDialog() -eq 'OK') { [Console]::Out.Write($t.Text); exit 0 } else { exit 1 }",
+    ]
+    .join("\n")
+}
+
+/// The program that shows the askpass dialog for `prompt` on this OS.
+fn askpass_command(prompt: &str) -> Command {
+    if cfg!(windows) {
+        let mut c = Command::new("powershell.exe");
+        antler_host::host::no_console(&mut c);
+        c.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &crate::ssh::encoded(&askpass_powershell(asks_secret(prompt)))]).env("ANTLER_ASKPASS_PROMPT", prompt);
+        c
+    } else {
+        let mut c = Command::new("osascript");
+        c.args(askpass_args(prompt));
+        c
+    }
+}
+
 /// Askpass mode (`ASKPASS_ENV` set): git or ssh started antler with `prompt`; the answer goes to stdout.
 /// Cancel exits 1, so git fails with its own "could not read" error instead of waiting.
-/// shortcut: a native osascript dialog, not one inside the window (that needs IPC with the running app);
-/// it may open behind the window. Upgrade if users miss it.
+/// shortcut: a native dialog (osascript, PowerShell on Windows), not one inside the window (that needs IPC with
+/// the running app); it may open behind the window. Upgrade if users miss it.
 pub fn askpass(prompt: &str) -> i32 {
-    match Command::new("osascript").args(askpass_args(prompt)).output() {
+    if std::env::var_os(ASKPASS_ENV).is_some_and(|v| v == ASKPASS_NEVER) {
+        return 1;
+    }
+    match askpass_command(prompt).output() {
         Ok(out) if out.status.success() => {
             print!("{}", String::from_utf8_lossy(&out.stdout));
             0
@@ -858,6 +908,14 @@ mod tests {
         for secret in ["Password for 'https://me@github.com': ", "Enter passphrase for key '/Users/me/.ssh/id_ed25519': "] {
             assert!(args(secret).iter().any(|a| a.contains("with hidden answer")), "{secret}");
         }
+    }
+
+    #[test]
+    fn the_windows_askpass_dialog_hides_secrets_and_reads_the_prompt_from_the_environment() {
+        assert!(askpass_powershell(true).contains("UseSystemPasswordChar = $true"));
+        assert!(askpass_powershell(false).contains("UseSystemPasswordChar = $false"));
+        assert!(askpass_powershell(true).contains("$env:ANTLER_ASKPASS_PROMPT"), "the prompt never goes inside the script");
+        assert!(asks_secret("Enter passphrase for key 'C:\\Users\\me/.ssh/id_ed25519': ") && !asks_secret("Username for 'https://pin.example.com': "));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 /// `~/.config/antler/recent.json`; without a home directory an empty path, which reads as an empty list.
 pub fn default_path() -> PathBuf {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/antler/recent.json")).unwrap_or_default()
+    crate::paths::config("recent.json").unwrap_or_default()
 }
 
 /// The file as saved, existing or not.

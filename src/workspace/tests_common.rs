@@ -103,7 +103,7 @@ pub(super) fn hits(ws: &Workspace) -> Vec<(String, Vec<(usize, String, Vec<Strin
         .files
         .iter()
         .map(|f| {
-            let rel = f.path.strip_prefix(&ws.root).unwrap().display().to_string();
+            let rel = f.path.strip_prefix(&ws.root).unwrap().display().to_string().replace('\\', "/"); // the same on Windows
             let lines = f.lines.iter().map(|l| (l.line, l.text.clone(), l.ranges.iter().map(|r| l.text[r.clone()].to_string()).collect())).collect();
             (rel, lines)
         })

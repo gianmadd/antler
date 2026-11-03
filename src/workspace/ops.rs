@@ -1,5 +1,8 @@
 use super::*;
 
+/// What the confirmations call the place deleted files go: VS Code says "Recycle Bin" on Windows.
+pub(crate) const TRASH: &str = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
+
 /// A git action from the panel. `Send`: the UI runs it on a background thread with `scan_after`.
 #[derive(Debug, Clone)]
 pub enum Op {
@@ -223,11 +226,11 @@ impl Op {
             }),
             Op::Trash { path, unsaved } => {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let mut message = format!("Are you sure you want to move {name} to the Trash?");
+                let mut message = format!("Are you sure you want to move {name} to the {TRASH}?");
                 if *unsaved {
                     message += " Its unsaved changes will be lost.";
                 }
-                Some(Confirmation { title: "Move to Trash?".into(), message, ok: "Move to Trash".into(), danger: true, smart_commit: false })
+                Some(Confirmation { title: format!("Move to {TRASH}?"), message, ok: format!("Move to {TRASH}"), danger: true, smart_commit: false })
             }
             Op::Undo(op) | Op::Redo(op) => op.confirmation(),
             Op::Batch(ops) if ops.len() > 1 && ops.iter().all(|op| matches!(op, Op::Trash { .. })) => {
@@ -240,12 +243,12 @@ impl Op {
                     })
                     .collect();
                 let unsaved = ops.iter().any(|op| matches!(op, Op::Trash { unsaved: true, .. }));
-                let mut message = format!("Are you sure you want to move the following {} files/directories and their contents to the Trash?", ops.len());
+                let mut message = format!("Are you sure you want to move the following {} files/directories and their contents to the {TRASH}?", ops.len());
                 if unsaved {
                     message += " Their unsaved changes will be lost.";
                 }
                 message = format!("{message}\n\n{}", names.join("\n"));
-                Some(Confirmation { title: "Move to Trash?".into(), message, ok: "Move to Trash".into(), danger: true, smart_commit: false })
+                Some(Confirmation { title: format!("Move to {TRASH}?"), message, ok: format!("Move to {TRASH}"), danger: true, smart_commit: false })
             }
             Op::Batch(ops) => ops.first().and_then(Op::confirmation),
             // VS Code's modal warnings, with its "Yes" button
@@ -370,7 +373,7 @@ impl Op {
             }
             Op::Batch(_) => unreachable!("ScanJob::run runs a batch's ops one by one"),
             Op::Trash { path, .. } => {
-                let trashed = host::current().trash(path).map_err(|e| format!("Cannot move {} to the Trash: {e}", path.display()))?;
+                let trashed = host::current().trash(path).map_err(|e| format!("Cannot move {} to the {TRASH}: {e}", path.display()))?;
                 Ok(trashed.map(|trashed| Op::Rename { from: trashed, to: path.clone() }))
             }
             git => git.run_git().map(|()| None),
@@ -465,7 +468,7 @@ pub(super) fn copy_target(dir: &Path, name: &std::ffi::OsStr, folder: bool, take
 /// Force Checkout's discard of one file of "Changes": restored from the index, or (untracked) moved to the Trash.
 fn force_discard(repo: &Path, file: &FileEntry) -> git::Result<()> {
     if file.is_untracked() {
-        host::current().trash(&repo.join(&file.path)).map(drop).map_err(|e| format!("Cannot move {} to the Trash: {e}", file.path))
+        host::current().trash(&repo.join(&file.path)).map(drop).map_err(|e| format!("Cannot move {} to the {TRASH}: {e}", file.path))
     } else {
         discard(repo, &file.path, false)
     }
@@ -483,7 +486,7 @@ fn force_confirmation(files: &[FileEntry]) -> Option<Confirmation> {
     } else {
         format!("Are you sure you want to DELETE the {} untracked files?", untracked.len())
     };
-    let trash = if one { "You can restore this file from the Trash." } else { "You can restore these files from the Trash." };
+    let trash = if one { format!("You can restore this file from the {TRASH}.") } else { format!("You can restore these files from the {TRASH}.") };
     let discard = match tracked[..] {
         [f] => format!("Are you sure you want to discard changes in '{}'?", name(f)),
         _ => format!("Are you sure you want to discard ALL changes in {} files?", tracked.len()),
@@ -497,7 +500,7 @@ fn force_confirmation(files: &[FileEntry]) -> Option<Confirmation> {
         },
         (1, 0) => (discard, "Discard File".to_string()),
         (_, 0) => (format!("{discard}\n\n{lost}"), format!("Discard All {n} Files")),
-        (0, _) => (format!("{delete}\n\n{trash}"), "Move to Trash".to_string()),
+        (0, _) => (format!("{delete}\n\n{trash}"), format!("Move to {TRASH}")),
         _ => (format!("{delete} {trash}\n\n{discard}\n\n{lost}"), format!("Discard All {n} Files")),
     };
     Some(Confirmation { title: "Force Checkout".into(), message, ok, danger: true, smart_commit: false })
@@ -912,7 +915,7 @@ mod tests {
             both.message,
             "Are you sure you want to DELETE the following untracked file: 'new.txt'? You can restore this file from the Trash.\n\n\
              Are you sure you want to discard ALL changes in 2 files?\n\n\
-             This is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed."
+             This is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed.".replace("Trash", TRASH)
         );
         assert_eq!(both.ok, "Discard All 3 Files");
         let op = Op::Checkout { repo: "/r".into(), sha: "x".into(), local: LocalChanges::Force(vec![file("a", 'M'), file("b", 'M'), file("n", 'U')]) };
@@ -924,8 +927,8 @@ mod tests {
         let gone = ask(vec![file("x", 'D'), file("y", 'D')]);
         assert_eq!((gone.message.as_str(), gone.ok.as_str()), ("Are you sure you want to restore ALL 2 files?", "Restore All 2 Files"));
         let untracked = ask(vec![file("a", 'U'), file("b", 'U')]);
-        assert_eq!(untracked.message, "Are you sure you want to DELETE the 2 untracked files?\n\nYou can restore these files from the Trash.");
-        assert_eq!(untracked.ok, "Move to Trash");
+        assert_eq!(untracked.message, "Are you sure you want to DELETE the 2 untracked files?\n\nYou can restore these files from the Trash.".replace("Trash", TRASH));
+        assert_eq!(untracked.ok, format!("Move to {TRASH}"));
         assert_eq!(ask(vec![file("d/x.txt", 'M')]).message, "Are you sure you want to discard changes in 'x.txt'?");
     }
 
@@ -1090,7 +1093,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lines = |first: &str, last: &str| format!("{first}\n2\n3\n4\n5\n{last}\n");
         for (local, last, stashes) in [(LocalChanges::Stash(String::new()), "6", 1), (LocalChanges::Migrate(String::new()), "mine", 0)] {
-            let dir = tmp.path().join(format!("{local:?}"));
+            let dir = tmp.path().join(format!("{local:?}").replace(|c: char| !c.is_alphanumeric(), "")); // Windows takes no " in a name
             repo(&dir);
             fs::write(dir.join("c.txt"), lines("1", "6")).unwrap();
             git(&dir, &["add", "c.txt"]);
@@ -1498,7 +1501,7 @@ mod transfer_tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let mut ws = four(root);
-        let [d, e, a, b, c] = ["d", "d/e.txt", "a.txt", "b.txt", "c.txt"].map(|f| root.join(f));
+        let [d, e, a, b, c] = ["d", "d/e.txt", "a.txt", "b.txt", "c.txt"].map(|f| root.join(std::path::PathBuf::from_iter(f.split('/'))));
 
         ws.select(key(&a));
         ws.select_range(key(&c));
@@ -1529,13 +1532,13 @@ mod transfer_tests {
         let mut ws = four(root);
         let op = ws.trash_all(&[root.join("d"), root.join("a.txt")]);
         let ask = op.confirmation().unwrap();
-        assert!(ask.message.starts_with("Are you sure you want to move the following 2 files/directories and their contents to the Trash?"));
+        assert!(ask.message.starts_with(&format!("Are you sure you want to move the following 2 files/directories and their contents to the {TRASH}?")));
         assert!(ask.message.ends_with("d\na.txt"));
         ws.perform(op);
         assert!(!root.join("d").exists() && !root.join("a.txt").exists());
         ws.undo_now();
         assert!(root.join("d/e.txt").is_file() && root.join("a.txt").is_file());
-        assert!(ws.trash_all(&[root.join("a.txt")]).confirmation().unwrap().message.contains("move a.txt to the Trash"));
+        assert!(ws.trash_all(&[root.join("a.txt")]).confirmation().unwrap().message.contains(&format!("move a.txt to the {TRASH}")));
     }
 
     #[test]
@@ -1755,10 +1758,7 @@ mod conflict_tests {
 
     /// Repo `dir` on `main` with `a.txt` changed one way on `main` and another on branch `feature`; `b.txt` merges cleanly.
     fn diverged(dir: &Path) {
-        fs::create_dir_all(dir).unwrap();
-        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"]] {
-            assert!(git(dir, args));
-        }
+        crate::testing::init(dir);
         commit(dir, "a.txt", "base\n");
         assert!(git(dir, &["checkout", "-q", "-b", "feature"]));
         commit(dir, "a.txt", "theirs\n");
