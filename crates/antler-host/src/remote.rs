@@ -430,9 +430,9 @@ impl Drop for Remote {
     }
 }
 
-/// A wire path as the app sees it: always `/`-separated, whatever the app's OS.
+/// A wire path as the app sees it: native, so it equals what `Local` gives (on Windows, `C:/x` becomes `C:\x`).
 fn native_wire(s: &str) -> PathBuf {
-    PathBuf::from(s)
+    native_path(s)
 }
 
 impl Inner {
@@ -513,7 +513,7 @@ impl Host for Remote {
 
     fn create(&self, path: &Path, folder: bool) -> io::Result<PathBuf> {
         match self.inner().call(Req::Create { path: wire_path(path), folder }, &[], None)? {
-            (Res::Path { path }, _) => Ok(PathBuf::from(path)),
+            (Res::Path { path }, _) => Ok(native_wire(&path)),
             _ => unexpected("create"),
         }
     }
@@ -548,14 +548,14 @@ impl Host for Remote {
 
     fn list_dir(&self, dir: &Path) -> Vec<(PathBuf, bool)> {
         match self.inner().call(Req::ListDir { dir: wire_path(dir), exclude: exclude() }, &[], None) {
-            Ok((Res::Entries { entries }, _)) => entries.into_iter().map(|(p, d)| (PathBuf::from(p), d)).collect(),
+            Ok((Res::Entries { entries }, _)) => entries.into_iter().map(|(p, d)| (native_wire(&p), d)).collect(),
             _ => Vec::new(),
         }
     }
 
     fn discover(&self, root: &Path, max_depth: usize) -> Vec<Repo> {
         match self.inner().call(Req::Discover { root: wire_path(root), max_depth }, &[], None) {
-            Ok((Res::Repos { repos }, _)) => repos.into_iter().map(|r| Repo { path: PathBuf::from(r.path), worktree_of: r.worktree_of.map(PathBuf::from) }).collect(),
+            Ok((Res::Repos { repos }, _)) => repos.into_iter().map(|r| Repo { path: native_wire(&r.path), worktree_of: r.worktree_of.map(|p| native_wire(&p)) }).collect(),
             _ => Vec::new(),
         }
     }
@@ -568,7 +568,7 @@ impl Host for Remote {
         self.inner()
             .call_chunked(req, &[], Some(cancel), &mut |c| {
                 if let Res::FilesChunk { files } = c {
-                    on_chunk(files.into_iter().map(PathBuf::from).collect());
+                    on_chunk(files.iter().map(|p| native_wire(p)).collect());
                 }
             })
             .is_ok()
@@ -581,7 +581,7 @@ impl Host for Remote {
         let req = Req::Search { root: wire_path(root), repos: strings(repos), query: query.clone(), limit, exclude: exclude() };
         let chunk = |c| {
             if let Res::SearchChunk { files } = c {
-                on_files(files.into_iter().map(|(path, lines)| FileMatches { path: PathBuf::from(path), lines }).collect());
+                on_files(files.into_iter().map(|(path, lines)| FileMatches { path: native_wire(&path), lines }).collect());
             }
         };
         match self.inner().call_chunked(req, &[], Some(cancel), &mut { chunk }) {

@@ -138,7 +138,7 @@ impl From<Results> for WireResults {
 impl From<WireResults> for Results {
     fn from(r: WireResults) -> Self {
         Results {
-            files: r.files.into_iter().map(|(path, lines)| FileMatches { path: PathBuf::from(path), lines }).collect(),
+            files: r.files.into_iter().map(|(path, lines)| FileMatches { path: native_path(&path), lines }).collect(),
             truncated: r.truncated,
             error: r.error,
         }
