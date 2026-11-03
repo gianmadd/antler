@@ -115,6 +115,7 @@ fn pages() -> Vec<SettingPage> {
                 number("Scan Depth", "How many folders deep to look for repositories.", "antler.scanDepth", (0., 20.), |s| s.scan_depth as f64),
                 on_off("Hide Clean Repositories", "Leave out repositories without changes.", "antler.hideCleanRepos", |s| s.hide_clean_repos),
                 on_off("Blame Status Bar Item", "Show blame for the cursor line in the status bar.", "git.blame.statusBarItem.enabled", |s| s.git_blame_status_bar_enabled),
+                on_off("Blame Editor Decoration", "Show blame after the cursor line.", "git.blame.editorDecoration.enabled", |s| s.git_blame_editor_decoration_enabled),
                 on_off("Autofetch", "Fetch every repository periodically.", "git.autofetch", |s| s.git_autofetch),
                 number("Autofetch Period", "Seconds between fetches.", "git.autofetchPeriod", (5., 86_400.), |s| s.git_autofetch_period as f64),
                 on_off("Confirm Discard", "Ask before discarding changes.", "antler.confirmDiscard", |s| s.confirm_discard),

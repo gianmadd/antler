@@ -81,7 +81,8 @@ impl Antler {
     /// Creates an editor for each new file tab, drops those of closed tabs, and pushes model-side changes
     /// (reload, "open at line") into them.
     fn load_blame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !cx.global::<crate::settings::Current>().0.git_blame_status_bar_enabled { self.ws.clear_blame(); return; }
+        let settings = &cx.global::<crate::settings::Current>().0;
+        if !settings.git_blame_status_bar_enabled && !settings.git_blame_editor_decoration_enabled { self.ws.clear_blame(); return; }
         let Some((repo, path, text)) = self.ws.blame_target() else { self.ws.clear_blame(); return; };
         let absolute = repo.join(&path);
         if !self.ws.needs_blame(&absolute) { return; }

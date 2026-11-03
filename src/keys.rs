@@ -18,7 +18,7 @@ use crate::stash_view::CloseStash;
 use crate::tabs::*;
 use crate::ports_view::{ForwardPort, ShowPorts, StopForwardingPort};
 use crate::remote_view::{CloseRemoteConnection, ConnectToHost};
-use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleBlameStatusBar, ToggleSidebar, set_menus};
+use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleBlameEditorDecoration, ToggleBlameStatusBar, ToggleSidebar, set_menus};
 
 /// Where a binding applies: a GPUI key context, and the name `when` uses in keybindings.json.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -139,6 +139,7 @@ cmds![
     ("remote.ssh.connect", "Connect to Host…", "", Global, ConnectToHost),
     ("workbench.action.remote.close", "Close Remote Connection", "", Global, CloseRemoteConnection),
     ("git.blame.toggleStatusBarItem", "Git: Toggle Git Blame Status Bar Item", "", Global, ToggleBlameStatusBar),
+    ("git.blame.toggleEditorDecoration", "Git: Toggle Git Blame Editor Decoration", "", Global, ToggleBlameEditorDecoration),
     ("remote.tunnel.forwardCommandPalette", "Forward a Port", "", Global, ForwardPort),
     ("remote.tunnel.closeCommandPalette", "Stop Forwarding Port", "", Global, StopForwardingPort),
     ("~remote.forwardedPorts.focus", "Ports: Focus on Ports View", "", Global, ShowPorts),

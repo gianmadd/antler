@@ -71,7 +71,7 @@ use windows::{Registry, WindowSave};
 use workspace::{GitRow, Op, View, Workspace};
 
 actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch]);
-actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts, ToggleBlameStatusBar]);
+actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts, ToggleBlameStatusBar, ToggleBlameEditorDecoration]);
 actions!(antler, [NewWindow, CloseWindow, MinimizeWindow, FocusNextWindow]);
 use remote_view::{CloseRemoteConnection, ConnectToHost, RemoteWin};
 
@@ -409,8 +409,8 @@ impl Antler {
         let new = cx.global::<settings::Current>().0.clone();
         let old = std::mem::replace(&mut self.applied, new.clone());
         self.ws.apply_settings(&new);
-        if old.git_blame_status_bar_enabled != new.git_blame_status_bar_enabled {
-            if !new.git_blame_status_bar_enabled { self.ws.clear_blame(); }
+        if (old.git_blame_status_bar_enabled, old.git_blame_editor_decoration_enabled) != (new.git_blame_status_bar_enabled, new.git_blame_editor_decoration_enabled) {
+            if !new.git_blame_status_bar_enabled && !new.git_blame_editor_decoration_enabled { self.ws.clear_blame(); }
             cx.notify();
         }
         workspace::set_excluded(new.excluded());
@@ -715,6 +715,11 @@ impl Antler {
         settings::put(cx, "git.blame.statusBarItem.enabled", serde_json::Value::Bool(value));
     }
 
+    fn toggle_blame_editor_decoration(&mut self, _: &ToggleBlameEditorDecoration, _: &mut Window, cx: &mut Context<Self>) {
+        let value = !cx.global::<settings::Current>().0.git_blame_editor_decoration_enabled;
+        settings::put(cx, "git.blame.editorDecoration.enabled", serde_json::Value::Bool(value));
+    }
+
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.ws.toggle_sidebar();
         cx.notify();
@@ -784,6 +789,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::show_git))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_blame_status_bar))
+            .on_action(cx.listener(Self::toggle_blame_editor_decoration))
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::show_search))
             .on_action(cx.listener(Self::show_ports))
