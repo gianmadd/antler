@@ -439,10 +439,10 @@ mod tests {
     fn theme_settings_are_read() {
         let (_, s, _) = run(&[], None);
         assert_eq!((s.color_theme.as_str(), s.auto_detect_color_scheme), ("Antler Dark", false), "VS Code's defaults");
-        let json = r#"{"workbench.colorTheme": "Antler Light", "window.autoDetectColorScheme": true, "workbench.preferredDarkColorTheme": "Antler Dark Classic"}"#;
+        let json = r#"{"workbench.colorTheme": "Antler Light", "window.autoDetectColorScheme": true, "workbench.preferredDarkColorTheme": "Antler Dark"}"#;
         let (_, s, e) = run(&[], Some(json));
         assert_eq!(e, None);
-        assert_eq!((s.color_theme.as_str(), s.auto_detect_color_scheme, s.preferred_dark_color_theme.as_str()), ("Antler Light", true, "Antler Dark Classic"));
+        assert_eq!((s.color_theme.as_str(), s.auto_detect_color_scheme, s.preferred_dark_color_theme.as_str()), ("Antler Light", true, "Antler Dark"));
     }
 
     #[test]
