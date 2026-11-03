@@ -16,32 +16,6 @@ use crate::style::{self, FG_DIM, FG_FAINT, GIT_M, c};
 
 actions!(antler, [GoToFile, CloseGoToFile, CommandPalette, GoToLine, QuickTextSearch, QuickSearchInSearchView]);
 
-#[cfg(test)]
-mod tests {
-    use super::quick_location;
-    use crate::search::{FileMatches, LineMatch};
-
-    #[test]
-    fn quick_search_row_maps_to_path_line_and_column() {
-        let files = vec![
-            FileMatches {
-                path: "first.rs".into(),
-                lines: vec![
-                    LineMatch { line: 2, indent: 0, text: "before".into(), ranges: vec![0..2] },
-                    LineMatch { line: 3, indent: 4, text: "éé target".into(), ranges: vec![5..11] },
-                ],
-            },
-            FileMatches {
-                path: "second.rs".into(),
-                lines: vec![LineMatch { line: 8, indent: 0, text: "match".into(), ranges: vec![0..5] }],
-            },
-        ];
-
-        assert_eq!(quick_location(&files, 2), Some(("first.rs".into(), 3, 7)));
-        assert_eq!(quick_location(&files, 4), Some(("second.rs".into(), 8, 0)));
-    }
-}
-
 fn quick_location(files: &[FileMatches], mut row: usize) -> Option<(std::path::PathBuf, usize, usize)> {
     for file in files {
         row = row.checked_sub(1)?; // file header
@@ -425,5 +399,31 @@ impl Antler {
             })
         })
         .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quick_location;
+    use crate::search::{FileMatches, LineMatch};
+
+    #[test]
+    fn quick_search_row_maps_to_path_line_and_column() {
+        let files = vec![
+            FileMatches {
+                path: "first.rs".into(),
+                lines: vec![
+                    LineMatch { line: 2, indent: 0, text: "before".into(), ranges: vec![0..2] },
+                    LineMatch { line: 3, indent: 4, text: "éé target".into(), ranges: vec![5..11] },
+                ],
+            },
+            FileMatches {
+                path: "second.rs".into(),
+                lines: vec![LineMatch { line: 8, indent: 0, text: "match".into(), ranges: vec![0..5] }],
+            },
+        ];
+
+        assert_eq!(quick_location(&files, 2), Some(("first.rs".into(), 3, 7)));
+        assert_eq!(quick_location(&files, 4), Some(("second.rs".into(), 8, 0)));
     }
 }
