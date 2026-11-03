@@ -20,20 +20,34 @@ pub struct GoTo {
     /// Id of the newest match, and the flag that stops it when a newer query starts.
     matching: u64,
     cancel: Arc<AtomicBool>,
+    /// The list being listed stops when this is set (a newer one starts).
+    listing: Arc<AtomicBool>,
+    /// `files` holds the chunks of the list in progress (unsorted until it ends), not the previous list.
+    partial: bool,
 }
 
 /// Lists the files of the Root: `Send`, run it off the UI thread, then give it to `Workspace::finish_list_files`.
+#[derive(Clone)]
 pub struct FilesJob {
     id: u64,
     host: Arc<dyn crate::host::Host>,
     pub root: PathBuf,
     repos: Vec<PathBuf>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl FilesJob {
-    pub fn run(&self) -> Vec<String> {
+    /// Gives the relative paths to `on_chunk` as the host walks (`Workspace::list_chunk`).
+    pub fn run_chunked(&self, on_chunk: &mut dyn FnMut(Vec<String>)) {
         let rel = |p: &Path| p.strip_prefix(&self.root).ok().map(|p| p.to_string_lossy().into_owned());
-        let mut files: Vec<String> = self.host.files(&self.root, &self.repos).iter().filter_map(|p| rel(p)).collect();
+        self.host.files_chunked(&self.root, &self.repos, &self.cancel, &mut |c| on_chunk(c.iter().filter_map(|p| rel(p)).collect()));
+    }
+
+    /// The whole sorted list at once.
+    #[cfg(test)]
+    pub fn run(&self) -> Vec<String> {
+        let mut files = Vec::new();
+        self.run_chunked(&mut |c| files.extend(c));
         files.sort_unstable();
         files
     }
@@ -60,8 +74,33 @@ impl Workspace {
     /// A fresh list of the Root's files; a list still running is dropped when it ends.
     pub fn start_list_files(&mut self) -> FilesJob {
         self.goto.last += 1;
+        self.goto.partial = false;
+        self.goto.listing.store(true, Ordering::Relaxed);
+        self.goto.listing = Default::default();
         let repos = self.sections.iter().map(|s| s.repo.path.clone()).collect();
-        FilesJob { id: self.goto.last, host: self.host.clone(), root: self.root.clone(), repos }
+        FilesJob { id: self.goto.last, host: self.host.clone(), root: self.root.clone(), repos, cancel: self.goto.listing.clone() }
+    }
+
+    /// Adds a chunk of `job`'s list, so the popup shows files before the walk ends; the first one replaces the previous list.
+    // shortcut: a match job still holding the list makes `make_mut` copy it; upgrade if a huge Root shows it.
+    pub fn list_chunk(&mut self, job: &FilesJob, chunk: Vec<String>) {
+        if job.id == self.goto.last && job.root == self.root {
+            if !self.goto.partial {
+                self.goto.files = Some(Default::default());
+                self.goto.partial = true;
+            }
+            Arc::make_mut(self.goto.files.get_or_insert_default()).extend(chunk);
+        }
+    }
+
+    /// The walk of `job` ended: sorts the chunks into the final list (an empty Root has no chunk and an empty list).
+    pub fn end_list_files(&mut self, job: &FilesJob) {
+        if job.id == self.goto.last && job.root == self.root {
+            let mut files = if self.goto.partial { self.goto.files.take().map(Arc::unwrap_or_clone).unwrap_or_default() } else { Vec::new() };
+            files.sort_unstable();
+            self.goto.files = Some(Arc::new(files));
+            self.goto.partial = false;
+        }
     }
 
     /// After a rescan: with the popup open, list the files again (some may be new or gone).
@@ -69,6 +108,7 @@ impl Workspace {
         self.goto.open.then(|| self.start_list_files())
     }
 
+    #[cfg(test)]
     /// Installs the list of `job`, unless a newer one started since (or the Root changed).
     pub fn finish_list_files(&mut self, job: &FilesJob, files: Vec<String>) {
         if job.id == self.goto.last && job.root == self.root {
@@ -224,6 +264,28 @@ mod tests {
         let list = job.run();
         ws.finish_list_files(&job, list);
         ws
+    }
+
+    #[test]
+    fn chunks_of_the_list_show_at_once_replace_the_old_list_and_end_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        files(tmp.path(), &["b.rs", "a.rs"]);
+        let mut ws = open(tmp.path());
+        let job = ws.start_list_files();
+        ws.list_chunk(&job, vec!["z.rs".into()]);
+        assert_eq!(found(&ws, "").len(), 1, "the previous list is gone with the first chunk");
+        ws.list_chunk(&job, vec!["c.rs".into()]);
+        assert_eq!(found(&ws, "rs").len(), 2);
+        let newer = ws.start_list_files();
+        ws.list_chunk(&job, vec!["late.rs".into()]);
+        assert_eq!(found(&ws, "rs").len(), 2, "a chunk of a dropped list is ignored");
+        ws.end_list_files(&job);
+        assert!(job.cancel.load(std::sync::atomic::Ordering::Relaxed), "a newer list stops the walk of the older one");
+        let mut rels = Vec::new();
+        newer.run_chunked(&mut |c| rels.extend(c));
+        ws.list_chunk(&newer, rels);
+        ws.end_list_files(&newer);
+        assert_eq!(found(&ws, "rs").into_iter().map(|f| f.0).collect::<Vec<_>>(), ["a.rs", "b.rs"]);
     }
 
     #[test]

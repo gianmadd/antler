@@ -9,6 +9,7 @@ pub use antler_host::search::*;
 use crate::host::Host;
 
 /// One search, `Send`: run it off the UI thread, then give it back to `Workspace::finish_search`.
+#[derive(Clone)]
 pub struct SearchJob {
     pub(crate) id: u64,
     /// Where the Root lives.
@@ -23,6 +24,13 @@ pub struct SearchJob {
 }
 
 impl SearchJob {
+    /// Gives the files with matches to `on_files` as they are found (`Workspace::search_chunk`); the returned
+    /// `Results` has only `truncated` and `error`.
+    pub fn run_chunked(&self, on_files: &mut dyn FnMut(Vec<FileMatches>)) -> Results {
+        self.host.search_chunked(&self.root, &self.repos, &self.query, self.limit, &self.cancel, on_files)
+    }
+
+    #[cfg(test)]
     pub fn run(&self) -> Results {
         self.host.search(&self.root, &self.repos, &self.query, self.limit, &self.cancel)
     }

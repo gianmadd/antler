@@ -7,6 +7,8 @@ pub struct Search {
     /// Results of the last finished search; `None` before any search or while the first one runs.
     pub results: Option<Results>,
     pub running: bool,
+    /// `results` holds the chunks of the search in progress (unsorted), not the previous search's.
+    pub(super) partial: bool,
     /// Result files whose lines are hidden; a new search typed by the user unfolds them all.
     pub folded: HashSet<PathBuf>,
     /// The Replace field's text and its "Preserve Case" toggle.
@@ -45,6 +47,7 @@ impl Workspace {
         self.search.last += 1;
         self.search.query = query.clone();
         self.search.running = !query.text.is_empty();
+        self.search.partial = false;
         if query.text.is_empty() {
             self.search.results = None;
             return None;
@@ -61,10 +64,25 @@ impl Workspace {
         self.start_search(self.search.query.clone())
     }
 
-    /// Installs the results of `job`, unless a newer search started since (or the Root changed).
-    pub fn finish_search(&mut self, job: &SearchJob, results: Results) {
+    /// Adds files found by `job` while it runs; the first chunk replaces the previous search's results.
+    pub fn search_chunk(&mut self, job: &SearchJob, files: Vec<search::FileMatches>) {
         if job.id == self.search.last && job.root == self.root {
-            (self.search.results, self.search.running) = (Some(results), false);
+            let mut results = self.search.results.take().filter(|_| self.search.partial).unwrap_or_default();
+            results.files.extend(files);
+            self.search.results = Some(results);
+            self.search.partial = true;
+        }
+    }
+
+    /// Installs the results of `job` (with the chunks it gave, sorted by path), unless a newer search started since
+    /// (or the Root changed).
+    pub fn finish_search(&mut self, job: &SearchJob, mut results: Results) {
+        if job.id == self.search.last && job.root == self.root {
+            if self.search.partial && let Some(chunks) = self.search.results.take() {
+                results.files.extend(chunks.files);
+                results.files.sort_by(|a, b| a.path.cmp(&b.path));
+            }
+            (self.search.results, self.search.running, self.search.partial) = (Some(results), false, false);
         }
     }
 
@@ -415,6 +433,32 @@ mod tests {
         assert_eq!(run(&mut ws, 2), (2, true));
         assert_eq!(run(&mut ws, 3), (3, true), "the match in the next file still counts as cut off");
         assert_eq!(run(&mut ws, 4), (4, false));
+    }
+
+    #[test]
+    fn chunks_show_before_the_search_ends_then_finish_sorts_them_and_a_newer_search_drops_late_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "a\n").unwrap();
+        let mut ws = Workspace::open(tmp.path());
+        let old = ws.start_search(Query { text: "a".into(), ..Query::default() }).unwrap();
+        let (mut chunks, hit) = (Vec::new(), |name: &str| search::FileMatches { path: tmp.path().join(name), lines: Vec::new() });
+        let end = old.run_chunked(&mut |c| chunks.push(c));
+        assert!(end.files.is_empty());
+        ws.search_chunk(&old, vec![hit("z.txt")]);
+        assert_eq!(ws.search.results.as_ref().unwrap().files.len(), 1, "the first chunk shows while it runs");
+        assert!(ws.search.running);
+        ws.search_chunk(&old, vec![hit("b.txt")]);
+        ws.finish_search(&old, end);
+        let names: Vec<_> = ws.search.results.as_ref().unwrap().files.iter().map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["b.txt", "z.txt"]);
+        assert!(!ws.search.running);
+
+        let newer = ws.start_search(Query { text: "b".into(), ..Query::default() }).unwrap();
+        ws.search_chunk(&old, vec![hit("late.txt")]);
+        assert_eq!(ws.search.results.as_ref().unwrap().files.len(), 2, "a stale chunk is dropped");
+        ws.search_chunk(&newer, vec![hit("n.txt")]);
+        assert_eq!(ws.search.results.as_ref().unwrap().files.len(), 1, "the first chunk of the new search replaces the old results");
     }
 
     #[test]

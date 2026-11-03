@@ -20,7 +20,7 @@ All access to the Root's files and git goes through `host::Host` (crates/antler-
 - Frame: `u32 header_len | u32 body_len` (big endian), a JSON header, a raw body. Why: the header stays readable in a captured stream and serde_json is already a dependency, while file bytes (any bytes, up to the 1 GiB limit) travel raw instead of through base64 (+33 %, an extra copy). No new dependency.
 - First frame: the server's `Hello { protocol, os, arch }` (id 0). The client refuses another `VERSION`.
 - Requests carry an `id`; answers carry the same id and may arrive in any order (a thread per request on the server), so several are in flight. One request per `Host` method, plus `Cancel { target }`.
-- Streams: `Watch` is answered by `Ok`, then `Event { path }` frames with its id until `Cancel` (the client's `WatchGuard` drop). `Search` is one answer with the whole `Results`; its `Cancel` makes the server stop the walk early and answer with what it has (the client sends it as soon as the `cancel` flag is set). Search results are not streamed: the `Host` contract returns them whole.
+- Streams: `Watch` is answered by `Ok`, then `Event { path }` frames with its id until `Cancel` (the client's `WatchGuard` drop). `Files` and `Search` are answered in chunks: `FilesChunk { files }` / `SearchChunk { files }` frames with the request's id while the server walks (the first item goes out at once, then at most one chunk per 30 ms: `search::Batch`), then one closing answer (`Ok` for `Files`; `Results` with `truncated` / `error` and no files for `Search`). The files of the chunks are in walk order, not sorted overall. `Cancel` makes the server stop the walk and send the closing answer (the client sends it as soon as its `cancel` flag is set); the server also stops when it can no longer write. The client's reader forwards chunks to the waiting call, which stays registered until the closing answer. `Host::files_chunked` / `search_chunked` take a callback per chunk (the app appends them: `Workspace::list_chunk`, `search_chunk`); `files` / `search` are default methods that collect them (`search` sorts by path). Protocol `VERSION` is 3 (was 2: `Res::Files` is gone).
 - Errors: `Err { kind, msg }`; `kind` is an `io::ErrorKind` name (`NotFound`, `AlreadyExists`, `PermissionDenied`...) so the model's `kind()` matches work; empty for text errors (git, watch).
 - `files.exclude`: the client sends the app's current patterns with `ListDir`, `Files` and `Search`; the server builds a `Local::with_exclude` per request (it has no settings).
 - Trash: `Req::Trash` deletes for good; `Remote::trash` returns `Ok(None)`, so `Op::Trash` has no undo (the confirmation is the caller's).
@@ -52,7 +52,7 @@ All access to the Root's files and git goes through `host::Host` (crates/antler-
 
 ## Still open
 - git credentials: `Envs` (askpass, `osascript`) are local UI; a remote git needs its own path. The envs are forwarded as given.
-- `Remote::search` / `files` copy the whole result per call; big Roots may want paging.
+- Chunks are not compressed; a huge Root still sends every path, only earlier.
 - The server starts a thread per request without a limit, and a `Cancel` that arrives before its `Watch` thread has stored the guard leaves the watch running until the connection closes.
 - Two proxies started at the same instant may start two daemons (the later file wins; the other leaves after its grace time).
 
