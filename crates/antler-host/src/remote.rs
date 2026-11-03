@@ -28,6 +28,9 @@ pub type Transport = (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<Child>
 /// Makes a new connection; it applies its own timeout (VS Code: 30 s per attempt).
 pub type Connector = dyn Fn() -> Result<Transport, String> + Send + Sync;
 
+/// A connector's error when the person cancelled (the password dialog): no more attempts until [`Remote::retry`].
+pub const CANCELLED: &str = "Cancelled";
+
 /// What a supervised `Remote` reports.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
@@ -266,7 +269,7 @@ impl Core {
                         return;
                     }
                     Ok(_) => {}
-                    Err(e) if crate::reconnect::expired(lost_at.elapsed()) => {
+                    Err(e) if e == CANCELLED || crate::reconnect::expired(lost_at.elapsed()) => {
                         core.reconnecting.store(false, Ordering::SeqCst);
                         core.notify(Status::GaveUp(e));
                         return;
@@ -630,5 +633,33 @@ impl Drop for WatchStop {
         let cancel = self.core.next.fetch_add(1, Ordering::Relaxed);
         let inner = lock(&self.core.conn).clone();
         inner.send(cancel, Req::Cancel { target: self.id }, &[]).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cancelled_connection_gives_up_at_once_and_retry_tries_again() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let c = calls.clone();
+        let remote = Remote::lazy(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            Err(CANCELLED.to_string())
+        }));
+        let (tx, statuses) = channel();
+        remote.supervise(move |s| drop(tx.send(s)));
+        let gave_up = |statuses: &Receiver<Status>| loop {
+            match statuses.recv_timeout(Duration::from_secs(3)).expect("no GaveUp within 3 s: Cancel must not wait for the grace time") {
+                Status::GaveUp(e) => break e,
+                _ => {}
+            }
+        };
+        assert_eq!(gave_up(&statuses), CANCELLED);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no attempt after Cancel");
+        remote.retry(); // Reload Window
+        assert_eq!(gave_up(&statuses), CANCELLED);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

@@ -1,6 +1,6 @@
 # Antler
 
-A minimal, fast IDE for macOS (Rust + GPUI): explorer, editor, git and remote over SSH; nested repositories under a folder all show up in one panel. Requirements and features: see `README.md`.
+A minimal, fast IDE for macOS and Windows (Rust + GPUI): explorer, editor, git and remote over SSH; nested repositories under a folder all show up in one panel. Requirements and features: see `README.md`.
 
 ## Agent skills
 

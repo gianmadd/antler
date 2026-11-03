@@ -55,6 +55,44 @@ jobs:
           name: antler-zip
           path: target/bundle/Antler-*-arm64.zip
 
+  # the portable Windows zip (antler.exe with its icon, bin\antler.cmd); the runner's Windows SDK has fxc.exe for GPUI's shaders
+  app-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "${GITHUB_REF_NAME}" != "v$version" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Bundle
+        shell: pwsh
+        run: scripts/bundle-windows.ps1
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: antler-windows-zip
+          path: target/bundle/Antler-*-x86_64-windows.zip
+
   # antler-server for every host the app can reach (docs/agents/remote.md); asset names follow src/ssh.rs
   server:
     strategy:
@@ -102,10 +140,10 @@ jobs:
           name: antler-server-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
 
-  # one job creates the release, so it exists once with the zip and every server asset
+  # one job creates the release, so it exists once with both app zips and every server asset
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [app, server]
+    needs: [app, app-windows, server]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

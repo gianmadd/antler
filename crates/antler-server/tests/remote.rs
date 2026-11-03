@@ -24,7 +24,7 @@ fn git(dir: &Path, args: &[&str]) {
 /// A Root with two repos (one nested in a folder), a skipped folder and a few files; canonical, like the app's Root.
 fn fixture() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
-    let root = fs::canonicalize(tmp.path()).unwrap();
+    let root = antler_host::host::canonical(tmp.path()).unwrap();
     for (rel, text) in [("a/x.txt", "needle one\nhay\n"), ("a/y.rs", "fn needle() {}\n"), ("b/z.txt", "none here\n"), ("top.txt", "Needle on top\n"), ("skipme/s.txt", "needle\n")] {
         fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
         fs::write(root.join(rel), text).unwrap();
@@ -39,7 +39,8 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn debug(r: &impl std::fmt::Debug) -> String {
-    format!("{r:?}")
+    // a Windows path: the remote keeps the wire's `/`, Local has `\` (equal as paths, not as text)
+    format!("{r:?}").replace(r"\\", "/")
 }
 
 #[test]
@@ -143,7 +144,8 @@ fn git_runs_on_the_server_and_reports_its_errors() {
     // stdin and environment reach git
     let sha = r.git(&repo, &["hash-object", "--stdin"], Some("hello\n"), &[]).unwrap();
     assert_eq!(sha.trim(), "ce013625030ba8dba906f756967f9e9ca394464a");
-    let env = [("GIT_AUTHOR_NAME", std::ffi::OsStr::new("Zed"))];
+    // with an email too: a CI runner has no git identity to complete the name with
+    let env = [("GIT_AUTHOR_NAME", std::ffi::OsStr::new("Zed")), ("GIT_AUTHOR_EMAIL", std::ffi::OsStr::new("zed@example.test"))];
     assert_eq!(r.git(&repo, &["var", "GIT_AUTHOR_IDENT"], None, &env).unwrap().split('<').next().unwrap().trim(), "Zed");
     assert!(r.git(&repo, &["no-such-subcommand"], None, &[]).unwrap_err().contains("no-such-subcommand"));
 }

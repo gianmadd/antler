@@ -76,7 +76,7 @@ pub fn message(release: &Release, brew: bool) -> String {
 
 /// One request with the system `curl` (no HTTP dependency, like git). A missing release (404, the repo has none yet) is up to date.
 pub fn check() -> Check {
-    let out = Command::new("curl")
+    let out = crate::host::no_console(&mut Command::new("curl"))
         .args(["-sS", "-m", "15", "-A", concat!("antler/", env!("CARGO_PKG_VERSION")), "-H", "Accept: application/vnd.github+json", "-w", "\n%{http_code}", API])
         .output();
     let out = match out {

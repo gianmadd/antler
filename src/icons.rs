@@ -170,6 +170,7 @@ mod tests {
     use gpui_kit::assets::IconName;
 
     /// The built-in Seti font through the real macOS text system: it registers, resolves by family and has the glyphs the theme uses.
+    #[cfg(target_os = "macos")]
     #[test]
     fn seti_glyphs_resolve_in_the_real_text_system() {
         use ::gpui::PlatformTextSystem as _;

@@ -11,7 +11,7 @@ use antler_host::remote::{Remote, Status, Transport};
 fn a_dropped_connection_comes_back_with_its_watches() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("srv");
-    let work = std::fs::canonicalize(tmp.path()).unwrap().join("work");
+    let work = antler_host::host::canonical(tmp.path()).unwrap().join("work");
     std::fs::create_dir_all(&work).unwrap();
     let child: Arc<Mutex<Option<Child>>> = Default::default();
     let connector = {

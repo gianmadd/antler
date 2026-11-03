@@ -714,40 +714,110 @@ fn network(repo: &Path, args: &[&str], interactive: bool) -> Result<String> {
 }
 
 /// The environment that makes git and ssh ask through the antler binary (see `askpass`); without `interactive`
-/// the helper is `false`, so a question fails at once.
+/// the helper is `false` (on Windows the binary in its never-asking mode), so a question fails at once.
 pub fn askpass_envs(interactive: bool) -> Vec<(&'static str, std::ffi::OsString)> {
-    let exe = std::env::current_exe().map(|p| p.into_os_string()).unwrap_or_default();
-    let helper = if interactive && !exe.is_empty() { exe } else { "/usr/bin/false".into() };
-    vec![
-        ("GIT_TERMINAL_PROMPT", "0".into()),
-        ("GIT_ASKPASS", helper.clone()),
-        ("SSH_ASKPASS", helper),
-        ("SSH_ASKPASS_REQUIRE", "force".into()), // ssh would otherwise read the passphrase from the tty, if any
-        (ASKPASS_ENV, "1".into()),
-    ]
+    askpass_envs_for(std::env::current_exe().ok().map(std::path::PathBuf::into_os_string), interactive)
+}
+
+/// [`askpass_envs`] with the antler binary at `exe` (`None`: unknown).
+fn askpass_envs_for(exe: Option<std::ffi::OsString>, interactive: bool) -> Vec<(&'static str, std::ffi::OsString)> {
+    // Windows has no `false`: the antler binary in its never-asking mode stands in. Without that binary there is
+    // no helper at all: git and ssh, with no terminal and no askpass (`SSH_ASKPASS_REQUIRE=force`), fail at once
+    let helper = match (exe, interactive, cfg!(windows)) {
+        (Some(exe), true, _) => Some((exe, "1")),
+        (Some(exe), false, true) => Some((exe, ASKPASS_NEVER)),
+        (None, _, true) => None,
+        (_, _, false) => Some(("/usr/bin/false".into(), "1")),
+    };
+    let mut envs = vec![("GIT_TERMINAL_PROMPT", "0".into()), ("SSH_ASKPASS_REQUIRE", "force".into())]; // ssh would otherwise read the passphrase from the tty, if any
+    if let Some((helper, mode)) = helper {
+        envs.extend([("GIT_ASKPASS", helper.clone()), ("SSH_ASKPASS", helper), (ASKPASS_ENV, mode.into())]);
+    }
+    envs
+}
+
+/// `ASKPASS_ENV`'s value when the question must fail at once.
+const ASKPASS_NEVER: &str = "never";
+
+/// A password, passphrase or PIN is asked for: the answer is hidden. Only the request counts, not the URL or key
+/// path after it.
+fn asks_secret(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    let request = lower.split('\'').next().unwrap_or_default(); // what follows is the URL or key path
+    ["password", "passphrase", "pin"].iter().any(|w| request.contains(w))
 }
 
 /// osascript's arguments for a native input dialog showing `prompt`; passwords and passphrases are hidden.
 /// The prompt goes in as an argument, so no quoting can break the script.
 pub fn askpass_args(prompt: &str) -> Vec<String> {
-    let lower = prompt.to_lowercase();
-    let request = lower.split('\'').next().unwrap_or_default(); // what follows is the URL or key path
-    let hidden = if ["password", "passphrase", "pin"].iter().any(|w| request.contains(w)) { " with hidden answer" } else { "" };
+    let hidden = if asks_secret(prompt) { " with hidden answer" } else { "" };
     let dialog = format!("text returned of (display dialog (item 1 of argv) default answer \"\" with title \"Antler\"{hidden})");
     ["-e", "on run argv", "-e", dialog.as_str(), "-e", "end run", "--", prompt].map(String::from).to_vec()
 }
 
+/// Windows: a PowerShell WinForms dialog. The prompt comes in through `ANTLER_ASKPASS_PROMPT`, never inside
+/// the script, so no quoting can break it; the answer is written as UTF-8 without a newline.
+fn askpass_powershell(hidden: bool) -> String {
+    let hidden = if hidden { "$true" } else { "$false" };
+    [
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8",
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "[Windows.Forms.Application]::EnableVisualStyles()",
+        "$f = New-Object Windows.Forms.Form -Property @{ Text = 'Antler'; ClientSize = New-Object Drawing.Size(420, 120); StartPosition = 'CenterScreen'; TopMost = $true; FormBorderStyle = 'FixedDialog'; MaximizeBox = $false; MinimizeBox = $false }",
+        "$l = New-Object Windows.Forms.Label -Property @{ Text = $env:ANTLER_ASKPASS_PROMPT; Left = 12; Top = 10; Width = 396; Height = 36 }",
+        &format!("$t = New-Object Windows.Forms.TextBox -Property @{{ Left = 12; Top = 50; Width = 396; UseSystemPasswordChar = {hidden} }}"),
+        "$ok = New-Object Windows.Forms.Button -Property @{ Text = 'OK'; Left = 252; Top = 84; DialogResult = 'OK' }",
+        "$no = New-Object Windows.Forms.Button -Property @{ Text = 'Cancel'; Left = 333; Top = 84; DialogResult = 'Cancel' }",
+        "$f.Controls.AddRange(@($l, $t, $ok, $no)); $f.AcceptButton = $ok; $f.CancelButton = $no",
+        "if ($f.ShowDialog() -eq 'OK') { [Console]::Out.Write($t.Text); exit 0 } else { exit 1 }",
+    ]
+    .join("\n")
+}
+
+/// The program that shows the askpass dialog for `prompt` on this OS.
+fn askpass_command(prompt: &str) -> Command {
+    if cfg!(windows) {
+        let mut c = Command::new("powershell.exe");
+        crate::host::no_console(&mut c);
+        c.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &crate::ssh::powershell_encoded(&askpass_powershell(asks_secret(prompt)))]).env("ANTLER_ASKPASS_PROMPT", prompt);
+        c
+    } else {
+        let mut c = Command::new("osascript");
+        c.args(askpass_args(prompt));
+        c
+    }
+}
+
+/// The askpass dialog for `prompt`: the answer, or `None` for Cancel.
+/// shortcut: a native dialog (osascript, PowerShell on Windows), not one inside the window; it may open behind
+/// the window. Upgrade if users miss it.
+pub fn ask_dialog(prompt: &str) -> Option<String> {
+    match askpass_command(prompt).output() {
+        Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+        _ => None,
+    }
+}
+
 /// Askpass mode (`ASKPASS_ENV` set): git or ssh started antler with `prompt`; the answer goes to stdout.
-/// Cancel exits 1, so git fails with its own "could not read" error instead of waiting.
-/// shortcut: a native osascript dialog, not one inside the window (that needs IPC with the running app);
-/// it may open behind the window. Upgrade if users miss it.
+/// Cancel exits 1, so git fails with its own "could not read" error instead of waiting. An ssh run of the
+/// connector asks the running app's broker (`askpass_broker`), which keeps the answer for the next runs; when no
+/// broker answers, the dialog shows here.
 pub fn askpass(prompt: &str) -> i32 {
-    match Command::new("osascript").args(askpass_args(prompt)).output() {
-        Ok(out) if out.status.success() => {
-            print!("{}", String::from_utf8_lossy(&out.stdout));
+    if std::env::var_os(ASKPASS_ENV).is_some_and(|v| v == ASKPASS_NEVER) {
+        return 1;
+    }
+    let asked = crate::askpass_broker::question_from_env(prompt).and_then(|(env, q)| crate::askpass_broker::ask(&env, &q).ok());
+    let answer = match asked {
+        Some(crate::askpass_broker::Reply::Answer(a)) => Some(a),
+        Some(crate::askpass_broker::Reply::Cancel) => None,
+        None => ask_dialog(prompt),
+    };
+    match answer {
+        Some(a) => {
+            print!("{a}");
             0
         }
-        _ => 1,
+        None => 1,
     }
 }
 
@@ -857,6 +927,33 @@ mod tests {
         assert_eq!(user.last().unwrap(), "Username for 'https://github.com': ", "as an argument, never inside the script");
         for secret in ["Password for 'https://me@github.com': ", "Enter passphrase for key '/Users/me/.ssh/id_ed25519': "] {
             assert!(args(secret).iter().any(|a| a.contains("with hidden answer")), "{secret}");
+        }
+    }
+
+    #[test]
+    fn the_windows_askpass_dialog_hides_secrets_and_reads_the_prompt_from_the_environment() {
+        assert!(askpass_powershell(true).contains("UseSystemPasswordChar = $true"));
+        assert!(askpass_powershell(false).contains("UseSystemPasswordChar = $false"));
+        assert!(askpass_powershell(true).contains("$env:ANTLER_ASKPASS_PROMPT"), "the prompt never goes inside the script");
+        assert!(asks_secret("Enter passphrase for key 'C:\\Users\\me/.ssh/id_ed25519': ") && !asks_secret("Username for 'https://pin.example.com': "));
+    }
+
+    #[test]
+    fn askpass_names_the_antler_binary_and_never_an_empty_helper() {
+        let get = |envs: &[(&str, std::ffi::OsString)], k: &str| envs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+        let exe = Some(std::ffi::OsString::from("antler"));
+        let asking = askpass_envs_for(exe.clone(), true);
+        assert_eq!((get(&asking, "GIT_ASKPASS").as_deref(), get(&asking, ASKPASS_ENV).as_deref()), (Some("antler"), Some("1")));
+        assert_eq!(get(&asking, "SSH_ASKPASS").as_deref(), Some("antler"));
+        let never = askpass_envs_for(exe, false);
+        let never_helper = if cfg!(windows) { ("antler", ASKPASS_NEVER) } else { ("/usr/bin/false", "1") };
+        assert_eq!((get(&never, "GIT_ASKPASS").as_deref(), get(&never, ASKPASS_ENV).as_deref()), (Some(never_helper.0), Some(never_helper.1)));
+        for interactive in [true, false] {
+            let lost = askpass_envs_for(None, interactive); // the binary's path is unknown
+            assert_eq!(get(&lost, "GIT_TERMINAL_PROMPT").as_deref(), Some("0"), "still no terminal prompt");
+            for k in ["GIT_ASKPASS", "SSH_ASKPASS"] {
+                assert_ne!(get(&lost, k).as_deref(), Some(""), "{k} empty");
+            }
         }
     }
 

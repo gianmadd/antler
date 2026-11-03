@@ -2,7 +2,7 @@
 
 # Antler
 
-A minimal, fast IDE for macOS: explorer, editor, git and remote over SSH. Nested repositories under a folder all show up in one panel.
+A minimal, fast IDE for macOS and Windows: explorer, editor, git and remote over SSH. Nested repositories under a folder all show up in one panel.
 
 Built in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 
@@ -32,6 +32,8 @@ scripts/bundle.sh --install
 
 This builds in release mode, creates an ad-hoc signed `Antler.app`, copies it to `/Applications` (asking first if it exists; `--yes` skips the question) and installs the `antler` command in `~/.local/bin`. Re-run it to update. Without `--install` it only creates `target/bundle/Antler.app`; `--zip` also makes the release zip.
 
+On Windows (x86_64), download `Antler-<version>-x86_64-windows.zip` from the Releases page and extract it anywhere: it holds `antler.exe` and `bin\antler.cmd`, the `antler` command (add that `bin` folder to `PATH`). It is not signed, so SmartScreen may ask the first time ("More info", "Run anyway"). To build the zip from source on Windows (MSVC Build Tools and a Windows 10/11 SDK), run `scripts/bundle-windows.ps1`.
+
 **First launch:** Antler is not notarized yet, so macOS blocks it the first time. Open System Settings, Privacy & Security, and click "Open Anyway", or run `xattr -dr com.apple.quarantine /Applications/Antler.app`.
 
 ## Usage
@@ -45,8 +47,8 @@ antler [folder]
 
 ## Building from source
 
-- macOS on Apple Silicon.
-- Full Xcode (not only the Command Line Tools) with the Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`.
+- macOS on Apple Silicon, or Windows x86_64 (MSVC Build Tools and a Windows 10/11 SDK; see Install).
+- On macOS, full Xcode (not only the Command Line Tools) with the Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`.
 - Rust via [rustup](https://rustup.rs) (stable).
 
 ```sh
@@ -54,9 +56,21 @@ cargo run --release -- ~/path/to/folder
 cargo test
 ```
 
+### The Windows app, from macOS
+
+`scripts/build-windows.sh` cross-builds `antler.exe` for `x86_64-pc-windows-msvc` with LLVM and [cargo-xwin](https://github.com/rust-cross/cargo-xwin). It installs what is missing: Homebrew `llvm` and `lld` (put on `PATH` for the build), `cargo-xwin`, and the Rust target. On first use cargo-xwin downloads the MSVC CRT and the Windows SDK, under Microsoft's license.
+
+```sh
+scripts/build-windows.sh            # debug: target/x86_64-pc-windows-msvc/debug/antler.exe
+scripts/build-windows.sh --release  # optimized: target/x86_64-pc-windows-msvc/release/antler.exe
+scripts/build-windows.sh --check    # type-check only
+```
+
+A plain `cargo xwin build --release` does not work from macOS: GPUI compiles its shaders with the Windows SDK's `fxc.exe`, which only runs on Windows. The exe built here compiles them at startup instead, from the shader sources. Copy `antler.exe`, `install-shaders.cmd` and `gpui-shaders\` from the output folder into one folder on `C:` of the Windows machine, run `install-shaders.cmd` once, and start `antler.exe` from a folder on `C:`. This is for trying changes; release builds are made on Windows.
+
 ## Project status
 
-Young and moving fast. macOS on Apple Silicon only, for now. Releases are published on GitHub (`v0.x`) and are ad-hoc signed; each also carries `antler-server` for Linux, macOS and Windows (x86_64 and aarch64), which the app installs on a Remote host.
+Young and moving fast. Runs on macOS (Apple Silicon) and Windows (x86_64). Releases are published on GitHub (`v0.x`; the Mac app is ad-hoc signed, the Windows one unsigned); each also carries `antler-server` for Linux, macOS and Windows (x86_64 and aarch64), which the app installs on a Remote host.
 
 ## Contributing
 

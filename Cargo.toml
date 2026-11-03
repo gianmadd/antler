@@ -3,7 +3,7 @@ name = "antler"
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.98"
-description = "A lightweight macOS editor that shows every git repository under a folder in one panel"
+description = "A minimal, fast IDE for macOS and Windows: explorer, editor, git and remote over SSH, with every repository under a folder in one panel"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gianmadd/antler"
 
@@ -27,14 +27,22 @@ usvg = { version = "0.46", default-features = false }
 similar = "2.7"
 zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2", "deflate-flate2-zlib-rs"] }
 flate2 = "1.1.10"
+# already built (gpui's deps): the askpass broker's token
+getrandom = "0.3"
+
+# build.rs: the icon and version info of antler.exe (gpui-pre builds it already)
+[build-dependencies]
+embed-resource = "3.0.12"
 
 [dev-dependencies]
 tempfile = "3.27.0"
-# the real macOS text system, to prove a font registers and has its glyphs
-gpui-pre = "=0.3.10"
-gpui-pre-apple = "=0.3.10"
 # the model tests must not touch the real Trash
 antler-host = { path = "crates/antler-host", features = ["test-trash"] }
+
+# the real macOS text system, to prove a font registers and has its glyphs (icons.rs)
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui-pre = "=0.3.10"
+gpui-pre-apple = "=0.3.10"
 
 [profile.release]
 strip = true

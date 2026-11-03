@@ -22,5 +22,9 @@ serde_json = "1.0.154"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 
+# Explorer's Delete: the Recycle Bin through SHFileOperationW (windows-sys is already in the tree)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell"] }
+
 [dev-dependencies]
 tempfile = "3.27.0"

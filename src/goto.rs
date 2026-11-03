@@ -196,7 +196,7 @@ impl MatchJob {
 /// score (higher for runs of letters, word starts and letters in the file name) and the matched byte ranges.
 pub(crate) fn fuzzy(query: &[char], text: &str) -> Option<(i32, Vec<Range<usize>>)> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
-    let name_start = text.rfind('/').map_or(0, |i| i + 1);
+    let name_start = text.rfind(['/', '\\']).map_or(0, |i| i + 1); // a Windows path has backslashes
     let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
     // Two greedy passes, from the start and from the end (the latter favours the file name); keep the better.
     let pass = |order: &mut dyn Iterator<Item = usize>, query: &mut dyn Iterator<Item = &char>| -> Option<Vec<usize>> {
@@ -221,7 +221,7 @@ pub(crate) fn fuzzy(query: &[char], text: &str) -> Option<(i32, Vec<Range<usize>
                 s += 5;
             }
             let prev = i.checked_sub(1).map(|p| chars[p].1);
-            if prev.is_none_or(|p| "/_-. ".contains(p) || (p.is_lowercase() && chars[i].1.is_uppercase())) {
+            if prev.is_none_or(|p| "/\\_-. ".contains(p) || (p.is_lowercase() && chars[i].1.is_uppercase())) {
                 s += 3;
             }
             if chars[i].0 >= name_start {
@@ -258,7 +258,7 @@ mod tests {
 
     /// (relative path, highlighted slices) of the matches for `query`.
     fn found(ws: &Workspace, query: &str) -> Vec<(String, Vec<String>)> {
-        ws.goto_matches(query, 50).into_iter().map(|m| (m.rel.clone(), m.ranges.iter().map(|r| m.rel[r.clone()].to_string()).collect())).collect()
+        ws.goto_matches(query, 50).into_iter().map(|m| (crate::testing::slashes(&m.rel),m.ranges.iter().map(|r| m.rel[r.clone()].to_string()).collect())).collect()
     }
 
     fn open(root: &Path) -> Workspace {
@@ -325,7 +325,7 @@ mod tests {
     }
 
     fn rels(ws: &Workspace, query: &str) -> Vec<String> {
-        ws.goto_matches(query, 50).into_iter().map(|m| m.rel).collect()
+        ws.goto_matches(query, 50).into_iter().map(|m| crate::testing::slashes(&m.rel)).collect()
     }
 
     #[test]
