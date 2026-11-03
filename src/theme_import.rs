@@ -263,7 +263,7 @@ pub fn syntax(token_colors: &Value) -> Option<String> {
 /// Name and syntax are leaked: a theme lives as long as the app, and there are few.
 pub fn import(label: &str, ui_theme: &str, theme: &Value) -> &'static ThemeDef {
     let dark = !matches!(ui_theme, "vs" | "hc-light") && theme["type"].as_str().is_none_or(|t| !matches!(t, "light" | "hcLight"));
-    let base = if dark { &themes::THEMES[0] } else { &themes::THEMES[2] };
+    let base = if dark { &themes::THEMES[0] } else { &themes::THEMES[1] };
     let empty = serde_json::Map::new();
     let palette = palette(theme["colors"].as_object().unwrap_or(&empty), &base.palette);
     let syntax = syntax(&theme["tokenColors"]).map(|s| &*Box::leak(s.into_boxed_str()));
