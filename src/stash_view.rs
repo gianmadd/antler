@@ -211,6 +211,8 @@ impl Antler {
                     .key_context("Stash")
                     .w(px(600.))
                     .shadow_lg()
+                    // a click on a row must not also reach the view underneath
+                    .occlude()
                     .on_action(cx.listener(Self::close_stash))
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_stash(&CloseStash, window, cx)))
                     .child(command),

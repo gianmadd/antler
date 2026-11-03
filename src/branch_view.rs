@@ -235,6 +235,8 @@ impl Antler {
                     .key_context("Branch")
                     .w(px(600.))
                     .shadow_lg()
+                    // a click on a row must not also reach the view underneath
+                    .occlude()
                     .on_action(cx.listener(Self::close_branch))
                     .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_branch(&CloseBranch, window, cx)))
                     .child(command),
