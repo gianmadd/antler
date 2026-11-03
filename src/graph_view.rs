@@ -120,7 +120,7 @@ fn commit_menu(
     let (multi_repo, multi_sha, multi_subject) = (repo.clone(), sha.clone(), subject.to_string());
     let (remote_repo, remote_sha) = (repo.clone(), sha.clone());
     let (base_repo, base_sha) = (repo.clone(), sha.clone());
-    let (remote_name, base_name) = (right_name.clone(), right_name);
+    let (remote_name, base_name) = (right_name.clone(), right_name.clone());
     let remote_enabled = upstream.is_some();
     let base_enabled = base.is_some();
     let compare_repo = repo.clone();
@@ -159,7 +159,7 @@ fn commit_menu(
             }
         }).disabled(!base_enabled))
         .item(menu_item(this, "Compare with…", move |t, window, cx| {
-            t.pick_ref(compare_repo.clone(), crate::branch_view::Purpose::Compare { sha: compare_sha.clone() }, window, cx)
+            t.pick_ref(compare_repo.clone(), crate::branch_view::Purpose::Compare { right: crate::git::Ref { name: right_name.clone(), sha: compare_sha.clone() } }, window, cx)
         }))
         .separator()
         .item(copy_item("Copy Commit Hash", sha))

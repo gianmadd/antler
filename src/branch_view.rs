@@ -29,7 +29,8 @@ pub(crate) enum Purpose {
     Delete,
     Merge,
     Rebase,
-    Compare { sha: String },
+    /// Compare with…: the Graph commit is the right side.
+    Compare { right: crate::git::Ref },
 }
 
 /// A picker row.
@@ -209,13 +210,13 @@ impl Antler {
                 let name = r.name.trim_start_matches("refs/heads/").to_string();
                 self.run(Op::DeleteBranch { repo, name, force: false }, window, cx)
             }
-            (Choice::Ref(r), Purpose::Compare { sha }) => self.open_multi_diff(crate::workspace::MultiDiffSource::Refs {
+            (Choice::Ref(r), Purpose::Compare { right }) => self.open_multi_diff(crate::workspace::MultiDiffSource::Refs {
                 repo,
                 left: crate::git::Ref {
                     name: r.name.strip_prefix("refs/heads/").or_else(|| r.name.strip_prefix("refs/remotes/")).or_else(|| r.name.strip_prefix("refs/tags/")).unwrap_or(&r.name).to_string(),
                     ..r
                 },
-                right: crate::git::Ref { name: sha[..sha.len().min(7)].to_string(), sha },
+                right,
             }, window, cx),
         }
     }
