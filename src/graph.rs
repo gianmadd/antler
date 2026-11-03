@@ -316,6 +316,7 @@ impl Workspace {
     pub fn active_section(&self) -> Option<&crate::workspace::Section> {
         let file = match &self.tabs[self.active?].kind {
             TabKind::Diff(d) => &d.source.repo,
+            TabKind::MultiDiff(d) => match &d.source { crate::workspace::MultiDiffSource::Group { repo, .. } => repo },
             TabKind::File(FileTab { path, .. }) | TabKind::Image(ImageTab { path, .. }) => path,
             TabKind::Settings | TabKind::Keybindings => return None,
         };

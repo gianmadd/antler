@@ -52,3 +52,19 @@ fn a_remote_root_scans_edits_saves_searches_and_deletes_for_good() {
     ws.undo_now(); // the delete left no step to undo: this is the rename's, which cannot find its file
     assert!(ws.last_error.take().is_some() && !root.join("sub/renamed.txt").exists() && !root.join("sub/new.txt").exists());
 }
+
+#[test]
+fn multi_diff_group_remote_matches_local() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::host::canonical(tmp.path()).unwrap();
+    let repo_path = root.join("one");
+    repo(&repo_path);
+    fs::write(repo_path.join("a.txt"), "edited\n").unwrap();
+    fs::write(repo_path.join("new.txt"), "new\n").unwrap();
+
+    let local = crate::host::scoped(&crate::host::local(), || crate::git::group_patch(&repo_path, false)).unwrap();
+    let remote = remote_ws(&root);
+    let source = MultiDiffSource::Group { repo: repo_path, staged: false };
+    let remote_patch = crate::host::scoped(&remote.host, || source.load()).unwrap();
+    assert_eq!(remote_patch, local);
+}

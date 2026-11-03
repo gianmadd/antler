@@ -76,6 +76,7 @@ impl Tab {
             TabKind::File(f) => TabKind::File(f.twin()),
             TabKind::Image(i) => TabKind::Image(ImageTab { path: i.path.clone(), info: i.info.clone() }),
             TabKind::Diff(d) => TabKind::Diff(DiffTab::new(d.source.clone())),
+            TabKind::MultiDiff(_) => return None,
             TabKind::Settings | TabKind::Keybindings => return None,
         };
         Some(Tab { preview: false, kind, used: 0, group })

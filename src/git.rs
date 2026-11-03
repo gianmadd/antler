@@ -146,6 +146,46 @@ pub fn diff(repo: &Path, file: &FileStatus, staged: bool) -> Result<String> {
     run(repo, &args, None)
 }
 
+/// Unified patch for a Section's Staged Changes or Changes group, including untracked files in Changes.
+pub fn group_patch(repo: &Path, staged: bool) -> Result<String> {
+    let mut args = vec!["diff", "--no-color", "--no-ext-diff", "-M", "-U3"];
+    if staged {
+        args.push("--cached");
+    }
+    let mut patch = run(repo, &args, None)?;
+    if !staged {
+        for file in status(repo)?.into_iter().filter(FileStatus::is_untracked) {
+            patch.push_str(&diff(repo, &file, false)?);
+        }
+    }
+    Ok(patch)
+}
+
+/// Splits a Git patch into (new path, per-file patch) pairs in patch order.
+pub fn split_patch(patch: &str) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    let mut start = None;
+    for (at, _) in patch.match_indices("diff --git ") {
+        if let Some(from) = start.replace(at) {
+            files.push(patch[from..at].to_string());
+        }
+    }
+    if let Some(from) = start {
+        files.push(patch[from..].to_string());
+    }
+    files.into_iter().filter_map(|part| {
+        let path = part.lines().find_map(|line| line.strip_prefix("+++ b/"))
+            .or_else(|| part.lines().find_map(|line| line.strip_prefix("rename to ")))
+            .or_else(|| part.lines().find_map(|line| {
+                let names = line.strip_prefix("diff --git ")?;
+                names.rsplit_once("\" \"b/").map(|(_, path)| path.trim_end_matches('"'))
+                    .or_else(|| names.rsplit_once(" b/").map(|(_, path)| path))
+            }))
+            .or_else(|| part.lines().find_map(|line| line.strip_prefix("--- a/")))?;
+        Some((path.to_string(), part))
+    }).collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hunk {
     /// The `@@ -a,b +c,d @@` line.
@@ -996,6 +1036,47 @@ mod tests {
         commit(p, "add new", false, true).unwrap();
         assert!(status(p).unwrap().is_empty());
         assert_eq!(branch(p), "main");
+    }
+
+    #[test]
+    fn group_patch_includes_untracked_in_changes() {
+        let dir = repo();
+        let p = dir.path();
+        fs::write(p.join("a.txt"), "changed\n").unwrap();
+        fs::write(p.join("new.txt"), "new\n").unwrap();
+        fs::write(p.join("binary.bin"), [0u8, 159, 146, 150]).unwrap();
+
+        let patch = group_patch(p, false).unwrap();
+        assert!(patch.contains("-line 1") && patch.contains("+changed"), "{patch}");
+        assert!(patch.contains("diff --git a/new.txt b/new.txt") && patch.contains("+new"), "{patch}");
+        assert!(patch.contains("Binary files"));
+        assert!(split_patch(&patch).iter().any(|(path, _)| path == "binary.bin"));
+    }
+
+    #[test]
+    fn group_patch_staged_only_index() {
+        let dir = repo();
+        let p = dir.path();
+        fs::write(p.join("a.txt"), "staged\n").unwrap();
+        crate::testing::git(p, &["add", "a.txt"]);
+        fs::write(p.join("a.txt"), "worktree\n").unwrap();
+        fs::write(p.join("new.txt"), "untracked\n").unwrap();
+
+        let patch = group_patch(p, true).unwrap();
+        assert!(patch.contains("+staged") && !patch.contains("worktree") && !patch.contains("untracked"), "{patch}");
+    }
+
+    #[test]
+    fn split_patch_cuts_per_file_with_renames() {
+        let dir = repo();
+        let p = dir.path();
+        fs::rename(p.join("a.txt"), p.join("renamed.txt")).unwrap();
+        fs::write(p.join("b.txt"), "edited\n").unwrap();
+        crate::testing::git(p, &["add", "-A"]);
+
+        let files = split_patch(&group_patch(p, true).unwrap());
+        assert_eq!(files.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["b.txt", "renamed.txt"]);
+        assert!(files[1].1.contains("rename from a.txt") && files[1].1.contains("rename to renamed.txt"));
     }
 
     /// The changes of `body` (hunk lines) whose header says the new side starts at `start` with `count` lines.

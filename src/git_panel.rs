@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::style::{self, FG, FG_DIM, FG_FAINT, HOVER, LINE_SOFT, ROW, badge, badge_color, c};
-use crate::workspace::{GitRow, Op, Section};
+use crate::workspace::{GitRow, MultiDiffSource, Op, Section};
 use crate::explorer::{CopyEntryPath, CopyEntryRelativePath};
 use crate::{Antler, Commit, OpenFolder, copy_item, menu_item, split_path, tip};
 
@@ -151,14 +151,24 @@ impl Antler {
         let (title, files) = if staged { ("Staged Changes", &s.staged) } else { ("Changes", &s.changes) };
         let folded = if staged { s.staged_collapsed } else { s.changes_collapsed };
         let repo = &s.repo.path;
+        let open_diff = Button::new(("open-multi-diff", i * 2 + usize::from(staged))).ghost().xsmall().icon(IconName::Eye)
+            .tooltip(if staged { "Open Staged Changes" } else { "Open Changes" })
+            .on_click(cx.listener({
+                let repo = repo.clone();
+                move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_multi_diff(MultiDiffSource::Group { repo: repo.clone(), staged }, window, cx);
+                }
+            }));
         let header_group: SharedString = format!("{}-{title}", s.name).into();
         let actions = if staged {
-            h_flex().child(self.op_button("unstage-all", IconName::Minus, "Unstage All", Op::UnstageAll { repo: repo.clone() }, cx))
+            h_flex().child(open_diff).child(self.op_button("unstage-all", IconName::Minus, "Unstage All", Op::UnstageAll { repo: repo.clone() }, cx))
         } else {
             let discard = Op::DiscardAll { repo: repo.clone(), files: files.clone() };
             h_flex()
                 .child(self.op_button("discard-all", IconName::Undo2, "Discard All Changes", discard, cx))
                 .child(self.op_button("stage-all", IconName::Plus, "Stage All", Op::StageAll { repo: repo.clone() }, cx))
+                .child(open_diff)
         };
         // right click, like VS Code: Unstage All, or Stage All and Discard All
         let ops = if staged {
