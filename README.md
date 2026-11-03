@@ -56,6 +56,18 @@ cargo run --release -- ~/path/to/folder
 cargo test
 ```
 
+### The Windows app, from macOS
+
+`scripts/build-windows.sh` cross-builds `antler.exe` for `x86_64-pc-windows-msvc` with LLVM and [cargo-xwin](https://github.com/rust-cross/cargo-xwin). It installs what is missing: Homebrew `llvm` and `lld` (put on `PATH` for the build), `cargo-xwin`, and the Rust target. On first use cargo-xwin downloads the MSVC CRT and the Windows SDK, under Microsoft's license.
+
+```sh
+scripts/build-windows.sh            # debug: target/x86_64-pc-windows-msvc/debug/antler.exe
+scripts/build-windows.sh --release  # optimized: target/x86_64-pc-windows-msvc/release/antler.exe
+scripts/build-windows.sh --check    # type-check only
+```
+
+A plain `cargo xwin build --release` does not work from macOS: GPUI compiles its shaders with the Windows SDK's `fxc.exe`, which only runs on Windows. The exe built here compiles them at startup instead, from the shader sources. Copy `antler.exe`, `install-shaders.cmd` and `gpui-shaders\` from the output folder into one folder on `C:` of the Windows machine, run `install-shaders.cmd` once, and start `antler.exe` from a folder on `C:`. This is for trying changes; release builds are made on Windows.
+
 ## Project status
 
 Young and moving fast. macOS on Apple Silicon only, for now. Releases are published on GitHub (`v0.x`) and are ad-hoc signed; each also carries `antler-server` for Linux, macOS and Windows (x86_64 and aarch64), which the app installs on a Remote host.
