@@ -110,10 +110,16 @@ fn commit_menu(
     repo: &std::path::Path,
     sha: &str,
     message: &str,
+    subject: &str,
 ) -> PopupMenu {
     let (repo, sha) = (repo.to_path_buf(), sha.to_string());
     let (r, s) = (repo.clone(), sha.clone());
-    menu.item(op_item(this, "Checkout (Detached)", Op::Checkout { repo: repo.clone(), sha: sha.clone(), local: LocalChanges::Refuse }))
+    let (multi_repo, multi_sha, multi_subject) = (repo.clone(), sha.clone(), subject.to_string());
+    menu.item(menu_item(this, "Open Commit", move |t, window, cx| {
+            t.open_multi_diff(crate::workspace::MultiDiffSource::Commit { repo: multi_repo.clone(), sha: multi_sha.clone(), subject: multi_subject.clone() }, window, cx)
+        }))
+        .separator()
+        .item(op_item(this, "Checkout (Detached)", Op::Checkout { repo: repo.clone(), sha: sha.clone(), local: LocalChanges::Refuse }))
         .separator()
         .item(menu_item(this, "Create Branch…", move |t, w, cx| t.ask_branch_name(r.clone(), s.clone(), w, cx)))
         .separator()
@@ -331,7 +337,7 @@ impl Antler {
                             Item::Commit(c_ix) => {
                                 let commit = &g.commits[c_ix];
                                 let sha = commit.sha.clone();
-                                let (weak, repo, hash, message) = (cx.entity().downgrade(), repo.clone(), commit.sha.clone(), commit.message.clone());
+                                let (weak, repo, hash, message, subject) = (cx.entity().downgrade(), repo.clone(), commit.sha.clone(), commit.message.clone(), commit.subject().to_string());
                                 let when = graph::relative_time(commit.time, now);
                                 let tip = format!("{}\n{} · {}\n\n{}", commit.sha, commit.author, when, commit.message);
                                 let pills = graph::pills(&commit.labels);
@@ -351,7 +357,7 @@ impl Antler {
                                         Tooltip::element(move |_, _| v_flex().max_w(px(480.)).children(tip.lines().map(|l| div().child(l.to_string()))))
                                             .build(window, cx)
                                     })
-                                    .context_menu(move |menu, _, _| commit_menu(menu, &weak, &repo, &hash, &message))
+                                    .context_menu(move |menu, _, _| commit_menu(menu, &weak, &repo, &hash, &message, &subject))
                                     .child(lanes(g.rows[c_ix].clone(), true, width(&g.rows[c_ix])))
                                     .child(div().flex_1().min_w(px(msg_w.min(MSG_MIN))).truncate().child(commit.subject().to_string()))
                                     .children(pills.iter().take(shown).map(|(l, twin)| pill(l, *twin)))

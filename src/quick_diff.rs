@@ -73,6 +73,9 @@ impl Antler {
     pub(crate) fn act_on_selection(&mut self, revert: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.ws.active.map(|a| &self.ws.tabs[a]) else { return };
         if let TabKind::MultiDiff(multi) = &tab.kind {
+            if matches!(&multi.source, crate::workspace::MultiDiffSource::Commit { .. }) {
+                return;
+            }
             let Some(sel) = self.diff_of(self.ws.group).read(cx).selected_lines() else { return };
             let Some(file) = multi.files.iter().find(|file| file.source.path == sel.path().as_ref()) else { return };
             let end = |side: DiffSide, n| (side == DiffSide::Original, n);
