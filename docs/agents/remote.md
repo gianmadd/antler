@@ -58,7 +58,7 @@ All access to the Root's files and git goes through `host::Host` (crates/antler-
 
 ## Stage 5: release assets
 
-- `release.yml` builds the app zip (job `app`) and `antler-server` (job `server`, matrix on native runners) for linux x86_64/aarch64 (musl, static), macos x86_64/aarch64 and windows x86_64/aarch64 (msvc), named `antler-server-<version>-<os>-<arch>[.exe]`. Job `publish` (tags only) downloads every artifact and runs `gh release create` once; a manual dry run only keeps the artifacts.
+- `release.yml` builds the app zips (job `app` on macOS, `app-windows` on Windows with `scripts/bundle-windows.ps1`) and `antler-server` (job `server`, matrix on native runners) for linux x86_64/aarch64 (musl, static), macos x86_64/aarch64 and windows x86_64/aarch64 (msvc), named `antler-server-<version>-<os>-<arch>[.exe]`. Job `publish` (tags only) downloads every artifact and runs `gh release create` once; a manual dry run only keeps the artifacts.
 - The server is built with `cargo build --profile server -p antler-server` (`[profile.server]` in `Cargo.toml`: `opt-level = "z"`, lto, strip; panics unwind so a panicking request thread does not take the daemon down); the app keeps `release`.
 - `ci.yml` runs `cargo check -p antler-server` for a Linux musl and a Windows msvc target on every PR/push, so the branches written on a Mac do not rot. Locally: `rustup target add <triple>` then the same check.
-- `scripts/release.sh` verifies all assets are in the release before updating the cask.
+- `scripts/release.sh` verifies all assets (both app zips too) are in the release before updating the cask. It runs on macOS and under Git Bash on Windows.

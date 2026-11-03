@@ -187,6 +187,7 @@ version = "0.3.0"
 dependencies = [
  "antler-host",
  "async-channel",
+ "embed-resource",
  "flate2",
  "gpui-kit",
  "gpui-pre",

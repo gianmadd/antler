@@ -32,6 +32,8 @@ scripts/bundle.sh --install
 
 This builds in release mode, creates an ad-hoc signed `Antler.app`, copies it to `/Applications` (asking first if it exists; `--yes` skips the question) and installs the `antler` command in `~/.local/bin`. Re-run it to update. Without `--install` it only creates `target/bundle/Antler.app`; `--zip` also makes the release zip.
 
+On Windows (x86_64), download `Antler-<version>-x86_64-windows.zip` from the Releases page and extract it anywhere: it holds `antler.exe` and `bin\antler.cmd`, the `antler` command (add that `bin` folder to `PATH`). It is not signed, so SmartScreen may ask the first time ("More info", "Run anyway"). To build the zip from source on Windows (MSVC Build Tools and a Windows 10/11 SDK), run `scripts/bundle-windows.ps1`.
+
 **First launch:** Antler is not notarized yet, so macOS blocks it the first time. Open System Settings, Privacy & Security, and click "Open Anyway", or run `xattr -dr com.apple.quarantine /Applications/Antler.app`.
 
 ## Usage
