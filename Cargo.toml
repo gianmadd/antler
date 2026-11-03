@@ -3,7 +3,7 @@ name = "antler"
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.98"
-description = "A lightweight macOS editor that shows every git repository under a folder in one panel"
+description = "A minimal, fast IDE for macOS and Windows: explorer, editor, git and remote over SSH, with every repository under a folder in one panel"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gianmadd/antler"
 

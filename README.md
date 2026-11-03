@@ -2,7 +2,7 @@
 
 # Antler
 
-A minimal, fast IDE for macOS: explorer, editor, git and remote over SSH. Nested repositories under a folder all show up in one panel.
+A minimal, fast IDE for macOS and Windows: explorer, editor, git and remote over SSH. Nested repositories under a folder all show up in one panel.
 
 Built in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 
@@ -47,8 +47,8 @@ antler [folder]
 
 ## Building from source
 
-- macOS on Apple Silicon.
-- Full Xcode (not only the Command Line Tools) with the Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`.
+- macOS on Apple Silicon, or Windows x86_64 (MSVC Build Tools and a Windows 10/11 SDK; see Install).
+- On macOS, full Xcode (not only the Command Line Tools) with the Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`.
 - Rust via [rustup](https://rustup.rs) (stable).
 
 ```sh
@@ -70,7 +70,7 @@ A plain `cargo xwin build --release` does not work from macOS: GPUI compiles its
 
 ## Project status
 
-Young and moving fast. macOS on Apple Silicon only, for now. Releases are published on GitHub (`v0.x`) and are ad-hoc signed; each also carries `antler-server` for Linux, macOS and Windows (x86_64 and aarch64), which the app installs on a Remote host.
+Young and moving fast. Runs on macOS (Apple Silicon) and Windows (x86_64). Releases are published on GitHub (`v0.x`; the Mac app is ad-hoc signed, the Windows one unsigned); each also carries `antler-server` for Linux, macOS and Windows (x86_64 and aarch64), which the app installs on a Remote host.
 
 ## Contributing
 
