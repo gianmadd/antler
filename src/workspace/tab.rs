@@ -1428,6 +1428,7 @@ mod tests {
         let mut ws = Workspace::open(tmp.path());
         let ix = ws.open_multi_diff(source.clone());
         assert!(ws.set_multi_diff(&source, Ok(patch)));
+        assert!(!ws.open_group_multi_diffs().contains(&source));
         git(&repo_path, &["checkout", "-q", "left"]);
         assert_eq!(ws.tabs[ix].title(), "left ↔ main");
         assert!(matches!(&ws.tabs[ix].kind, TabKind::MultiDiff(tab) if tab.files[0].source.read_only()));
