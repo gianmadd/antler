@@ -169,6 +169,22 @@ mod tests {
     use core::prelude::v1::test;
     use gpui_kit::assets::IconName;
 
+    /// The built-in Seti font through the real macOS text system: it registers, resolves by family and has the glyphs the theme uses.
+    #[test]
+    fn seti_glyphs_resolve_in_the_real_text_system() {
+        use ::gpui::PlatformTextSystem as _;
+        let ts = gpui_apple::AppleTextSystem::new();
+        let before = ts.all_font_names();
+        ts.add_fonts(vec![Cow::Owned(crate::woff::to_sfnt(icon_themes::SETI_FONT).unwrap())]).unwrap();
+        let family = ts.all_font_names().into_iter().find(|n| !before.contains(n)).expect("a new family");
+        let id = ts.font_id(&::gpui::font(family.clone())).unwrap();
+        let theme = IconTheme::parse(icon_themes::SETI_JSON, Path::new("")).unwrap();
+        for name in ["a.md", "a.json", "Cargo.toml", "a.rs"] {
+            let Some(Icon::Glyph { ch, .. }) = theme.file(name, false) else { panic!("{name}: no glyph") };
+            assert!(ts.glyph_for_char(id, *ch).is_some(), "{name}: U+{:04X} missing in family {family}", *ch as u32);
+        }
+    }
+
     #[test]
     fn the_toolbar_icons_and_the_mark_are_embedded() {
         // the Explorer / Git view header buttons: icons outside gpui-kit's default bundle

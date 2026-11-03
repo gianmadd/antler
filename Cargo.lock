@@ -189,6 +189,8 @@ dependencies = [
  "async-channel",
  "flate2",
  "gpui-kit",
+ "gpui-pre",
+ "gpui-pre-apple",
  "image",
  "rust-embed",
  "serde",

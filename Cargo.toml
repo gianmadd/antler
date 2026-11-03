@@ -30,6 +30,9 @@ flate2 = "1.1.10"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# the real macOS text system, to prove a font registers and has its glyphs
+gpui-pre = "=0.3.10"
+gpui-pre-apple = "=0.3.10"
 # the model tests must not touch the real Trash
 antler-host = { path = "crates/antler-host", features = ["test-trash"] }
 
