@@ -120,8 +120,10 @@ pub fn scan(root: &Path, depth: usize) -> Scan {
             let entry = |f: &git::FileStatus, c: char| FileEntry { path: f.path.clone(), badge: badge(c) };
             let branch = git::branch(&repo.path);
             let (upstream, behind, ahead) = git::tracking(&repo.path, &branch).map_or((None, 0, 0), |(u, b, a)| (Some(u), b, a));
+            let base = git::branch_base(&repo.path, &branch).filter(|base| upstream.as_deref() != Some(base.name.trim_start_matches("refs/remotes/")));
             let mut section = Section {
                 upstream,
+                base,
                 behind,
                 ahead,
                 collapsed: false,

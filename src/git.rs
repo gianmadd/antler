@@ -671,7 +671,7 @@ fn branch_error(error: String, name: &str) -> String {
 }
 
 /// A ref the checkout picker offers: full name and its commit (a tag's commit, not the tag object).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Ref {
     pub name: String,
     pub sha: String,
@@ -691,6 +691,50 @@ pub fn checkout_refs(repo: &Path) -> Result<Vec<Ref>> {
         }
     }
     Ok(refs)
+}
+
+/// Resolves a ref name to its commit (annotated tags resolve to their peeled commit).
+pub fn resolve_ref(repo: &Path, name: &str) -> Result<Ref> {
+    let sha = run(repo, &["rev-parse", "--verify", &format!("{name}^{{commit}}")], None)?;
+    Ok(Ref { name: name.to_string(), sha: sha.trim().to_string() })
+}
+
+/// VS Code's current history base: configured remote base, branch creation source, then the default remote branch.
+pub fn branch_base(repo: &Path, branch: &str) -> Option<Ref> {
+    if branch == DETACHED { return None; }
+    let key = format!("branch.{branch}.vscode-merge-base");
+    if let Ok(configured) = run(repo, &["config", "--get", &key], None) {
+        let configured = configured.trim();
+        if configured.starts_with("refs/remotes/") {
+            if let Ok(reference) = resolve_ref(repo, configured) { return Some(reference); }
+        } else if let Some(remote) = configured.split_once('/') {
+            let name = format!("refs/remotes/{}/{}", remote.0, remote.1);
+            if let Ok(reference) = resolve_ref(repo, &name) { return Some(reference); }
+        }
+    }
+    let created = run(repo, &["reflog", "show", "--format=%gs", &format!("refs/heads/{branch}")], None).ok()?;
+    let created = created.lines().filter_map(|line| line.strip_prefix("branch: Created from ")).collect::<Vec<_>>();
+    if created.len() == 1 {
+        let name = if created[0] == "HEAD" {
+            let head = run(repo, &["reflog", "show", "--format=%gs", "HEAD"], None).ok()?;
+            head.lines().filter_map(|line| line.strip_prefix("checkout: moving from ")?.strip_suffix(&format!(" to {branch}")))
+                .filter_map(|line| line.split_whitespace().next()).last()?.to_string()
+        } else {
+            created[0].to_string()
+        };
+        let full = if name.starts_with("refs/remotes/") {
+            Some(name.to_string())
+        } else if let Ok(upstream) = run(repo, &["rev-parse", "--symbolic-full-name", &format!("{name}@{{u}}")], None) {
+            Some(upstream.trim().to_string())
+        } else {
+            None
+        };
+        if let Some(full) = full && let Ok(reference) = resolve_ref(repo, &full) { return Some(reference); }
+    }
+    let remotes = remotes(repo).ok()?;
+    let remote = remotes.iter().find(|r| *r == "origin").or_else(|| remotes.first())?;
+    let default = run(repo, &["symbolic-ref", "--quiet", &format!("refs/remotes/{remote}/HEAD")], None).ok()?;
+    resolve_ref(repo, default.trim()).ok()
 }
 
 /// `git merge ref`; the merge commit keeps git's message (no editor opens).
@@ -911,6 +955,11 @@ pub fn refs_patch(repo: &Path, left: &str, right: &str) -> Result<String> {
     run(repo, &["diff", "-M", "--no-color", "--no-ext-diff", left, right], None)
 }
 
+/// VS Code's `diffBetweenWithStats`: changes on `right` since the merge base with `left`.
+pub fn refs_patch_from_merge_base(repo: &Path, left: &str, right: &str) -> Result<String> {
+    run(repo, &["diff", "-M", "--no-color", "--no-ext-diff", &format!("{left}...{right}")], None)
+}
+
 /// The first parent of `sha`, or the empty tree for a root commit.
 pub fn commit_parent(repo: &Path, sha: &str) -> Result<String> {
     let parents = run(repo, &["rev-list", "--parents", "-n", "1", sha], None)?;
@@ -964,6 +1013,61 @@ mod tests {
         let patch = refs_patch(p, &right, &renamed).unwrap();
         assert!(patch.contains("rename from rename-old.txt") && patch.contains("rename to rename-new.txt"));
         assert!(refs_patch(p, &renamed, &right).unwrap().contains("rename from rename-new.txt"));
+    }
+
+    #[test]
+    fn branch_base_uses_config_then_remote_default_and_upstream_resolves() {
+        let dir = repo();
+        let p = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        crate::testing::git(bare.path(), &["init", "--bare", "-q"]);
+        crate::testing::git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        crate::testing::git(p, &["push", "-q", "-u", "origin", "main"]);
+        crate::testing::git(bare.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        crate::testing::git(p, &["fetch", "-q", "origin"]);
+        let upstream_name = upstream(p).unwrap();
+        assert_eq!(upstream_name, "refs/remotes/origin/main");
+        assert_eq!(resolve_ref(p, &upstream_name).unwrap().name, upstream_name);
+
+        crate::testing::git(p, &["checkout", "-q", "-b", "dev"]);
+        fs::write(p.join("dev.txt"), "dev\n").unwrap();
+        commit(p, "dev", false, true).unwrap();
+        crate::testing::git(p, &["push", "-q", "-u", "origin", "dev"]);
+        crate::testing::git(p, &["checkout", "-q", "dev"]);
+        crate::testing::git(p, &["checkout", "-q", "-b", "feature"]);
+        crate::testing::git(p, &["config", "branch.feature.vscode-merge-base", "origin/main"]);
+        assert_eq!(branch_base(p, "feature").unwrap().name, "refs/remotes/origin/main");
+        crate::testing::git(p, &["config", "--unset", "branch.feature.vscode-merge-base"]);
+        assert_eq!(branch_base(p, "feature").unwrap().name, "refs/remotes/origin/dev");
+        crate::testing::git(p, &["reflog", "expire", "--expire=now", "--all"]);
+        assert_eq!(branch_base(p, "feature").unwrap().name, "refs/remotes/origin/main");
+    }
+
+    #[test]
+    fn resolve_ref_of_a_tag_is_its_commit() {
+        let dir = repo();
+        let p = dir.path();
+        let sha = crate::testing::out(p, &["rev-parse", "HEAD"]);
+        crate::testing::git(p, &["tag", "-a", "release", "-m", "release"]);
+        assert_eq!(resolve_ref(p, "refs/tags/release").unwrap().sha, sha);
+    }
+
+    #[test]
+    fn refs_patch_uses_three_dot_merge_base_direction() {
+        let dir = repo();
+        let p = dir.path();
+        let base = crate::testing::out(p, &["rev-parse", "HEAD"]);
+        crate::testing::git(p, &["checkout", "-q", "-b", "left"]);
+        fs::write(p.join("a.txt"), "left\n").unwrap();
+        commit(p, "left", false, true).unwrap();
+        let left = crate::testing::out(p, &["rev-parse", "HEAD"]);
+        crate::testing::git(p, &["checkout", "-q", "main"]);
+        fs::write(p.join("a.txt"), "right\n").unwrap();
+        commit(p, "right", false, true).unwrap();
+        let right = crate::testing::out(p, &["rev-parse", "HEAD"]);
+        let compare = refs_patch_from_merge_base(p, &left, &right).unwrap();
+        assert!(compare.contains("+right") && compare.contains("-line 1") && !compare.contains("-left"));
+        assert!(refs_patch(p, &base, &right).unwrap().contains("+right"));
     }
 
     #[test]

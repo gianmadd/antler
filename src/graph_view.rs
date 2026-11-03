@@ -111,10 +111,20 @@ fn commit_menu(
     sha: &str,
     message: &str,
     subject: &str,
+    upstream: Option<String>,
+    base: Option<crate::git::Ref>,
 ) -> PopupMenu {
     let (repo, sha) = (repo.to_path_buf(), sha.to_string());
     let (r, s) = (repo.clone(), sha.clone());
     let (multi_repo, multi_sha, multi_subject) = (repo.clone(), sha.clone(), subject.to_string());
+    let right_name = sha[..sha.len().min(7)].to_string();
+    let (remote_repo, remote_sha) = (repo.clone(), sha.clone());
+    let (base_repo, base_sha) = (repo.clone(), sha.clone());
+    let (remote_name, base_name) = (right_name.clone(), right_name);
+    let remote_enabled = upstream.is_some();
+    let base_enabled = base.is_some();
+    let compare_repo = repo.clone();
+    let compare_sha = sha.clone();
     menu.item(menu_item(this, "Open Commit", move |t, window, cx| {
             t.open_multi_diff(crate::workspace::MultiDiffSource::Commit { repo: multi_repo.clone(), sha: multi_sha.clone(), subject: multi_subject.clone() }, window, cx)
         }))
@@ -128,7 +138,29 @@ fn commit_menu(
             move |t, w, cx| t.ask_tag(r.clone(), s.clone(), w, cx)
         }))
         .separator()
-        .item(op_item(this, "Cherry Pick", Op::CherryPick { repo, sha: sha.clone() }))
+        .item(op_item(this, "Cherry Pick", Op::CherryPick { repo: repo.clone(), sha: sha.clone() }))
+        .separator()
+        .item(menu_item(this, "Compare with Remote", move |t, window, cx| {
+            if let Some(name) = &upstream {
+                t.open_multi_diff(crate::workspace::MultiDiffSource::Refs {
+                    repo: remote_repo.clone(),
+                    left: crate::git::Ref { name: name.trim_start_matches("refs/remotes/").to_string(), sha: name.clone() },
+                    right: crate::git::Ref { name: remote_name.clone(), sha: remote_sha.clone() },
+                }, window, cx);
+            }
+        }).disabled(!remote_enabled))
+        .item(menu_item(this, "Compare with Merge Base", move |t, window, cx| {
+            if let Some(left) = &base {
+                t.open_multi_diff(crate::workspace::MultiDiffSource::Refs {
+                    repo: base_repo.clone(),
+                    left: crate::git::Ref { name: left.name.trim_start_matches("refs/remotes/").to_string(), ..left.clone() },
+                    right: crate::git::Ref { name: base_name.clone(), sha: base_sha.clone() },
+                }, window, cx);
+            }
+        }).disabled(!base_enabled))
+        .item(menu_item(this, "Compare with…", move |t, window, cx| {
+            t.pick_ref(compare_repo.clone(), crate::branch_view::Purpose::Compare { sha: compare_sha.clone() }, window, cx)
+        }))
         .separator()
         .item(copy_item("Copy Commit Hash", sha))
         .item(copy_item("Copy Commit Message", message.to_string()))
@@ -291,10 +323,12 @@ impl Antler {
             (_, false) if count == 0 => Some("No commits yet."),
             _ => None,
         };
+        let repo = self.ws.graph.repo.clone();
+        let (upstream, base) = repo.as_ref().and_then(|repo| self.ws.section(repo)).map(|i| (self.ws.sections[i].upstream.clone(), self.ws.sections[i].base.clone())).unwrap_or_default();
         let list = uniform_list(
             "graph",
             count,
-            cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
+            cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 if range.end + 20 >= this.ws.graph.items().len() {
                     let page = this.ws.graph.more(); // reaching the end loads the next page
                     this.load_graph(page, window, cx);
@@ -338,6 +372,7 @@ impl Antler {
                                 let commit = &g.commits[c_ix];
                                 let sha = commit.sha.clone();
                                 let (weak, repo, hash, message, subject) = (cx.entity().downgrade(), repo.clone(), commit.sha.clone(), commit.message.clone(), commit.subject().to_string());
+                                let (upstream, base) = (upstream.clone(), base.clone());
                                 let when = graph::relative_time(commit.time, now);
                                 let tip = format!("{}\n{} · {}\n\n{}", commit.sha, commit.author, when, commit.message);
                                 let pills = graph::pills(&commit.labels);
@@ -357,7 +392,7 @@ impl Antler {
                                         Tooltip::element(move |_, _| v_flex().max_w(px(480.)).children(tip.lines().map(|l| div().child(l.to_string()))))
                                             .build(window, cx)
                                     })
-                                    .context_menu(move |menu, _, _| commit_menu(menu, &weak, &repo, &hash, &message, &subject))
+                                    .context_menu(move |menu, _, _| commit_menu(menu, &weak, &repo, &hash, &message, &subject, upstream.clone(), base.clone()))
                                     .child(lanes(g.rows[c_ix].clone(), true, width(&g.rows[c_ix])))
                                     .child(div().flex_1().min_w(px(msg_w.min(MSG_MIN))).truncate().child(commit.subject().to_string()))
                                     .children(pills.iter().take(shown).map(|(l, twin)| pill(l, *twin)))

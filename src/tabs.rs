@@ -514,8 +514,12 @@ impl Antler {
                     && this.ws.tabs.iter().any(|t| matches!(&t.kind, TabKind::MultiDiff(d) if d.source == source && d.patch.is_none()));
                 this.ws.set_multi_diff(&source, patch);
                 if initial_empty {
-                    let staged = matches!(source, workspace::MultiDiffSource::Group { staged: true, .. });
-                    let text = if staged { "The repository does not have any staged changes." } else { "The repository does not have any changes." };
+                    let text = match source {
+                        workspace::MultiDiffSource::Group { staged: true, .. } => "The repository does not have any staged changes.",
+                        workspace::MultiDiffSource::Group { .. } => "The repository does not have any changes.",
+                        workspace::MultiDiffSource::Refs { .. } => "There are no differences between these refs.",
+                        workspace::MultiDiffSource::Commit { .. } => "The commit has no changes.",
+                    };
                     window.push_notification(Notification::info(text), cx);
                 } else if let Some(e) = this.ws.last_error.take() {
                     window.push_notification(Notification::error(e).title("git"), cx);
@@ -601,7 +605,7 @@ impl Antler {
         match (&self.ws.tabs[ix].kind, self.ws.tabs[ix].path()) {
             (TabKind::Diff(d), _) => d.source.repo.join(&d.source.path),
             (TabKind::MultiDiff(d), _) => match &d.source {
-                workspace::MultiDiffSource::Group { repo, .. } | workspace::MultiDiffSource::Commit { repo, .. } => repo.clone(),
+                workspace::MultiDiffSource::Group { repo, .. } | workspace::MultiDiffSource::Commit { repo, .. } | workspace::MultiDiffSource::Refs { repo, .. } => repo.clone(),
             },
             (_, path) => path.unwrap_or(std::path::Path::new("")).to_path_buf(),
         }
@@ -1014,6 +1018,7 @@ impl Antler {
         let (repo, staged, commit, this) = match &tab.source {
             workspace::MultiDiffSource::Group { repo, staged } => (repo.clone(), *staged, None, cx.entity().downgrade()),
             workspace::MultiDiffSource::Commit { repo, sha, .. } => (repo.clone(), false, Some(sha.clone()), cx.entity().downgrade()),
+            workspace::MultiDiffSource::Refs { repo, right, .. } => (repo.clone(), false, Some(right.sha.clone()), cx.entity().downgrade()),
         };
         let view = Diff::new(self.diff_of(g))
             .soft_wrap(true)

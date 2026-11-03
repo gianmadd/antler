@@ -18,6 +18,7 @@ pub struct DiffSource {
 pub enum MultiDiffSource {
     Group { repo: PathBuf, staged: bool },
     Commit { repo: PathBuf, sha: String, subject: String },
+    Refs { repo: PathBuf, left: git::Ref, right: git::Ref },
 }
 
 impl MultiDiffSource {
@@ -25,6 +26,7 @@ impl MultiDiffSource {
         match self {
             Self::Group { repo, staged } => git::group_patch(repo, *staged),
             Self::Commit { repo, sha, .. } => git::commit_parent(repo, sha).and_then(|left| git::refs_patch(repo, &left, sha)),
+            Self::Refs { repo, left, right } => git::refs_patch_from_merge_base(repo, &left.sha, &right.sha),
         }
     }
 
@@ -32,6 +34,7 @@ impl MultiDiffSource {
         match self {
             Self::Group { repo, staged } => format!("{}: {}", file_name(repo), if *staged { "Staged Changes" } else { "Changes" }),
             Self::Commit { sha, subject, .. } => format!("{} - {subject}", &sha[..sha.len().min(7)]),
+            Self::Refs { left, right, .. } => format!("{} ↔ {}", left.name, right.name),
         }
     }
 }
@@ -497,13 +500,13 @@ impl Workspace {
         self.show_tab(existing, || TabKind::MultiDiff(MultiDiffTab::new(source)), true)
     }
 
-    /// Installs a group's patch. An empty first load closes the tab; a later empty load leaves “No changes”.
+    /// Installs a multi-file patch. Empty first loads close all but commit tabs, whose file view stays open.
     pub fn set_multi_diff(&mut self, source: &MultiDiffSource, result: git::Result<String>) -> bool {
         let Some(ix) = self.tabs.iter().position(|t| matches!(&t.kind, TabKind::MultiDiff(d) if &d.source == source)) else { return false };
         let TabKind::MultiDiff(tab) = &mut self.tabs[ix].kind else { unreachable!() };
         match result {
             Ok(patch) => {
-                if patch.is_empty() && tab.patch.is_none() && matches!(source, MultiDiffSource::Group { .. }) {
+                if patch.is_empty() && tab.patch.is_none() && !matches!(source, MultiDiffSource::Commit { .. }) {
                     self.close_tab(ix);
                     self.closed.pop();
                     return false;
@@ -511,6 +514,7 @@ impl Workspace {
                 let (repo, staged, commit) = match source {
                     MultiDiffSource::Group { repo, staged } => (repo, *staged, None),
                     MultiDiffSource::Commit { repo, sha, .. } => (repo, false, Some(sha.clone())),
+                    MultiDiffSource::Refs { repo, right, .. } => (repo, false, Some(right.sha.clone())),
                 };
                 let section = if matches!(source, MultiDiffSource::Group { .. }) {
                     self.sections.iter().find(|s| s.repo.path == *repo)
@@ -518,7 +522,7 @@ impl Workspace {
                     None
                 };
                 tab.files = git::split_patch(&patch).into_iter().map(|(path, patch)| {
-                    let untracked = commit.is_none() && !staged && section.is_some_and(|s| s.changes.iter().any(|f| f.path == path && f.is_untracked()));
+                    let untracked = matches!(source, MultiDiffSource::Group { .. }) && !staged && section.is_some_and(|s| s.changes.iter().any(|f| f.path == path && f.is_untracked()));
                     let mut source = DiffSource::working(repo.clone(), path, staged, untracked);
                     source.commit = commit.clone();
                     let mut file = DiffTab::new(source);
@@ -1368,6 +1372,48 @@ mod tests {
         let second = ws.open_multi_diff(source.clone());
         assert_eq!(first, second);
         assert_eq!(ws.tabs.iter().filter(|t| matches!(&t.kind, TabKind::MultiDiff(d) if d.source == source)).count(), 1);
+    }
+
+    #[test]
+    fn refs_multi_diff_left_is_the_ref_right_the_commit_and_never_reloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        git(&repo_path, &["checkout", "-q", "-b", "left"]);
+        fs::write(repo_path.join("a.txt"), "left\n").unwrap();
+        git(&repo_path, &["add", "a.txt"]);
+        git(&repo_path, &["commit", "-q", "-m", "left"]);
+        let left = out(&repo_path, &["rev-parse", "HEAD"]);
+        git(&repo_path, &["checkout", "-q", "main"]);
+        fs::write(repo_path.join("a.txt"), "right\n").unwrap();
+        git(&repo_path, &["add", "a.txt"]);
+        git(&repo_path, &["commit", "-q", "-m", "right"]);
+        let right = out(&repo_path, &["rev-parse", "HEAD"]);
+        let source = MultiDiffSource::Refs { repo: repo_path.clone(), left: crate::git::Ref { name: "left".into(), sha: left }, right: crate::git::Ref { name: "main".into(), sha: right } };
+        let patch = source.load().unwrap();
+        assert!(patch.contains("+right"));
+        assert!(!patch.contains("+left"));
+        assert_eq!(source.title(), "left ↔ main");
+        let mut ws = Workspace::open(tmp.path());
+        let ix = ws.open_multi_diff(source.clone());
+        assert!(ws.set_multi_diff(&source, Ok(patch)));
+        git(&repo_path, &["checkout", "-q", "left"]);
+        assert_eq!(ws.tabs[ix].title(), "left ↔ main");
+        assert!(matches!(&ws.tabs[ix].kind, TabKind::MultiDiff(tab) if tab.files[0].source.read_only()));
+    }
+
+    #[test]
+    fn refs_without_differences_open_no_tab() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("one");
+        repo(&repo_path);
+        let sha = out(&repo_path, &["rev-parse", "HEAD"]);
+        let reference = crate::git::Ref { name: "main".into(), sha: sha.clone() };
+        let source = MultiDiffSource::Refs { repo: repo_path.clone(), left: reference.clone(), right: reference };
+        let mut ws = Workspace::open(tmp.path());
+        ws.open_multi_diff(source.clone());
+        assert!(!ws.set_multi_diff(&source, source.load()));
+        assert!(!ws.tabs.iter().any(|t| matches!(&t.kind, TabKind::MultiDiff(d) if d.source == source)));
     }
 
     #[test]

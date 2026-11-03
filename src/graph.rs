@@ -317,7 +317,7 @@ impl Workspace {
         let file = match &self.tabs[self.active?].kind {
             TabKind::Diff(d) => &d.source.repo,
             TabKind::MultiDiff(d) => match &d.source {
-                crate::workspace::MultiDiffSource::Group { repo, .. } | crate::workspace::MultiDiffSource::Commit { repo, .. } => repo,
+                crate::workspace::MultiDiffSource::Group { repo, .. } | crate::workspace::MultiDiffSource::Commit { repo, .. } | crate::workspace::MultiDiffSource::Refs { repo, .. } => repo,
             },
             TabKind::File(FileTab { path, .. }) | TabKind::Image(ImageTab { path, .. }) => path,
             TabKind::Settings | TabKind::Keybindings => return None,
