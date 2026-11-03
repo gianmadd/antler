@@ -303,6 +303,9 @@ impl Antler {
                 r.started = true;
             }
             this.watch(window, cx);
+            if this.remote.is_some() {
+                this.start_ports(window, cx); // `remote_status` only does it for the first connection it sees
+            }
             this.refresh(window, cx);
         }
         this.supervise_remote(window, cx);
