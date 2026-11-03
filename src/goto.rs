@@ -363,9 +363,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         files(tmp.path(), &["a.rs", "b.rs", "c.rs", "d.rs"]);
         let mut ws = open(tmp.path());
-        ws.open_path(&tmp.path().join("c.rs"), None, true);
-        ws.open_path(&tmp.path().join("b.rs"), None, false);
-        ws.open_path(&tmp.path().join("gone.rs"), None, false); // not in the list: skipped
+        ws.open_path(&tmp.path().join("c.rs"), None, None, true);
+        ws.open_path(&tmp.path().join("b.rs"), None, None, false);
+        ws.open_path(&tmp.path().join("gone.rs"), None, None, false); // not in the list: skipped
 
         assert_eq!(rels(&ws, ""), ["b.rs", "c.rs", "a.rs", "d.rs"]);
         assert_eq!(rels(&ws, "rs"), ["a.rs", "b.rs", "c.rs", "d.rs"], "a query ranks by match only");

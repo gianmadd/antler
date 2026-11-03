@@ -24,6 +24,10 @@ pub struct SearchJob {
 }
 
 impl SearchJob {
+    pub(crate) fn cancel(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Gives the files with matches to `on_files` as they are found (`Workspace::search_chunk`); the returned
     /// `Results` has only `truncated` and `error`.
     pub fn run_chunked(&self, on_files: &mut dyn FnMut(Vec<FileMatches>)) -> Results {

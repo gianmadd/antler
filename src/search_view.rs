@@ -85,12 +85,19 @@ impl Antler {
 
     /// Cmd+Shift+F: shows the Search view with its field focused and selected, ready to type over.
     pub(crate) fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
+        let quick_query = self.quick_search_query(cx);
+        if let Some(text) = &quick_query {
+            self.query.0.update(cx, |q, cx| q.set_value(text.clone(), window, cx));
+        }
         self.ws.view = Some(View::Search);
         self.query.0.update(cx, |q, cx| {
             q.focus(window, cx);
             q.select_all(window, cx);
         });
         cx.notify();
+        if quick_query.is_some() {
+            self.run_search(window, cx);
+        }
     }
 
     /// Explorer → Find in Folder…: the Search view with the search details open and `dir` in "files to include".
@@ -288,7 +295,7 @@ impl Antler {
                                 .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                                     this.ws.select(key.clone());
                                     // a double click fires twice (count 1 then 2): preview, then pin
-                                    this.open_path(path.clone(), Some(number), ev.click_count() >= 2, cx);
+                                    this.open_path(path.clone(), Some(number), None, ev.click_count() >= 2, cx);
                                 }))
                                 .child(div().flex_1().min_w_0().truncate().font_family(mono.clone()).text_size(px(13.)).child(text))
                                 .group(group(ix))

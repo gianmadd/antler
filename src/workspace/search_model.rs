@@ -23,6 +23,14 @@ pub struct Search {
     pub(super) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Quick Open's independent search result and cancellation state.
+#[derive(Default)]
+pub struct QuickSearch {
+    pub results: Option<Results>,
+    job: Option<SearchJob>,
+    last: u64,
+}
+
 /// A line of the Search view's result list: a file header or one matching line (file, line indexes).
 #[derive(Debug, PartialEq)]
 pub enum SearchRow {
@@ -39,6 +47,35 @@ pub enum Replace {
 }
 
 impl Workspace {
+    /// Starts a Quick Open search with the Search view's current options.
+    pub fn start_quick_search(&mut self, text: &str) -> Option<SearchJob> {
+        self.cancel_quick_search();
+        if text.is_empty() {
+            self.quick_search.results = None;
+            return None;
+        }
+        let mut query = self.search.query.clone();
+        query.text = text.to_string();
+        self.quick_search.last += 1;
+        let job = self.search_job(self.quick_search.last, query, 100, Default::default());
+        self.quick_search.results = None;
+        self.quick_search.job = Some(job.clone());
+        Some(job)
+    }
+
+    pub fn finish_quick_search(&mut self, job: &SearchJob, results: Results) {
+        if self.quick_search.job.as_ref().is_some_and(|current| current.id == job.id && current.root == self.root && std::sync::Arc::ptr_eq(&current.cancel, &job.cancel)) {
+            self.quick_search.results = Some(results);
+        }
+    }
+
+    pub fn cancel_quick_search(&mut self) {
+        if let Some(job) = self.quick_search.job.take() {
+            job.cancel();
+        }
+        self.quick_search.results = None;
+    }
+
     /// Starts a search for `query` over the Root, cancelling the running one. Returns the job to run off the
     /// UI thread, or `None` for an empty query (which clears the results).
     pub fn start_search(&mut self, query: Query) -> Option<SearchJob> {
@@ -52,8 +89,19 @@ impl Workspace {
             self.search.results = None;
             return None;
         }
-        let repos = self.sections.iter().map(|s| s.repo.path.clone()).collect();
-        Some(SearchJob { id: self.search.last, host: self.host.clone(), root: self.root.clone(), repos, query, limit: search::LIMIT, cancel: self.search.cancel.clone() })
+        Some(self.search_job(self.search.last, query, search::LIMIT, self.search.cancel.clone()))
+    }
+
+    fn search_job(&self, id: u64, query: Query, limit: usize, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> SearchJob {
+        SearchJob {
+            id,
+            host: self.host.clone(),
+            root: self.root.clone(),
+            repos: self.sections.iter().map(|s| s.repo.path.clone()).collect(),
+            query,
+            limit,
+            cancel,
+        }
     }
 
     /// After a rescan: with the Search view open and a query typed, the same search again (files may have changed).
@@ -483,6 +531,65 @@ mod tests {
     }
 
     #[test]
+    fn quick_search_cancels_the_previous_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        let mut ws = Workspace::open(tmp.path());
+        let old = ws.start_quick_search("old").unwrap();
+        let new = ws.start_quick_search("new").unwrap();
+        assert!(old.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!new.cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn quick_search_leaves_the_search_view_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        let mut ws = Workspace::open(tmp.path());
+        let search = ws.start_search(Query { text: "view".into(), ..Query::default() }).unwrap();
+        ws.search.query.case_sensitive = true;
+        ws.search.query.whole_word = true;
+        ws.search.query.regex = true;
+        ws.search.query.include = "*.rs".into();
+        ws.search.query.exclude = "target/**".into();
+        ws.search.query.use_ignore_files = false;
+        let quick = ws.start_quick_search("quick").unwrap();
+        assert_eq!(ws.search.query.text, "view");
+        assert!(!search.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(quick.query, Query { text: "quick".into(), case_sensitive: true, whole_word: true, regex: true, include: "*.rs".into(), exclude: "target/**".into(), use_ignore_files: false });
+    }
+
+    #[test]
+    fn quick_search_results_are_grouped_and_capped() {
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        fs::write(tmp.path().join("a.txt"), "hit\nhit\n").unwrap();
+        let mut ws = Workspace::open(tmp.path());
+        let mut job = ws.start_quick_search("hit").unwrap();
+        job.limit = 1;
+        let results = job.run();
+        ws.finish_quick_search(&job, results);
+        let results = ws.quick_search.results.as_ref().unwrap();
+        assert_eq!(results.files.len(), 1);
+        assert_eq!(results.files[0].path.file_name().unwrap(), "a.txt");
+        assert_eq!(results.files[0].lines.len(), 1);
+        assert!(results.truncated);
+    }
+
+    #[test]
+    fn stale_quick_search_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        let mut ws = Workspace::open(tmp.path());
+        let old = ws.start_quick_search("old").unwrap();
+        let new = ws.start_quick_search("new").unwrap();
+        ws.finish_quick_search(&old, Results { files: Vec::new(), truncated: false, error: None });
+        assert!(ws.quick_search.results.is_none());
+        ws.finish_quick_search(&new, Results { files: Vec::new(), truncated: false, error: None });
+        assert!(ws.quick_search.results.is_some());
+    }
+
+    #[test]
     fn clicking_a_result_opens_the_editor_at_its_line() {
         let tmp = tempfile::tempdir().unwrap();
         repo(&tmp.path().join("api"));
@@ -492,7 +599,7 @@ mod tests {
         let results = ws.search.results.as_ref().unwrap();
         let (path, line) = (results.files[0].path.clone(), results.files[0].lines[0].line);
         let ix = ws.open_path_now(&path, Some(line), false);
-        assert_eq!((file(&ws, ix).path.clone(), file(&ws, ix).goto), (tmp.path().join("api/b.txt"), Some(3)));
+        assert_eq!((file(&ws, ix).path.clone(), file(&ws, ix).goto), (tmp.path().join("api/b.txt"), Some((3, 0))));
         assert!(ws.tabs[ix].preview);
     }
 }

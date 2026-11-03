@@ -106,6 +106,7 @@ pub struct Workspace {
     /// Paths changed since the last scan started: only the tabs showing them reload. The Root = everything.
     changed: HashSet<PathBuf>,
     pub search: Search,
+    pub quick_search: QuickSearch,
     /// Cmd+P "Go to File".
     pub goto: crate::goto::GoTo,
     /// The last clicked row of any list (Explorer, Git, Ricerca, Grafo), as a key the view builds; drawn with `--sel`.
@@ -197,6 +198,7 @@ impl Workspace {
             refresh_at: None,
             changed: HashSet::new(),
             search: Search::default(),
+            quick_search: QuickSearch::default(),
             goto: Default::default(),
             selected: None,
             also_selected: Vec::new(),
@@ -260,6 +262,7 @@ impl Workspace {
     /// The old Root's tabs are dropped; the editor must ask about unsaved ones before calling this.
     pub fn set_root(&mut self, root: PathBuf) {
         self.search.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel_quick_search();
         let query = std::mem::take(&mut self.search.query);
         *self = Workspace {
             search: Search { query, last: self.search.last, ..Search::default() }, // the id keeps growing: a cancelled search's id never comes back
@@ -974,7 +977,7 @@ mod tests {
         let mut ws = Workspace::new(root.to_path_buf());
         ws.refresh();
 
-        let ix = ws.open_path(&root.join("docs/a.md"), None, false);
+        let ix = ws.open_path(&root.join("docs/a.md"), None, None, false);
         assert!(file(&ws, ix).loading && file(&ws, ix).text.is_empty(), "the tab shows Loading…");
         ws.set_file(&root.join("docs/a.md"), FileTab::load(&root.join("docs/a.md")));
         assert!(!file(&ws, ix).loading);

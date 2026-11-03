@@ -152,7 +152,7 @@ impl Antler {
                 std::fs::create_dir_all(file.parent().unwrap_or(&file)).ok();
                 std::fs::write(&file, "{}\n").ok();
             }
-            this.open_path(file, None, true, cx);
+            this.open_path(file, None, None, true, cx);
         }));
         let more = Button::new("more-themes").link().label("Get more themes").on_click(|_, _, cx| cx.open_url("https://open-vsx.org/?category=Themes"));
         let install = Button::new("install-vsix").link().label("Install Theme from VSIX…").on_click(cx.listener(|this, _, window, cx| this.install_theme(&crate::theme_view::InstallThemeFromVsix, window, cx)));

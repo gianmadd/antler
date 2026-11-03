@@ -12,7 +12,7 @@ use gpui_kit::*;
 use crate::branch_view::CloseBranch;
 use crate::explorer::*;
 use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
-use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine};
+use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine, QuickSearchInSearchView, QuickTextSearch};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
@@ -208,6 +208,8 @@ cmds![
     ("antler.toggleMinimapCharacters", "Render Characters", "", Global, ToggleRenderCharacters),
     // Go
     ("workbench.action.quickOpen", "Go to File…", "cmd-p", Global, GoToFile),
+    ("workbench.action.quickTextSearch", "Quick Text Search", "", Global, QuickTextSearch),
+    ("antler.quickSearchInSearchView", "Open in Search View", "shift-cmd-f", GoTo, QuickSearchInSearchView),
     ("workbench.action.gotoLine", "Go to Line…", "ctrl-g", Global, GoToLine),
     ("workbench.action.focusFirstEditorGroup", "Focus First Editor Group", "cmd-1", Global, FocusFirstGroup),
     ("workbench.action.focusSecondEditorGroup", "Focus Second Editor Group", "cmd-2", Global, FocusSecondGroup),
@@ -796,6 +798,14 @@ mod tests {
                 seen.push((b.key, b.ctx, b.cmd.id));
             }
         }
+    }
+
+    #[test]
+    fn quick_text_search_is_in_the_palette_without_a_default_key() {
+        let command = COMMANDS.iter().find(|c| c.id == "workbench.action.quickTextSearch").unwrap();
+        assert_eq!(command.key, "");
+        assert!(palette_commands(true).iter().any(|c| c.id == command.id));
+        assert_eq!(keys_of(&defaults(false), "antler.quickSearchInSearchView"), [("cmd-shift-f", Ctx::GoTo)]);
     }
 
     fn default_key(windows: bool, id: &str) -> Vec<String> {
