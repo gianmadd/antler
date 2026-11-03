@@ -789,4 +789,94 @@ Host first
         assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), before + 1);
         assert_eq!(again.host_info().unwrap().home, home.to_str().unwrap());
     }
+
+    /// A stand-in ssh with a master: the first call starts a `sleep` whose pid is the ControlPath file (a real master
+    /// is a process and a socket there), `-O exit` kills it, and the command runs here with its own HOME. Like a real
+    /// mux client, a call ends when its master does. Each call's pid goes to `procs`.
+    #[cfg(unix)]
+    fn master_rig(tmp: &Path) -> (std::sync::Arc<antler_host::remote::Remote>, PathBuf, PathBuf, PathBuf) {
+        let (fake, procs, home) = (tmp.join("fake-ssh"), tmp.join("procs"), tmp.join("home"));
+        std::fs::create_dir(&home).unwrap();
+        let script = format!(
+            "#!/bin/sh\ncp=; out=\nwhile [ $# -gt 0 ]; do case \"$1\" in -o) case \"$2\" in ControlPath=*) cp=\"${{2#ControlPath=}}\";; esac; shift 2;; -O) out=1; shift 2;; -F|-p) shift 2;; -T) shift;; --) shift; break;; *) break;; esac; done\n\
+             if [ -n \"$out\" ]; then [ -f \"$cp\" ] && kill $(cat \"$cp\") 2>/dev/null; rm -f \"$cp\"; exit 0; fi\nshift\n\
+             [ -f \"$cp\" ] || {{ sleep 600 >/dev/null 2>&1 </dev/null & echo $! > \"$cp\"; }}\necho $$ >> '{}'\nexec 3<&0\n\
+             ANTLER_SERVER_GRACE_SECS=2 HOME='{}' /bin/sh -c \"$*\" <&3 &\nc=$!\nwhile kill -0 $c 2>/dev/null && kill -0 $(cat \"$cp\") 2>/dev/null; do sleep 0.1; done\nkill $c 2>/dev/null; wait $c\n",
+            procs.display(),
+            home.display()
+        );
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let binary = crate::testing::server_binary(&mut Command::new("cargo"));
+        let mut c = SshConnector::with(Target::parse("ada@example.test").unwrap(), fake.clone(), binary, tmp.join("cache"));
+        // like the real one, under a folder of the `antler-ssh-<pid>-<n>` kind; here inside the test's own folder
+        c.control = tmp.join(format!("antler-ssh-{}-0", std::process::id()));
+        let control = c.control.clone();
+        let c = std::sync::Arc::new(c);
+        let remote = antler_host::remote::Remote::open(std::sync::Arc::new(move || c.connect())).unwrap();
+        (std::sync::Arc::new(remote), control, procs, fake)
+    }
+
+    #[cfg(unix)]
+    fn pid_alive(pid: &str) -> bool {
+        Command::new("kill").args(["-0", pid]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    }
+
+    #[cfg(unix)]
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !done() {
+            assert!(std::time::Instant::now() < end, "still not true after 15 s: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// What is left of a rig: the pids of its ssh calls and of its master, and whether its folder is there.
+    #[cfg(unix)]
+    fn leftovers(control: &Path, procs: &Path) -> Vec<String> {
+        let mut pids: Vec<String> = std::fs::read_to_string(procs).unwrap_or_default().lines().map(String::from).collect();
+        pids.extend(std::fs::read_dir(control).into_iter().flatten().flatten().filter_map(|e| std::fs::read_to_string(e.path()).ok()).map(|p| p.trim().to_string()));
+        let mut left: Vec<String> = pids.into_iter().filter(|p| pid_alive(p)).map(|p| format!("process {p}")).collect();
+        if control.exists() {
+            left.push("the control folder".into());
+        }
+        left
+    }
+
+    /// Closing a Remote window (`Remote::close`, which the window calls even when a job or a stream still holds the
+    /// `Remote`): the proxy ends, the master stops, the folder goes, and nothing reconnects.
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_remote_ends_its_connection_for_good() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = std::fs::canonicalize(tmp.path()).unwrap();
+        let (remote, control, procs, _) = master_rig(&tmp);
+        remote.supervise(|_| {});
+        let master_file = std::fs::read_dir(&control).unwrap().next().unwrap().unwrap().path();
+        assert!(pid_alive(std::fs::read_to_string(&master_file).unwrap().trim()), "the rig starts a master");
+        let held = remote.clone(); // whatever still holds it: Drop never runs
+        remote.close();
+        wait_for("everything of the connection is gone", || leftovers(&control, &procs).is_empty());
+        let calls = std::fs::read_to_string(&procs).unwrap().lines().count();
+        std::thread::sleep(std::time::Duration::from_millis(1500)); // a supervisor that reconnected would have by now
+        assert_eq!(std::fs::read_to_string(&procs).unwrap().lines().count(), calls, "no new ssh call after the close");
+        assert!(leftovers(&control, &procs).is_empty(), "{:?}", leftovers(&control, &procs));
+        drop(held);
+    }
+
+    /// Quit: the windows' Remotes are closed, then `sweep_own` stops what is left. A supervisor must not answer the
+    /// loss of its master by starting a new one that nobody stops.
+    #[cfg(unix)]
+    #[test]
+    fn quitting_leaves_no_master_and_no_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = std::fs::canonicalize(tmp.path()).unwrap();
+        let (remote, control, procs, fake) = master_rig(&tmp);
+        remote.supervise(|_| {});
+        let pid = std::process::id();
+        remote.close(); // what `on_app_quit` does for every window first
+        sweep_control_dirs(&tmp, &fake, |p| p == pid);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(leftovers(&control, &procs).is_empty(), "{:?}", leftovers(&control, &procs));
+    }
 }

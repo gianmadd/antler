@@ -71,7 +71,8 @@ struct Core {
     conn: Mutex<Arc<Inner>>,
     next: Arc<AtomicU64>,
     sinks: Sinks,
-    connector: Option<Arc<Connector>>,
+    /// Taken by `Remote::close`: dropping it is what stops the connector's own resources (ssh's master).
+    connector: Mutex<Option<Arc<Connector>>>,
     status: Mutex<Option<Arc<dyn Fn(Status) + Send + Sync>>>,
     /// The process behind the current connection.
     child: Mutex<Option<Child>>,
@@ -165,7 +166,7 @@ impl Core {
             conn: Mutex::new(Inner::dead(next.clone())),
             next,
             sinks: Sinks::default(),
-            connector,
+            connector: Mutex::new(connector),
             status: Mutex::new(None),
             child: Mutex::new(None),
             closed: AtomicBool::new(false),
@@ -184,6 +185,10 @@ impl Core {
 
     /// Makes `transport` the current connection and sends the active watches again on it.
     fn install(core: &Arc<Core>, (input, output, mut child): Transport) -> Result<ServerInfo, String> {
+        if core.closed.load(Ordering::SeqCst) {
+            child.as_mut().map(|c| (drop(c.kill()), drop(c.wait()))); // closed while it was connecting
+            return Err("closed".into());
+        }
         let generation = core.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let weak: Weak<Core> = Arc::downgrade(core);
         let on_end = move || {
@@ -237,12 +242,13 @@ impl Core {
     }
 
     fn start_reconnecting(core: &Arc<Core>) {
-        if core.closed.load(Ordering::SeqCst) || core.connector.is_none() || core.reconnecting.swap(true, Ordering::SeqCst) {
+        if core.closed.load(Ordering::SeqCst) || lock(&core.connector).is_none() || core.reconnecting.swap(true, Ordering::SeqCst) {
             return;
         }
         let core = core.clone();
         std::thread::spawn(move || {
-            let (lost_at, connector) = (Instant::now(), core.connector.clone().unwrap());
+            let (lost_at, connector) = (Instant::now(), lock(&core.connector).clone());
+            let Some(connector) = connector else { return };
             let mut n = 0;
             loop {
                 core.notify(Status::Reconnecting { attempt: n + 1 });
@@ -397,14 +403,27 @@ fn relay(core: &Core, mut conn: TcpStream, host: &str, port: u16) -> io::Result<
     inner.send(core.next.fetch_add(1, Ordering::Relaxed), Req::Cancel { target: id }, &[])
 }
 
-impl Drop for Remote {
-    fn drop(&mut self) {
+impl Remote {
+    /// Ends this connection for good: no reconnect, the process behind it is killed and the connector is let go (for
+    /// ssh that stops the ControlMaster and removes its folder). For a window that closes: something may still hold
+    /// the `Remote` (a job, a stream), so this must not wait for `Drop`.
+    pub fn close(&self) {
         self.core.closed.store(true, Ordering::SeqCst);
         if let Some(mut child) = lock(&self.core.child).take() {
             // closing its stdin makes the server finish; kill is for one that does not
             drop(child.kill());
             drop(child.wait());
         }
+        // off this thread: stopping a master is a process to run, and the caller may be the UI
+        if let Some(connector) = lock(&self.core.connector).take() {
+            std::thread::spawn(move || drop(connector));
+        }
+    }
+}
+
+impl Drop for Remote {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

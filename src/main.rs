@@ -345,6 +345,8 @@ impl Antler {
 
     /// The last window to close is what the next start restores, if the app quits with none open.
     fn leaving(&self, cx: &mut Context<Self>) {
+        // the window is going: its connection ends now (docs/agents/remote.md), even if a job still holds the Remote
+        self.remote.iter().for_each(|r| r.remote.close());
         if cx.global::<Windows>().0.len() == 1 {
             cx.set_global(LastClosed(Some(self.window_save())));
         }
@@ -941,6 +943,8 @@ fn main() {
         .detach();
         // hot exit: every window's folder, editor groups and Untitled files go into the state file on quit and come back at the next start
         cx.on_app_quit(|cx| {
+            // close first: a supervisor would answer the loss of a swept master by starting a new one
+            cx.global::<Windows>().0.iter().filter_map(|e| e.view.1.upgrade()).for_each(|v| v.read(cx).remote.iter().for_each(|r| r.remote.close()));
             ssh::sweep_own();
             if let Some(f) = state::default_path() {
                 let mut list: Vec<WindowSave> = cx.global::<Windows>().0.iter().filter_map(|e| e.view.1.upgrade()).map(|v| v.read(cx).window_save()).collect();
