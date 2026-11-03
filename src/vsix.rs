@@ -104,7 +104,7 @@ pub fn scan(root: &Path) -> Vec<Installed> {
 
 /// `~/.config/antler/themes`; `None` without a home directory.
 pub fn default_root() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/antler/themes"))
+    crate::paths::config("themes")
 }
 
 /// The path of a zip entry under the extension, or `None` when it is outside it (`..`, absolute paths, backslashes: zip-slip).

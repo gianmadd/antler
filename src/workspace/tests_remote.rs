@@ -16,7 +16,7 @@ fn remote_ws(root: &Path) -> Workspace {
 #[test]
 fn a_remote_root_scans_edits_saves_searches_and_deletes_for_good() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let root = crate::host::canonical(tmp.path()).unwrap();
     repo(&root.join("one"));
     fs::write(root.join("one/a.txt"), "edited needle\n").unwrap();
     let mut ws = remote_ws(&root);

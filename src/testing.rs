@@ -8,7 +8,8 @@ fn run(dir: &Path, args: &[&str]) -> Output {
     Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "commit.gpgsign=false"])
+        // core.autocrlf: Git for Windows' installer turns it on, and the tests compare bytes
+        .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -41,7 +42,7 @@ pub fn out(dir: &Path, args: &[&str]) -> String {
 pub fn init(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     git(dir, &["init", "-q", "-b", "main"]);
-    for (key, value) in [("user.email", "t@t"), ("user.name", "Ada"), ("gc.auto", "0"), ("maintenance.auto", "false"), ("commit.gpgsign", "false")] {
+    for (key, value) in [("user.email", "t@t"), ("user.name", "Ada"), ("gc.auto", "0"), ("maintenance.auto", "false"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
         git(dir, &["config", key, value]);
     }
 }
@@ -76,4 +77,9 @@ pub fn antler_remote(cargo: &mut Command) -> antler_host::remote::Remote {
 /// undoing a delete cannot apply.
 pub fn over_remote() -> bool {
     std::env::var_os("ANTLER_TEST_REMOTE").is_some()
+}
+
+/// `path` with `/` separators, as the tests write paths (Windows gives `\`).
+pub fn slashes(path: impl AsRef<str>) -> String {
+    path.as_ref().replace('\\', "/")
 }

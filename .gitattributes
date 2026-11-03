@@ -1,0 +1,4 @@
+# bash scripts keep LF on a Windows checkout (core.autocrlf), batch files CRLF (cmd misreads labels in LF files)
+*.sh text eol=lf
+scripts/antler text eol=lf
+*.cmd text eol=crlf
