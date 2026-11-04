@@ -199,6 +199,7 @@ impl View {
         }
     }
 
+    /// Finds the view with this setting id.
     pub fn from_id(id: &str) -> Option<View> {
         Self::ALL.into_iter().find(|view| view.id() == id)
     }

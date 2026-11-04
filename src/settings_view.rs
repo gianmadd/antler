@@ -130,7 +130,11 @@ fn pages() -> Vec<SettingPage> {
             "Window",
             vec![
                 text("Activity Bar Views", "Views shown in the Activity bar, in order. Right click the Activity bar to show or hide views.", "antler.activityBar.views", |s| {
-                    crate::workspace::activity_bar::parse(&s.activity_bar_views).0.iter().map(|view| view.id()).collect::<Vec<_>>().join(", ")
+                    s.activity_bar_views
+                        .as_array()
+                        .filter(|ids| ids.iter().all(serde_json::Value::is_string))
+                        .map(|ids| ids.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(", "))
+                        .unwrap_or_else(|| crate::workspace::activity_bar::parse(&s.activity_bar_views).0.iter().map(|view| view.id()).collect::<Vec<_>>().join(", "))
                 }, views_json),
                 choice("Color Theme", "The theme of the whole window (Cmd+K Cmd+T previews them).", "workbench.colorTheme", &themes, |s| s.color_theme.clone()),
                 icon_theme_item(),

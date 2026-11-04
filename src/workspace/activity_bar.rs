@@ -49,10 +49,18 @@ pub fn shown(list: &[View], remote: bool, active: Option<View>) -> Vec<View> {
     shown
 }
 
-/// `view` moved to `onto`'s position in `list`; same list if `view == onto` or either is missing.
+/// `view` moved to `onto`'s position in `list`; a missing `view` is inserted, but a missing `onto` is unchanged.
 pub fn move_to(list: &[View], view: View, onto: View) -> Vec<View> {
-    let (Some(from), Some(target_index)) = (list.iter().position(|v| *v == view), list.iter().position(|v| *v == onto)) else {
+    let Some(target_index) = list.iter().position(|v| *v == onto) else {
         return list.to_vec();
+    };
+    if view == onto {
+        return list.to_vec();
+    }
+    let Some(from) = list.iter().position(|v| *v == view) else {
+        let mut moved = list.to_vec();
+        moved.insert(target_index, view);
+        return moved;
     };
     if from == target_index {
         return list.to_vec();
@@ -154,6 +162,12 @@ mod tests {
         let list = View::ALL.to_vec();
         assert_eq!(move_to(&list, View::Projects, View::Explorer), vec![View::Projects, View::Explorer, View::Git, View::Search, View::Ports]);
         assert_eq!(move_to(&list, View::Git, View::Ports), vec![View::Explorer, View::Search, View::Projects, View::Ports, View::Git]);
+    }
+
+    #[test]
+    fn moving_hidden_view_onto_bar_adds_it_at_target_position() {
+        let list = vec![View::Explorer, View::Git, View::Projects];
+        assert_eq!(move_to(&list, View::Search, View::Git), vec![View::Explorer, View::Search, View::Git, View::Projects]);
     }
 
     #[test]
