@@ -28,6 +28,7 @@ mod keybindings_view;
 mod keys;
 mod lsp;
 mod minimap;
+mod location_picker;
 mod minimap_view;
 mod nav;
 mod quick_diff;
@@ -231,6 +232,7 @@ pub(crate) struct Antler {
     projects_view: projects_view::State,
     _projects_sub: Subscription,
     project_picker: Option<projects_picker::Popup>,
+    location_picker: Option<location_picker::Popup>,
     project_picker_generation: u64,
     /// Search view: the Replace, "files to include" and "files to exclude" fields.
     search_fields: search_view::SearchFields,
@@ -327,6 +329,7 @@ impl Antler {
             projects_view,
             _projects_sub: projects_sub,
             project_picker: None,
+            location_picker: None,
             project_picker_generation: 0,
             search_fields: search_view::SearchFields::new(window, cx),
             git_list: ListState::new(0, ListAlignment::Top, px(200.)),
@@ -822,6 +825,9 @@ impl Render for Antler {
             .on_action(cx.listener(Self::go_to_line))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
+            .on_action(cx.listener(Self::go_to_definition_action))
+            .on_action(cx.listener(Self::go_to_type_definition_action))
+            .on_action(cx.listener(Self::go_to_implementation_action))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::select_icon_theme))
             .on_action(cx.listener(Self::install_theme))
@@ -847,6 +853,7 @@ impl Render for Antler {
             })
             .child(status)
             .children(self.go_to_popup(cx))
+            .children(self.location_picker_popup(cx))
             .children(self.projects_popup(cx))
             .children(self.picker_popup(cx))
             .children(self.theme_popup(cx))

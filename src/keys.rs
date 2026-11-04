@@ -13,7 +13,7 @@ use crate::branch_view::CloseBranch;
 use crate::explorer::*;
 use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
 use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine, QuickSearchInSearchView, QuickTextSearch};
-use crate::nav::{GoBack, GoForward};
+use crate::nav::{GoBack, GoForward, GoToDefinition, GoToImplementation};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::projects_picker::{AcceptProjectPath, CloseProjects, OpenProjectNewWindow, OpenProjects, SaveProjectPath};
@@ -224,6 +224,8 @@ cmds![
     ("workbench.action.gotoLine", "Go to Line…", "ctrl-g", Global, GoToLine),
     ("workbench.action.navigateBack", "Go Back", "ctrl--", Global, GoBack),
     ("workbench.action.navigateForward", "Go Forward", "ctrl-shift--", Global, GoForward),
+    ("editor.action.revealDefinition", "Go to Definition", "f12", Editor, GoToDefinition),
+    ("editor.action.goToImplementation", "Go to Implementation", "cmd-f12", Editor, GoToImplementation),
     ("workbench.action.focusFirstEditorGroup", "Focus First Editor Group", "cmd-1", Global, FocusFirstGroup),
     ("workbench.action.focusSecondEditorGroup", "Focus Second Editor Group", "cmd-2", Global, FocusSecondGroup),
     ("workbench.action.focusThirdEditorGroup", "Focus Third Editor Group", "cmd-3", Global, FocusThirdGroup),

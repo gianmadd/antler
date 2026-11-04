@@ -330,6 +330,7 @@ pub struct Handle {
     client: Arc<client::Client>,
     pub path: PathBuf,
     pub host: Arc<dyn Host>,
+    pub open_texts: Arc<HashMap<PathBuf, String>>,
 }
 impl Handle {
     pub fn request(
@@ -339,6 +340,64 @@ impl Handle {
     ) -> Result<serde_json::Value, String> {
         self.client.request(method, params)
     }
+
+    /// Request a navigation destination. Columns from the editor are Unicode scalar offsets.
+    pub fn jump(&self, kind: Jump, text: &str, line: usize, column: usize) -> Vec<Target> {
+        use lsp_types::{Position, TextDocumentIdentifier};
+        let method = match kind {
+            Jump::Definition => "textDocument/definition",
+            Jump::TypeDefinition => "textDocument/typeDefinition",
+            Jump::Implementation => "textDocument/implementation",
+        };
+        let uri = url::Url::from_file_path(&self.path).ok().and_then(|url| url.as_str().parse().ok());
+        let Some(uri) = uri else { return vec![] };
+        let source_line = text.lines().nth(line).unwrap_or("");
+        let position = Position::new(line as u32, char_to_utf16(source_line, column) as u32);
+        let params = serde_json::json!({"textDocument": TextDocumentIdentifier { uri }, "position": position});
+        let Ok(value) = self.request(method, params) else { return vec![] };
+        let Ok(Some(result)) = serde_json::from_value::<Option<lsp_types::GotoDefinitionResponse>>(value) else { return vec![] };
+        let locations = match result {
+            lsp_types::GotoDefinitionResponse::Scalar(location) => vec![location],
+            lsp_types::GotoDefinitionResponse::Array(locations) => locations,
+            lsp_types::GotoDefinitionResponse::Link(links) => links.into_iter().filter_map(|link| Some(lsp_types::Location { uri: link.target_uri, range: link.target_selection_range })).collect(),
+        };
+        targets_with_text(self.host.as_ref(), locations, &self.open_texts)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Jump { Definition, TypeDefinition, Implementation }
+
+pub(crate) fn char_to_utf16(text: &str, column: usize) -> usize {
+    text.chars().take(column).map(char::len_utf16).sum()
+}
+
+pub(crate) fn utf16_to_char(text: &str, column: usize) -> usize {
+    let mut units = 0;
+    for (ix, ch) in text.char_indices() {
+        if units + ch.len_utf16() > column { return text[..ix].chars().count(); }
+        units += ch.len_utf16();
+        if units == column { return text[..ix + ch.len_utf8()].chars().count(); }
+    }
+    text.chars().count()
+}
+
+pub(crate) fn targets(host: &dyn Host, locations: Vec<lsp_types::Location>) -> Vec<Target> {
+    targets_with_text(host, locations, &HashMap::new())
+}
+
+pub(crate) fn targets_with_text(host: &dyn Host, locations: Vec<lsp_types::Location>, open_texts: &HashMap<PathBuf, String>) -> Vec<Target> {
+    let mut texts = HashMap::new();
+    locations.into_iter().filter_map(|location| {
+        let path = url::Url::parse(location.uri.as_str()).ok()?.to_file_path().ok()?;
+        if !texts.contains_key(&path) { texts.insert(path.clone(), open_texts.get(&path).cloned().unwrap_or_else(|| host.read_to_string(&path).unwrap_or_default())); }
+        let text = texts.get(&path)?;
+        let start_line = location.range.start.line as usize;
+        let end_line = location.range.end.line as usize;
+        let line = text.lines().nth(start_line).unwrap_or("");
+        let end = text.lines().nth(end_line).unwrap_or("");
+        Some(Target { path, line: start_line, column: utf16_to_char(line, location.range.start.character as usize), end_line, end_column: utf16_to_char(end, location.range.end.character as usize) })
+    }).collect()
 }
 impl Servers {
     pub fn handle(&self, path: &Path) -> Option<Handle> {
@@ -353,6 +412,7 @@ impl Servers {
             client,
             path: path.to_path_buf(),
             host: self.host.clone(),
+            open_texts: Arc::new(self.docs.iter().map(|(path, (text, _, _))| (path.clone(), text.clone())).collect()),
         })
     }
 }
@@ -387,5 +447,24 @@ mod pure_tests {
             "/r/venv/bin/python"
         );
         assert_eq!(interpreter(Path::new("/r"), |_| false), "python");
+    }
+    #[test]
+    fn positions_convert_between_characters_and_utf16_units() {
+        let line = "aé😀z";
+        assert_eq!(char_to_utf16(line, 3), 4);
+        assert_eq!(utf16_to_char(line, 4), 3);
+        assert_eq!(utf16_to_char(line, 2), 2);
+    }
+
+    #[test]
+    fn target_columns_use_unsaved_text_for_open_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target.py");
+        std::fs::write(&path, "old").unwrap();
+        let uri = url::Url::from_file_path(&path).unwrap().as_str().parse().unwrap();
+        let location = lsp_types::Location { uri, range: lsp_types::Range::new(lsp_types::Position::new(0, 4), lsp_types::Position::new(0, 5)) };
+        let open = HashMap::from([(path.clone(), "aé😀x".to_string())]);
+        let result = targets_with_text(crate::host::local().as_ref(), vec![location], &open);
+        assert_eq!((result[0].column, result[0].end_column), (3, 4));
     }
 }

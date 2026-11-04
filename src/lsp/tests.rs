@@ -24,6 +24,14 @@ while True:
     elif method == "initialized":
         send({{"jsonrpc":"2.0", "id":0, "method":"workspace/configuration", "params":{{"items":[{{"section":"python"}},{{"section":"basedpyright"}}]}}}})
         send({{"jsonrpc":"2.0", "id":999, "method":"standin/unknown", "params":{{}}}})
+    elif method in ("textDocument/definition", "textDocument/typeDefinition", "textDocument/implementation"):
+        line = msg["params"]["position"]["line"]
+        uri = msg["params"]["textDocument"]["uri"]
+        rng = {{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":1}}}}
+        loc = {{"uri":uri,"range":rng}}
+        link = {{"targetUri":uri,"targetRange":rng,"targetSelectionRange":rng}}
+        result = loc if line == 0 else [loc,loc] if line == 1 else [link,link] if line == 2 else None
+        send({{"jsonrpc":"2.0", "id":msg["id"], "result":result}})
     elif method == "shutdown": send({{"jsonrpc":"2.0", "id":msg["id"], "result":None}})
     elif method == "exit": sys.exit(0)
 "##,
@@ -67,6 +75,29 @@ fn wait_trace(
         "stand-in trace did not reach the expected state: {:?}",
         trace(dir)
     )
+}
+
+#[test]
+fn jump_maps_every_lsp_location_shape_and_uses_utf16_columns() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let program = server_script(root);
+    let source = root.join("source.py");
+    let text = "first\né😀value\nthird\nfourth".to_string();
+    let open = vec![(source.clone(), text.clone())];
+    let mut servers = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings { python_path: Some(program.to_string_lossy().into_owned()), ..Default::default() });
+    wait_for(&mut servers, &open);
+    let handle = servers.handle(&source).unwrap();
+    let one = handle.jump(Jump::Definition, &text, 0, 0);
+    assert_eq!(one.len(), 1);
+    let many = handle.jump(Jump::TypeDefinition, &text, 1, 2);
+    assert_eq!(many.len(), 2);
+    let links = handle.jump(Jump::Implementation, &text, 2, 0);
+    assert_eq!(links.len(), 2);
+    assert!(handle.jump(Jump::Definition, &text, 3, 0).is_empty());
+    let requests = wait_trace(root, |messages| messages.iter().filter(|v| v.pointer("/msg/method").and_then(|m| m.as_str()).is_some_and(|m| m.starts_with("textDocument/"))).count() >= 4);
+    assert!(requests.iter().any(|v| v.pointer("/msg/params/position/character").and_then(|v| v.as_u64()) == Some(3)));
+    servers.shutdown();
 }
 
 #[test]

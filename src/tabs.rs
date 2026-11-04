@@ -166,6 +166,7 @@ impl Antler {
         let open: Vec<(GroupId, PathBuf)> = self.ws.tabs.iter().filter_map(|t| Some((t.group, t.file()?.path.clone()))).collect();
         self.editors.retain(|k, _| open.contains(k));
         let tab_size = self.tab_size();
+        let antler = cx.entity().downgrade();
         for tab in &mut self.ws.tabs {
             let group = tab.group;
             let Some(f) = tab.file_mut() else { continue };
@@ -174,7 +175,9 @@ impl Antler {
             }
             let (editor, _) = self.editors.entry((group, f.path.clone())).or_insert_with(|| {
                 let editor = cx.new(|cx| {
-                    EditorState::new(window, cx).language(f.language()).soft_wrap(self.wrap).tab_size(tab_size).default_value(f.text.clone())
+                    let mut editor = EditorState::new(window, cx).language(f.language()).soft_wrap(self.wrap).tab_size(tab_size).default_value(f.text.clone());
+                    crate::nav::attach_lsp(&mut editor, antler.clone(), f.path.clone());
+                    editor
                 });
                 let brackets = editor.update(cx, |e, cx| e.create_range_decorations_collection(vec![], cx));
                 let path = f.path.clone();
