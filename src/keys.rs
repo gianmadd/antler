@@ -17,6 +17,7 @@ use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::tabs::*;
 use crate::ports_view::{ForwardPort, ShowPorts, StopForwardingPort};
+use crate::projects_view::CancelProjectName;
 use crate::remote_view::{CloseRemoteConnection, ConnectToHost};
 use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ShowProjects, ToggleBlameEditorDecoration, ToggleBlameStatusBar, ToggleSidebar, set_menus};
 
@@ -36,6 +37,7 @@ pub(crate) enum Ctx {
     Branch,
     Stash,
     ExplorerName,
+    ProjectName,
 }
 
 impl Ctx {
@@ -52,6 +54,7 @@ impl Ctx {
             Ctx::Branch => "Branch > Command",
             Ctx::Stash => "Stash > Command",
             Ctx::ExplorerName => "ExplorerName > Input",
+            Ctx::ProjectName => "ProjectName > Input",
         })
     }
 
@@ -249,6 +252,7 @@ cmds![
     ("filesExplorer.cut", "Cut", "cmd-x", Explorer, CutEntries),
     ("filesExplorer.paste", "Paste", "cmd-v", Explorer, PasteEntries),
     ("antler.explorer.cancelName", "Cancel Name", "escape", ExplorerName, CancelName),
+    ("antler.projects.cancelName", "Cancel Project Name", "escape", ProjectName, CancelProjectName),
     // Git
     ("git.commit", "Commit", "cmd-enter", Commit, Commit),
     // the pickers: Esc closes right away (the palette's own Esc first clears the query)

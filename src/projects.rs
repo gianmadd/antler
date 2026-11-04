@@ -17,6 +17,8 @@ pub(crate) struct Row {
 
 pub(crate) enum Change {
     Save(PathBuf),
+    Rename { path: PathBuf, name: String },
+    Remove(PathBuf),
 }
 
 pub(crate) fn default_path() -> Option<PathBuf> {
@@ -88,6 +90,19 @@ pub(crate) fn apply(file: &Path, change: Change) -> Result<Vec<Project>, String>
                     .unwrap_or_else(|| path.display().to_string());
                 projects.push(Project { name, path });
             }
+        }
+        Change::Rename { path, name } => {
+            let target = identity(&path);
+            let project = projects.iter_mut().find(|project| identity(&project.path) == target)
+                .ok_or_else(|| format!("Project {} no longer exists.", path.display()))?;
+            if name.trim().is_empty() { return Err("Project name cannot be blank.".into()); }
+            project.name = name;
+        }
+        Change::Remove(path) => {
+            let target = identity(&path);
+            let index = projects.iter().position(|project| identity(&project.path) == target)
+                .ok_or_else(|| format!("Project {} no longer exists.", path.display()))?;
+            projects.remove(index);
         }
     }
     let projects = validate(projects)?;
@@ -233,5 +248,61 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].name, "Named");
         assert_eq!(first[0].path, saved[0].path);
+    }
+    #[test]
+    fn rename_and_remove_change_only_the_saved_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("projects.json");
+        let folder = temp.path().join("project");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("keep"), b"contents").unwrap();
+        apply(&file, Change::Save(folder.clone())).unwrap();
+
+        let renamed = apply(
+            &file,
+            Change::Rename { path: folder.clone(), name: "Zed".into() },
+        )
+        .unwrap();
+        assert_eq!(renamed[0].name, "Zed");
+        assert_eq!(renamed[0].path, fs::canonicalize(&folder).unwrap());
+        assert_eq!(load(&file).unwrap()[0].name, "Zed");
+        assert_eq!(fs::read(temp.path().join("project/keep")).unwrap(), b"contents");
+
+        assert!(apply(&file, Change::Rename { path: folder.clone(), name: "  ".into() }).is_err());
+        assert!(apply(&file, Change::Remove(folder.clone())).unwrap().is_empty());
+        assert_eq!(fs::read(temp.path().join("project/keep")).unwrap(), b"contents");
+        assert!(folder.is_dir());
+    }
+
+    #[test]
+    fn rename_and_remove_fail_when_an_entry_was_removed_externally() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("projects.json");
+        let folder = temp.path().join("project");
+        fs::create_dir(&folder).unwrap();
+        apply(&file, Change::Save(folder.clone())).unwrap();
+        fs::write(&file, "[]").unwrap();
+        assert!(apply(&file, Change::Rename { path: folder.clone(), name: "Other".into() }).is_err());
+        assert!(apply(&file, Change::Remove(folder)).is_err());
+        assert_eq!(fs::read_to_string(file).unwrap(), "[]");
+    }
+
+    #[test]
+    fn same_named_projects_are_mutated_by_folder_identity_and_missing_projects_can_be_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("projects.json");
+        let left = temp.path().join("left/project");
+        let right = temp.path().join("right/project");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        apply(&file, Change::Save(left.clone())).unwrap();
+        apply(&file, Change::Save(right.clone())).unwrap();
+        let left_identity = fs::canonicalize(&left).unwrap();
+
+        let projects = apply(&file, Change::Rename { path: right.clone(), name: "Second".into() }).unwrap();
+        assert_eq!(projects.iter().map(|project| project.name.as_str()).collect::<Vec<_>>(), ["project", "Second"]);
+        fs::remove_dir(&left).unwrap();
+        assert_eq!(apply(&file, Change::Remove(left_identity)).unwrap().len(), 1);
+        assert_eq!(load(&file).unwrap()[0].name, "Second");
     }
 }
