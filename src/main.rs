@@ -29,6 +29,7 @@ mod keys;
 mod lsp;
 mod minimap;
 mod minimap_view;
+mod nav;
 mod quick_diff;
 mod search;
 mod search_view;
@@ -819,6 +820,8 @@ impl Render for Antler {
             .on_action(cx.listener(Self::quick_text_search))
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::go_to_line))
+            .on_action(cx.listener(Self::go_back))
+            .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::select_icon_theme))
             .on_action(cx.listener(Self::install_theme))
