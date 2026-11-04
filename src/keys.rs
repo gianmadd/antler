@@ -15,6 +15,7 @@ use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
 use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine, QuickSearchInSearchView, QuickTextSearch};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
+use crate::projects_picker::{CloseProjects, OpenProjectNewWindow, OpenProjects};
 use crate::tabs::*;
 use crate::ports_view::{ForwardPort, ShowPorts, StopForwardingPort};
 use crate::remote_view::{CloseRemoteConnection, ConnectToHost};
@@ -35,6 +36,7 @@ pub(crate) enum Ctx {
     GoTo,
     Branch,
     Stash,
+    ProjectsPicker,
     ExplorerName,
 }
 
@@ -51,6 +53,7 @@ impl Ctx {
             Ctx::GoTo => "GoToFile > Command",
             Ctx::Branch => "Branch > Command",
             Ctx::Stash => "Stash > Command",
+            Ctx::ProjectsPicker => "ProjectsPicker > Command",
             Ctx::ExplorerName => "ExplorerName > Input",
         })
     }
@@ -135,6 +138,7 @@ cmds![
     ("workbench.action.files.save", "Save", "cmd-s", Global, Save),
     ("workbench.action.files.saveAll", "Save All", "alt-cmd-s", Global, SaveAll),
     ("workbench.action.files.openFolder", "Open Folder…", "cmd-o", Global, OpenFolder),
+    ("workbench.action.openRecent", "Projects…", "ctrl-r", Global, OpenProjects),
     ("workbench.action.closeFolder", "Close Folder", "cmd-k f", Global, CloseFolder),
     ("remote.ssh.connect", "Connect to Host…", "", Global, ConnectToHost),
     ("workbench.action.remote.close", "Close Remote Connection", "", Global, CloseRemoteConnection),
@@ -255,6 +259,8 @@ cmds![
     ("antler.closeGoToFile", "Close Go to File", "escape", GoTo, CloseGoToFile),
     ("antler.closeBranchPicker", "Close Branch Picker", "escape", Branch, CloseBranch),
     ("antler.closeStashPicker", "Close Stash Picker", "escape", Stash, CloseStash),
+    ("antler.closeProjectsPicker", "Close Projects Picker", "escape", ProjectsPicker, CloseProjects),
+    ("antler.openProjectNewWindow", "Open Project in New Window", "cmd-enter", ProjectsPicker, OpenProjectNewWindow),
 ];
 
 /// One key of one command in one context, as the user's keybindings.json leaves it.
@@ -702,7 +708,7 @@ pub(crate) const MENUS: &[(&str, &[&str])] = &[
             "workbench.action.files.saveAll",
             "-",
             "workbench.action.files.openFolder",
-            "@recent",
+            "workbench.action.openRecent",
             "remote.ssh.connect",
             "workbench.action.closeFolder",
             "workbench.action.closeWindow",
@@ -852,6 +858,18 @@ mod tests {
             assert!(c.key.is_empty() || from_gpui(c.key).is_some(), "{} has a bad key {}", c.id, c.key);
             assert!(c.ctx.predicate().is_none_or(|p| KeyBindingContextPredicate::parse(p).is_ok()), "{}: bad context", c.id);
         }
+    }
+
+    #[test]
+    fn projects_picker_replaces_open_recent_and_has_private_picker_keys() {
+        let open = COMMANDS.iter().find(|c| c.id == "workbench.action.openRecent").unwrap();
+        assert_eq!((open.title, open.key, open.ctx), ("Projects…", "ctrl-r", Ctx::Global));
+        let close = COMMANDS.iter().find(|c| c.id == "antler.closeProjectsPicker").unwrap();
+        assert_eq!((close.key, close.ctx), ("escape", Ctx::ProjectsPicker));
+        let new_window = COMMANDS.iter().find(|c| c.id == "antler.openProjectNewWindow").unwrap();
+        assert_eq!((new_window.key, new_window.ctx), ("cmd-enter", Ctx::ProjectsPicker));
+        assert!(!Ctx::ProjectsPicker.editable());
+        assert!(!palette_commands(false).iter().any(|command| command.ctx == Ctx::ProjectsPicker));
     }
 
     #[test]
