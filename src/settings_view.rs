@@ -96,6 +96,25 @@ fn pages() -> Vec<SettingPage> {
             ],
         ),
         page(
+            "Python",
+            vec![
+                choice(
+                    "Language Server",
+                    "Enable Python code intelligence.",
+                    "python.languageServer",
+                    &[("Default", "Default"), ("None", "None")],
+                    |s| s.python_language_server.clone(),
+                ),
+                text(
+                    "Language Server Path",
+                    "Optional path to basedpyright-langserver or pyright-langserver.",
+                    "antler.python.languageServerPath",
+                    |s| s.python_language_server_path.clone(),
+                    |t| json!(t),
+                ),
+            ],
+        ),
+        page(
             "Files",
             vec![
                 choice("Auto Save", "Save edited files automatically.", "files.autoSave", &[("off", "Off"), ("afterDelay", "After Delay")], |s| {

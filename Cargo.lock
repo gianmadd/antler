@@ -186,6 +186,7 @@ name = "antler"
 version = "0.6.0"
 dependencies = [
  "antler-host",
+ "anyhow",
  "async-channel",
  "embed-resource",
  "flate2",
@@ -194,11 +195,14 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-apple",
  "image",
+ "lsp-types",
+ "ropey",
  "rust-embed",
  "serde",
  "serde_json",
  "similar",
  "tempfile",
+ "url",
  "usvg 0.46.0",
  "zip",
 ]

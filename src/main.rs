@@ -26,6 +26,7 @@ mod icon_themes;
 mod icons;
 mod keybindings_view;
 mod keys;
+mod lsp;
 mod minimap;
 mod minimap_view;
 mod quick_diff;
@@ -399,7 +400,8 @@ impl Antler {
     }
 
     /// The last window to close is what the next start restores, if the app quits with none open.
-    fn leaving(&self, cx: &mut Context<Self>) {
+    fn leaving(&mut self, cx: &mut Context<Self>) {
+        self.ws.lsp.shutdown();
         // the window is going: its connection ends now (docs/agents/remote.md), even if a job still holds the Remote
         self.remote.iter().for_each(|r| r.remote.close());
         if cx.global::<Windows>().0.len() == 1 {
@@ -886,7 +888,7 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
     }
     let mut ws = Workspace::new(root);
     if let Some(l) = &link {
-        ws.host = l.remote.clone();
+        ws.set_host(l.remote.clone());
     }
     let mut restored = Vec::new(); // the tabs of a split layout, to read once there is a window
     ws.apply_settings(&s);
