@@ -52,6 +52,15 @@ fn trace(dir: &Path) -> Vec<serde_json::Value> {
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
 }
+fn wait_trace_file(path: &Path, expected: impl Fn(&[serde_json::Value]) -> bool) -> Vec<serde_json::Value> {
+    for _ in 0..150 {
+        let messages = fs::read_to_string(path).unwrap_or_default().lines()
+            .filter_map(|line| serde_json::from_str(line).ok()).collect::<Vec<_>>();
+        if expected(&messages) { return messages; }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("stand-in trace did not reach expected state: {}", fs::read_to_string(path).unwrap_or_default());
+}
 fn wait_trace(
     dir: &Path,
     expected: impl Fn(&[serde_json::Value]) -> bool,
@@ -67,6 +76,143 @@ fn wait_trace(
         "stand-in trace did not reach the expected state: {:?}",
         trace(dir)
     )
+}
+
+#[test]
+fn server_restart_replays_documents_before_navigation_requests() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let script = root.join("crash-once.py");
+    let count = root.join("starts");
+    let trace_path = root.join("restart-trace.jsonl");
+    let body = format!(r##"#!/usr/bin/env python3
+import json, os, sys
+count = {count:?}; trace = {trace:?}
+def send(value):
+    body = json.dumps(value).encode(); sys.stdout.buffer.write(f"Content-Length: {{len(body)}}\r\n\r\n".encode() + body); sys.stdout.buffer.flush()
+n = int(open(count).read()) + 1 if os.path.exists(count) else 1
+open(count, "w").write(str(n))
+while True:
+    headers = {{}}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line: sys.exit(0)
+        if line in (b"\r\n", b"\n"): break
+        name, value = line.decode().split(":", 1); headers[name.lower()] = value.strip()
+    msg = json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+    with open(trace, "a") as f: f.write(json.dumps({{"pid": os.getpid(), "msg": msg}}) + "\n")
+    method = msg.get("method")
+    if method == "initialize":
+        if n == 1: sys.exit(1)
+        send({{"jsonrpc":"2.0", "id":msg["id"], "result":{{}}}})
+    elif method == "initialized":
+        send({{"jsonrpc":"2.0", "id":0, "method":"workspace/configuration", "params":{{"items":[{{"section":"python"}}]}}}})
+    elif method == "shutdown": send({{"jsonrpc":"2.0", "id":msg["id"], "result":None}})
+    elif method == "textDocument/definition": send({{"jsonrpc":"2.0", "id":msg["id"], "result":None}})
+    elif method == "exit": sys.exit(0)
+"##, count=count.display().to_string(), trace=trace_path.display().to_string());
+    fs::write(&script, body).unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    let path = root.join("x.py");
+    let open = [(path.clone(), "print(1)".to_string())];
+    let mut servers = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings {
+        python_off: false,
+        python_path: Some(script.to_string_lossy().into_owned()),
+    });
+    wait_for(&mut servers, &open);
+    let _ = wait_trace_file(&trace_path, |messages| messages.iter().any(|m|
+        m.pointer("/msg/method").and_then(|v| v.as_str()) == Some("textDocument/didOpen")));
+    let handle = servers.handle(&path).unwrap();
+    handle.request("textDocument/definition", serde_json::json!({"textDocument":{"uri":uri(&path)},"position":{"line":0,"character":0}})).unwrap();
+    let messages = wait_trace_file(&trace_path, |messages| messages.iter().any(|m|
+        m.pointer("/msg/method").and_then(|v| v.as_str()) == Some("textDocument/definition")));
+    let pid = messages.iter().find(|m| m.pointer("/msg/method").and_then(|v| v.as_str()) == Some("textDocument/definition")).unwrap()["pid"].as_u64().unwrap();
+    let restarted: Vec<_> = messages.iter().filter(|m| m["pid"].as_u64() == Some(pid)).collect();
+    let opened = restarted.iter().position(|m| m.pointer("/msg/method").and_then(|v| v.as_str()) == Some("textDocument/didOpen")).unwrap();
+    let requested = restarted.iter().position(|m| m.pointer("/msg/method").and_then(|v| v.as_str()) == Some("textDocument/definition")).unwrap();
+    assert!(opened < requested, "restart must replay open documents before navigation requests");
+    assert_eq!(fs::read_to_string(&count).unwrap().trim(), "2");
+    servers.shutdown();
+}
+
+#[test]
+fn crashing_server_stops_after_five_starts_and_restart_clears_the_state() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let count = root.join("starts");
+    let script = root.join("crash.sh");
+    fs::write(
+        &script,
+        format!("#!/bin/sh\nn=$(cat '{}' 2>/dev/null || echo 0); echo $((n+1)) > '{}'; exit 1\n", count.display(), count.display()),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    let path = root.join("x.py");
+    let open = [(path.clone(), "print(1)".to_string())];
+    let mut servers = Servers::new(
+        crate::host::local(),
+        root.to_path_buf(),
+        LspSettings { python_off: false, python_path: Some(script.to_string_lossy().into_owned()) },
+    );
+    let now = Instant::now();
+    servers.set_clock(Box::new(move || now));
+    let mut events = vec![];
+    for _ in 0..200 {
+        servers.sync(open.iter().map(|(p, t)| (p.as_path(), t.as_str())));
+        events.extend(servers.take_events());
+        if events.iter().any(|event| matches!(event, Event::Stopped { .. })) { break; }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fs::read_to_string(&count).unwrap().trim(), "5");
+    assert!(events.iter().any(|event| matches!(event, Event::Stopped { language: "python", folder, log } if folder == root && log.extension().is_some_and(|ext| ext == "log"))), "events: {events:?}");
+    servers.sync(open.iter().map(|(p, t)| (p.as_path(), t.as_str())));
+    thread::sleep(Duration::from_millis(80));
+    assert_eq!(fs::read_to_string(&count).unwrap().trim(), "5", "stopped server must stay off");
+    servers.restart();
+    for _ in 0..100 {
+        servers.sync(open.iter().map(|(p, t)| (p.as_path(), t.as_str())));
+        if fs::read_to_string(&count).is_ok_and(|n| n.trim() == "6") { break; }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fs::read_to_string(&count).unwrap().trim(), "6");
+    servers.shutdown();
+}
+
+#[test]
+fn cancelling_a_hung_initialize_kills_the_process_tree_promptly() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let pid_file = root.join("pid");
+    let script = root.join("hang.sh");
+    fs::write(&script, format!("#!/bin/sh\necho $$ > '{}'\nsleep 30\n", pid_file.display())).unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    let path = root.join("x.py");
+    let mut servers = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings {
+        python_off: false,
+        python_path: Some(script.to_string_lossy().into_owned()),
+    });
+    servers.sync(std::iter::once((path.as_path(), "x")));
+    for _ in 0..100 {
+        if pid_file.exists() { break; }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let pid = fs::read_to_string(&pid_file).unwrap();
+    let started = Instant::now();
+    servers.sync(std::iter::empty());
+    for _ in 0..100 {
+        let alive = std::process::Command::new("kill").args(["-0", pid.trim()]).stderr(std::process::Stdio::null()).status().unwrap().success();
+        if !alive { break; }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(started.elapsed() < Duration::from_secs(2), "cancellation should not wait for the LSP request timeout");
+    assert!(!std::process::Command::new("kill").args(["-0", pid.trim()]).stderr(std::process::Stdio::null()).status().unwrap().success());
+    servers.shutdown();
 }
 
 #[test]

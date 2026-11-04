@@ -21,7 +21,7 @@ use crate::tabs::*;
 use crate::ports_view::{ForwardPort, ShowPorts, StopForwardingPort};
 use crate::projects_view::CancelProjectName;
 use crate::remote_view::{CloseRemoteConnection, ConnectToHost};
-use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ShowProjects, ToggleBlameEditorDecoration, ToggleBlameStatusBar, ToggleSidebar, set_menus};
+use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, RestartLanguageServer, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ShowProjects, ToggleBlameEditorDecoration, ToggleBlameStatusBar, ToggleSidebar, set_menus};
 
 /// Where a binding applies: a GPUI key context, and the name `when` uses in keybindings.json.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -136,6 +136,7 @@ macro_rules! cmds {
 // A key bound twice, in the same context, to two commands is a test failure. Several rows with one id are
 // several keys (or contexts) of one command. Rows with no key are bound by gpui-component itself or by nothing.
 cmds![
+    ("python.analysis.restartLanguageServer", "Python: Restart Language Server", "", Global, RestartLanguageServer),
     // File
     ("workbench.action.files.newUntitledFile", "New File", "cmd-n", Global, NewUntitledFile),
     ("workbench.action.newWindow", "New Window", "shift-cmd-n", Global, NewWindow),

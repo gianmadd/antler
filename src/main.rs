@@ -75,7 +75,7 @@ use style::{ACT, FG, FG_DIM, LINE_SOFT, MAIN, SIDE, c};
 use windows::{Registry, WindowSave};
 use workspace::{GitRow, Op, View, Workspace};
 
-actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch, ShowProjects]);
+actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch, ShowProjects, RestartLanguageServer]);
 actions!(antler, [CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts, ToggleBlameStatusBar, ToggleBlameEditorDecoration]);
 actions!(antler, [NewWindow, CloseWindow, MinimizeWindow, FocusNextWindow]);
 use remote_view::{CloseRemoteConnection, ConnectToHost, RemoteWin};
@@ -791,6 +791,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::restart_language_server))
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| window.minimize_window()))
@@ -1031,7 +1032,11 @@ fn main() {
         // hot exit: every window's folder, editor groups and Untitled files go into the state file on quit and come back at the next start
         cx.on_app_quit(|cx| {
             // close first: a supervisor would answer the loss of a swept master by starting a new one
-            cx.global::<Windows>().0.iter().filter_map(|e| e.view.1.upgrade()).for_each(|v| v.read(cx).remote.iter().for_each(|r| r.remote.close()));
+            let views: Vec<_> = cx.global::<Windows>().0.iter().filter_map(|e| e.view.1.upgrade()).collect();
+            for view in &views {
+                let _ = view.update(cx, |this, _| this.ws.lsp.shutdown_now());
+                view.read(cx).remote.iter().for_each(|r| r.remote.close());
+            }
             ssh::sweep_own();
             if let Some(f) = state::default_path() {
                 let mut list: Vec<WindowSave> = cx.global::<Windows>().0.iter().filter_map(|e| e.view.1.upgrade()).map(|v| v.read(cx).window_save()).collect();

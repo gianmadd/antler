@@ -273,6 +273,8 @@ impl Host for Local {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
         no_console(&mut command);
         let child = command.spawn();
         let mut child = match child {
@@ -280,6 +282,8 @@ impl Host for Local {
                 // npm installs Windows launchers as .cmd files.
                 let mut fallback = std::process::Command::new(format!("{program}.cmd"));
                 fallback.args(args).current_dir(cwd).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+                #[cfg(unix)]
+                std::os::unix::process::CommandExt::process_group(&mut fallback, 0);
                 no_console(&mut fallback);
                 fallback.spawn()?
             }
@@ -290,12 +294,27 @@ impl Host for Local {
         let stderr = child.stderr.take().expect("piped stderr");
         let child = std::sync::Arc::new(std::sync::Mutex::new(child));
         let owned = child.clone();
+        let mut killed = false;
         Ok(Process {
             stdin: Box::new(stdin),
             stdout: Box::new(stdout),
             stderr: Box::new(stderr),
             kill: Box::new(move || {
+                if killed { return; }
+                killed = true;
                 if let Ok(mut child) = owned.lock() {
+                    #[cfg(unix)]
+                    unsafe {
+                        unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
+                        let _ = kill(-(child.id() as i32), 9);
+                    }
+                    #[cfg(windows)]
+                    {
+                        let mut tree = std::process::Command::new("taskkill");
+                        tree.args(["/PID", &child.id().to_string(), "/T", "/F"]);
+                        no_console(&mut tree);
+                        let _ = tree.status();
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                 }
@@ -476,6 +495,27 @@ impl Host for Local {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn killing_a_process_also_kills_its_children() {
+        use std::io::BufRead;
+        let host = Local::new();
+        let mut process = host
+            .spawn("/bin/sh", &["-c", "sleep 30 & echo $!; wait"], std::path::Path::new("/"))
+            .unwrap();
+        let mut pid = String::new();
+        std::io::BufReader::new(&mut process.stdout)
+            .read_line(&mut pid)
+            .unwrap();
+        (process.kill)();
+        let status = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "child process {} survived", pid.trim());
+    }
+
     use super::*;
 
     #[test]
