@@ -19,6 +19,7 @@ use crate::editing::{self, Edit};
 use crate::style::{self, ACCENT, FG, FG_DIM, FG_FAINT, HOVER, LINE, LINE_SOFT, MAIN, RAISE, SEL, SIDE, c};
 use crate::workspace::{self, CloseScope, GroupId, Layout, Side, TabKind};
 use crate::{Antler, CloseTab, Quit, Save, SaveAll, menu_item};
+use crate::projects_picker::SaveProjectPath;
 
 actions!(antler, [TogglePreview, NewUntitledFile]);
 actions!(antler, [ToggleLineComment, ToggleBlockComment, MoveLineUp, MoveLineDown, CopyLineUp, CopyLineDown, DeleteLine]);
@@ -439,6 +440,9 @@ impl Antler {
 
     /// Cmd+S: writes the active file tab, then rescans so the Git view and open diffs follow.
     pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_path_completion_active() {
+            return self.save_project_path(&SaveProjectPath, window, cx);
+        }
         let Some(a) = self.ws.active else { return };
         if self.ws.tabs[a].file().is_some_and(|f| f.untitled) {
             return self.save_untitled(a, window, cx, |_, _, _| {});

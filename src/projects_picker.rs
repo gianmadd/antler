@@ -70,6 +70,10 @@ impl Antler {
         cx.notify();
     }
 
+    pub(crate) fn project_path_completion_active(&self) -> bool {
+        self.project_picker.as_ref().is_some_and(|popup| popup.path_query.is_some())
+    }
+
     pub(crate) fn open_project_new(&mut self, _: &OpenProjectNewWindow, window: &mut Window, cx: &mut Context<Self>) {
         let Some(popup) = &self.project_picker else { return };
         let Some(index) = popup.state.read(cx).selected_index() else { return };
@@ -84,7 +88,7 @@ impl Antler {
         popup.state.update(cx, |state, cx| state.set_query(format!("{}{separator}", path.display()), window, cx));
     }
 
-    fn save_project_path(&mut self, _: &SaveProjectPath, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_project_path(&mut self, _: &SaveProjectPath, _: &mut Window, cx: &mut Context<Self>) {
         let Some(popup) = &self.project_picker else { return };
         let Some(index) = popup.state.read(cx).selected_index() else { return };
         let Some(path) = path_target(popup.completion.as_ref(), index.row).cloned() else { return };
