@@ -49,6 +49,20 @@ pub fn shown(list: &[View], remote: bool, active: Option<View>) -> Vec<View> {
     shown
 }
 
+/// `view` moved to `onto`'s position in `list`; same list if `view == onto` or either is missing.
+pub fn move_to(list: &[View], view: View, onto: View) -> Vec<View> {
+    let (Some(from), Some(target_index)) = (list.iter().position(|v| *v == view), list.iter().position(|v| *v == onto)) else {
+        return list.to_vec();
+    };
+    if from == target_index {
+        return list.to_vec();
+    }
+    let mut moved = list.to_vec();
+    moved.remove(from);
+    moved.insert(target_index, view);
+    moved
+}
+
 /// The setting's value for `list`.
 pub fn to_json(list: &[View]) -> Value {
     json!(list.iter().map(|view| view.id()).collect::<Vec<_>>())
@@ -116,5 +130,24 @@ mod tests {
     fn setting_round_trips_view_ids() {
         let list = vec![View::Explorer, View::Projects];
         assert_eq!(to_json(&list), json!(["explorer", "projects"]));
+    }
+
+    #[test]
+    fn moves_views_to_the_target_position() {
+        let list = View::ALL.to_vec();
+        assert_eq!(move_to(&list, View::Projects, View::Explorer), vec![View::Projects, View::Explorer, View::Git, View::Search, View::Ports]);
+        assert_eq!(move_to(&list, View::Git, View::Ports), vec![View::Explorer, View::Search, View::Projects, View::Ports, View::Git]);
+    }
+
+    #[test]
+    fn moving_onto_itself_changes_nothing() {
+        let list = View::ALL.to_vec();
+        assert_eq!(move_to(&list, View::Git, View::Git), list);
+    }
+
+    #[test]
+    fn reordering_in_local_window_keeps_hidden_ports_in_the_list() {
+        let list = View::ALL.to_vec();
+        assert_eq!(shown(&move_to(&list, View::Projects, View::Explorer), false, None), vec![View::Projects, View::Explorer, View::Git, View::Search]);
     }
 }

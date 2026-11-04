@@ -7,6 +7,19 @@ use crate::style::{self, ACCENT, ACT, FG, FG_DIM, FG_FAINT, LINE_SOFT, c};
 use crate::workspace::{TabKind, View, activity_bar};
 use crate::{Antler, tip};
 
+fn set_views(cx: &mut App, list: &[View]) {
+    crate::settings::put(cx, "antler.activityBar.views", activity_bar::to_json(list));
+}
+
+#[derive(Clone)]
+struct DraggedView(View);
+
+impl Render for DraggedView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Antler::view_icon(self.0).0.size(px(22.))
+    }
+}
+
 impl Antler {
     fn view_icon(view: View) -> (Icon, &'static str, &'static str) {
         match view {
@@ -38,6 +51,13 @@ impl Antler {
                 .text_color(c(if on { FG } else { FG_FAINT }))
                 .when(!on, |el| el.hover(|st| st.text_color(c(FG_DIM))))
                 .tooltip(tip(text))
+                .on_drag(DraggedView(view), |d, _, _, cx| cx.new(|_| d.clone()))
+                .drag_over::<DraggedView>(|s, _, _, _| s.bg(c(crate::style::HOVER)))
+                .on_drop(cx.listener(move |_, d: &DraggedView, _, cx| {
+                    let (views, _) = activity_bar::parse(&cx.global::<crate::settings::Current>().0.activity_bar_views);
+                    let moved = activity_bar::move_to(&views, d.0, view);
+                    if moved != views { set_views(cx, &moved); }
+                }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.ws.show_view(view);
                     if view == View::Projects { this.projects.update(cx, |list, cx| list.request(None, cx)); }
