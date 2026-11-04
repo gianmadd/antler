@@ -266,9 +266,11 @@ pub fn migrate(file: &Path) {
 pub fn reload(cx: &mut App, file: &Path) {
     match load(file) {
         Ok(s) if cx.try_global::<Current>().is_none_or(|c| c.0 != s) => {
+            // warn only when the value itself changed, not on every other setting's reload
+            let changed = cx.try_global::<Current>().is_none_or(|c| c.0.activity_bar_views != s.activity_bar_views);
             let (_, warnings) = crate::workspace::activity_bar::parse(&s.activity_bar_views);
             cx.set_global(Current(s));
-            crate::keys::notify(cx, warnings);
+            if changed { crate::keys::notify(cx, warnings); }
         }
         Ok(_) => {}
         Err(e) => {
