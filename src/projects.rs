@@ -120,6 +120,25 @@ pub(crate) fn rows(projects: Vec<Project>) -> Vec<Row> {
         .collect()
 }
 
+pub(crate) fn picker_rows(saved: &[Row], recent: &[PathBuf], query: &str) -> Vec<Row> {
+    let query: Vec<char> = query.to_lowercase().chars().collect();
+    let matches = |name: &str| query.is_empty() || crate::goto::fuzzy(&query, name).is_some();
+    let mut saved = saved.to_vec();
+    saved.sort_by(|a, b| {
+        a.project.name.to_lowercase().cmp(&b.project.name.to_lowercase())
+            .then_with(|| a.project.name.cmp(&b.project.name))
+            .then_with(|| a.project.path.cmp(&b.project.path))
+    });
+    let mut rows: Vec<Row> = saved.iter().filter(|row| matches(&row.project.name)).cloned().collect();
+    rows.extend(recent.iter().filter_map(|path| {
+        if saved.iter().any(|row| identity(&row.project.path) == identity(path)) { return None; }
+        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
+        matches(&name).then(|| Row { project: Project { name, path: path.clone() }, available: true })
+    }));
+    rows
+}
+
+
 pub(crate) fn directory(path: &Path) -> Result<PathBuf, String> {
     let path = crate::host::canonical(path)
         .map_err(|error| format!("Could not open Project folder: {error}"))?;
@@ -167,6 +186,21 @@ fn write(file: &Path, projects: &[Project]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picker_keeps_saved_projects_alphabetical_before_matching_recent_folders() {
+        let saved = vec![
+            Row { project: Project { name: "Zebra".into(), path: "/saved/z".into() }, available: false },
+            Row { project: Project { name: "Alpha".into(), path: "/saved/a".into() }, available: true },
+        ];
+        let recent = vec![PathBuf::from("/recent/alpha"), PathBuf::from("/recent/alpine"), PathBuf::from("/saved/a")];
+        let picked = picker_rows(&saved, &recent, "alp");
+        let names: Vec<_> = picked.iter().map(|row| row.project.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "alpha", "alpine"]);
+        let names: Vec<_> = picker_rows(&saved, &recent, "").iter().map(|row| row.project.name.clone()).collect();
+        assert_eq!(names, ["Alpha", "Zebra", "alpha", "alpine"]);
+        assert!(!picker_rows(&saved, &[], "zebra")[0].available);
+    }
 
     #[test]
     fn saving_is_idempotent_and_sorted_and_keeps_missing_entries() {

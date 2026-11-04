@@ -19,6 +19,7 @@ mod platform;
 mod ports_view;
 mod projects;
 mod projects_view;
+mod projects_picker;
 mod graph;
 mod graph_view;
 mod icon_themes;
@@ -73,14 +74,9 @@ use windows::{Registry, WindowSave};
 use workspace::{GitRow, Op, View, Workspace};
 
 actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch, ShowProjects]);
-actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts, ToggleBlameStatusBar, ToggleBlameEditorDecoration]);
+actions!(antler, [CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts, ToggleBlameStatusBar, ToggleBlameEditorDecoration]);
 actions!(antler, [NewWindow, CloseWindow, MinimizeWindow, FocusNextWindow]);
 use remote_view::{CloseRemoteConnection, ConnectToHost, RemoteWin};
-
-/// File → Open Recent → a folder.
-#[derive(Clone, PartialEq, Action)]
-#[action(namespace = antler, no_json)]
-struct OpenRecent(PathBuf);
 
 /// Window menu → a window.
 #[derive(Clone, PartialEq, Action)]
@@ -97,18 +93,15 @@ impl Global for Windows {}
 struct LastClosed(Option<WindowSave>);
 impl Global for LastClosed {}
 
-/// The app menu; rebuilt when the recent folders or the open windows change.
+/// The app menu; rebuilt when the open windows change.
 fn set_menus(cx: &mut App) {
-    let home = std::env::home_dir();
-    let recent = recent::list(&recent::default_path()).into_iter().map(|p| MenuItem::action(recent::display(&p, home.as_deref()), OpenRecent(p)));
-    let open_recent = Menu::new("Open Recent").items(recent.chain([MenuItem::separator(), MenuItem::action("Clear Recently Opened", ClearRecent)]));
     let minimap = Menu::new("Minimap").items([
         keys::checked_item("antler.toggleMinimap", cx.global::<minimap_view::Enabled>().0),
         keys::checked_item("antler.toggleMinimapCharacters", cx.global::<minimap_view::RenderCharacters>().0),
     ]);
     let layout = Menu::new("Editor Layout").items([keys::item("workbench.action.splitEditor"), keys::item("workbench.action.splitEditorDown")]);
     let mut windows: Vec<MenuItem> = cx.global::<Windows>().0.iter().map(|e| MenuItem::action(windows::title(e.host.as_deref(), &e.root), FocusWindow(e.id))).collect();
-    let (mut recent, mut minimap, mut layout) = (Some(open_recent), Some(minimap), Some(layout));
+    let (mut minimap, mut layout) = (Some(minimap), Some(layout));
     // the macOS app menu, by command id ("-" is a separator)
     let app: Vec<&str> = cx.global::<update::Enabled>().0.then_some("antler.checkForUpdates").into_iter().chain(["workbench.action.openSettings", "workbench.action.openGlobalKeybindings", "-", "workbench.action.quit"]).collect();
     let app_item = |id: &str| if id == "-" { MenuItem::separator() } else { keys::item(id) };
@@ -117,7 +110,6 @@ fn set_menus(cx: &mut App) {
         .map(|(name, ids)| {
             Menu::new(*name).items(ids.iter().flat_map(|id| match *id {
                 "-" => vec![MenuItem::separator()],
-                "@recent" => recent.take().map(MenuItem::submenu).into_iter().collect(),
                 "@minimap" => minimap.take().map(MenuItem::submenu).into_iter().collect(),
                 "@layout" => layout.take().map(MenuItem::submenu).into_iter().collect(),
                 "@windows" => std::mem::take(&mut windows),
@@ -236,6 +228,8 @@ pub(crate) struct Antler {
     projects: Entity<projects_view::List>,
     projects_view: projects_view::State,
     _projects_sub: Subscription,
+    project_picker: Option<projects_picker::Popup>,
+    project_picker_generation: u64,
     /// Search view: the Replace, "files to include" and "files to exclude" fields.
     search_fields: search_view::SearchFields,
     /// Git view: a virtual list (rows differ in height), its lines, and whether they need rebuilding.
@@ -330,6 +324,8 @@ impl Antler {
             projects,
             projects_view,
             _projects_sub: projects_sub,
+            project_picker: None,
+            project_picker_generation: 0,
             search_fields: search_view::SearchFields::new(window, cx),
             git_list: ListState::new(0, ListAlignment::Top, px(200.)),
             git_rows: Vec::new(),
@@ -642,10 +638,6 @@ impl Antler {
         .detach();
     }
 
-    fn open_recent(&mut self, action: &OpenRecent, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_root(action.0.clone(), window, cx);
-    }
-
     /// Replaces the Root with `root` (asking about unsaved tabs first) and puts it on top of the recent folders.
     fn open_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // a folder shown by another window is focused there, like VS Code
@@ -800,7 +792,9 @@ impl Render for Antler {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_keyboard_shortcuts))
             .on_action(cx.listener(Self::open_folder))
-            .on_action(cx.listener(Self::open_recent))
+            .on_action(cx.listener(Self::open_projects))
+            .on_action(cx.listener(Self::close_projects))
+            .on_action(cx.listener(Self::open_project_new))
             .on_action(cx.listener(Self::connect_to_host))
             .on_action(cx.listener(Self::close_remote_connection))
             // only with a folder open: File → Close Folder is greyed out otherwise (the menu asks if the action is available)
@@ -845,6 +839,7 @@ impl Render for Antler {
             })
             .child(status)
             .children(self.go_to_popup(cx))
+            .children(self.projects_popup(cx))
             .children(self.picker_popup(cx))
             .children(self.theme_popup(cx))
             .children(self.icon_popup(cx))
@@ -1009,10 +1004,6 @@ fn main() {
         }
         // the view's own Quit asks about unsaved tabs first; this one runs when no window has focus
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_action(|_: &ClearRecent, cx| {
-            recent::clear(&recent::default_path());
-            set_menus(cx);
-        });
         cx.on_action(|_: &NewWindow, cx| new_window(cx, WindowSave::default(), None));
         cx.on_action(|a: &FocusWindow, cx| focus_window(cx, Some(a.0)));
         cx.on_action(|_: &FocusNextWindow, cx| {

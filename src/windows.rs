@@ -256,6 +256,16 @@ mod tests {
     }
 
     #[test]
+    fn opening_rechecks_the_registry_after_confirmation_before_replacing_or_duplicating() {
+        let mut r = registry(&["/source"]);
+        assert_eq!(r.local_open(1, Path::new("/target"), false), LocalOpen::Replace);
+        r.add(2, None, "/target".into(), ()); // opened while the confirmation was pending
+        assert_eq!(r.local_open(1, Path::new("/target"), false), LocalOpen::Focus(2));
+        assert_eq!(r.local_open(1, Path::new("/target"), true), LocalOpen::Focus(2));
+        assert_eq!(r.iter().filter(|e| e.host.is_none() && e.root == Path::new("/target")).count(), 1);
+    }
+
+    #[test]
     fn file_urls_become_paths() {
         assert_eq!(url_to_path("file:///Users/me/my%20code/").unwrap(), Path::new("/Users/me/my code"));
         assert_eq!(url_to_path("file://localhost/tmp/a").unwrap(), Path::new("/tmp/a"));
