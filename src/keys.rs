@@ -13,6 +13,7 @@ use crate::branch_view::CloseBranch;
 use crate::explorer::*;
 use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
 use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine, QuickSearchInSearchView, QuickTextSearch};
+use crate::nav::{GoBack, GoForward};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::projects_picker::{AcceptProjectPath, CloseProjects, OpenProjectNewWindow, OpenProjects, SaveProjectPath};
@@ -221,6 +222,8 @@ cmds![
     ("workbench.action.quickTextSearch", "Quick Text Search", "", Global, QuickTextSearch),
     ("antler.quickSearchInSearchView", "Open in Search View", "shift-cmd-f", GoTo, QuickSearchInSearchView),
     ("workbench.action.gotoLine", "Go to Line…", "ctrl-g", Global, GoToLine),
+    ("workbench.action.navigateBack", "Go Back", "ctrl--", Global, GoBack),
+    ("workbench.action.navigateForward", "Go Forward", "ctrl-shift--", Global, GoForward),
     ("workbench.action.focusFirstEditorGroup", "Focus First Editor Group", "cmd-1", Global, FocusFirstGroup),
     ("workbench.action.focusSecondEditorGroup", "Focus Second Editor Group", "cmd-2", Global, FocusSecondGroup),
     ("workbench.action.focusThirdEditorGroup", "Focus Third Editor Group", "cmd-3", Global, FocusThirdGroup),
@@ -785,6 +788,8 @@ pub(crate) const MENUS: &[(&str, &[&str])] = &[
         &[
             "workbench.action.quickOpen",
             "workbench.action.gotoLine",
+            "workbench.action.navigateBack",
+            "workbench.action.navigateForward",
             "-",
             "workbench.action.nextEditor",
             "workbench.action.previousEditor",
@@ -822,6 +827,19 @@ mod tests {
         assert_eq!(command.key, "");
         assert!(palette_commands(true).iter().any(|c| c.id == command.id));
         assert_eq!(keys_of(&defaults(false), "antler.quickSearchInSearchView"), [("cmd-shift-f", Ctx::GoTo)]);
+    }
+
+    #[test]
+    fn navigation_history_commands_are_available_in_the_palette_with_default_keys() {
+        for (id, title, key) in [
+            ("workbench.action.navigateBack", "Go Back", "ctrl--"),
+            ("workbench.action.navigateForward", "Go Forward", "ctrl-shift--"),
+        ] {
+            let command = COMMANDS.iter().find(|command| command.id == id).unwrap();
+            assert_eq!(command.title, title);
+            assert_eq!(command.key, key);
+            assert!(palette_commands(true).iter().any(|candidate| candidate.id == id));
+        }
     }
 
     fn default_key(windows: bool, id: &str) -> Vec<String> {

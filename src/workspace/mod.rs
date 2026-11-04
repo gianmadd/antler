@@ -12,6 +12,7 @@ use crate::host::{self, Host};
 use crate::search::{self, Query, Results, SearchJob};
 
 pub mod activity_bar;
+pub mod history;
 mod groups;
 mod ops;
 mod scan;
@@ -81,6 +82,7 @@ pub struct Workspace {
     /// Where the Root lives: this machine, or a Remote host. Jobs carry it to their background thread.
     pub host: Arc<dyn Host>,
     pub root: PathBuf,
+    pub history: history::History,
     pub depth: usize,
     pub sections: Vec<Section>,
     /// "nascondi repo puliti": leave Sections without changes out of the panel.
@@ -227,6 +229,7 @@ impl Workspace {
             #[cfg(test)]
             host: crate::testing::host(),
             root,
+            history: history::History::default(),
             depth: DEFAULT_DEPTH,
             sections: Vec::new(),
             hide_clean: false,
