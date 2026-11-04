@@ -43,11 +43,20 @@ pub(crate) fn completion_is_current(
 }
 
 pub(crate) fn complete(query: &str, home: Option<&Path>) -> Result<Completion, String> {
+    let home_relative = query.strip_prefix("~/").or_else(|| {
+        #[cfg(windows)]
+        { query.strip_prefix("~\\") }
+        #[cfg(not(windows))]
+        { None }
+    });
     let expanded = if query == "~" { home.ok_or("Could not find the local home folder.")?.to_path_buf() }
-    else if let Some(rest) = query.strip_prefix("~/") {
+    else if let Some(rest) = home_relative {
         home.ok_or("Could not find the local home folder.")?.join(rest)
     } else { PathBuf::from(query) };
-    let trailing_separator = query.ends_with(std::path::MAIN_SEPARATOR) || query.ends_with('/') || query.ends_with('\\');
+    #[cfg(windows)]
+    let trailing_separator = query.ends_with('/') || query.ends_with('\\');
+    #[cfg(not(windows))]
+    let trailing_separator = query.ends_with('/');
     let (directory, prefix) = if expanded.is_dir() || trailing_separator {
         (expanded, String::new())
     } else {
@@ -260,6 +269,23 @@ mod tests {
         assert!(is_path_query(r"C:\Users\me"));
         #[cfg(windows)]
         assert!(!is_path_query("C:relative"));
+        #[cfg(windows)]
+        {
+            fs::create_dir(temp.path().join("backslash-home")).unwrap();
+            assert_eq!(complete("~\\backslash-home", Some(temp.path())).unwrap().directory, temp.path().join("backslash-home"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_trailing_backslash_is_part_of_a_unix_folder_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("work\\folder");
+        fs::create_dir(&child).unwrap();
+        let result = complete(&format!("{}{}", temp.path().display(), "/work\\"), None).unwrap();
+        assert_eq!(result.directory, temp.path());
+        assert_eq!(result.prefix, "work\\");
+        assert_eq!(result.folders, [child]);
     }
 
     #[test]
