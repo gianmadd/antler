@@ -3,10 +3,10 @@ use std::path::PathBuf;
 
 use gpui_kit::component::{
     IconName, WindowExt as _,
-    button::{Button, ButtonVariants as _, DropdownButton},
+    button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
-    menu::{ContextMenuExt as _, PopupMenuItem},
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem},
     Sizable as _,
     notification::Notification,
     scroll::ScrollableElement as _,
@@ -15,7 +15,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::style::{ACCENT, FG_DIM, FG_FAINT, HOVER, SIDE, c};
+use crate::style::{FG_DIM, FG_FAINT, HOVER, SIDE, c};
 use crate::workspace::View;
 use crate::{Antler, ShowProjects};
 actions!(antler, [CancelProjectName]);
@@ -121,51 +121,38 @@ impl Antler {
                     .child(Input::new(&input).xsmall())
                     .into_any_element()
             } else {
-                div().text_size(px(13.)).child(row.project.name.clone()).into_any_element()
+                div().truncate().text_size(px(13.)).child(row.project.name.clone()).into_any_element()
             };
             let weak = cx.entity().downgrade();
             let remove_path = path.clone();
             let rename_path = path.clone();
             let new_window_path = path.clone();
             let copy_path = path.clone();
-            let group = format!("project-{}", path.to_string_lossy());
             h_flex()
                 .id(path.to_string_lossy().to_string())
-                .group(group.clone())
                 .px_3()
-                .py_2()
-                .gap_1()
+                .py_1()
+                .gap_2()
+                .items_center()
+                .tooltip(crate::tip(display_path.clone()))
                 .cursor_pointer()
                 .hover(|s| s.bg(c(HOVER)))
                 .when(!row.available, |el| el.text_color(c(FG_FAINT)))
                 .when(active, |el| el.bg(c(HOVER)))
                 .child(v_flex().flex_1().min_w_0().child(title).child(
                     div()
+                        .truncate()
                         .text_size(px(11.))
                         .text_color(c(FG_DIM))
                         .child(display_path),
                 ))
                 .child(
-                    Button::new(format!("remove-project-{}", path.to_string_lossy()))
+                    Button::new(format!("project-actions-{}", path.to_string_lossy()))
                         .ghost()
                         .xsmall()
-                        .icon(IconName::Close)
-                        .tooltip("Remove Project")
-                        .accessibility_label("Remove Project")
-                        .opacity(0.)
-                        .group_hover(group.clone(), |s| s.opacity(1.))
-                        .focus(|s| s.opacity(1.).border_1().border_color(c(ACCENT)))
-                        .on_click(cx.listener({
-                            let path = remove_path.clone();
-                            move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.remove_project(path.clone(), cx)
-                            }
-                        })),
-                )
-                .child(
-                    DropdownButton::new(format!("project-actions-{}", path.to_string_lossy()))
-                        .menu_accessibility_label("Project actions")
+                        .icon(IconName::Ellipsis)
+                        .tooltip("Project actions")
+                        .accessibility_label("Project actions")
                         .dropdown_menu({
                             let weak = weak.clone();
                             let (open, rename, remove, copy) = (
@@ -201,7 +188,8 @@ impl Antler {
                         .item(PopupMenuItem::new("Copy Path").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.display().to_string()))))
                 })
         });
-        let path = root.clone();
+        let weak = cx.entity().downgrade();
+        let current = root.clone();
         let header = h_flex()
             .justify_between()
             .items_center()
@@ -217,24 +205,27 @@ impl Antler {
                 h_flex()
                     .gap_1()
                     .child(
-                        Button::new("save-project")
+                        Button::new("add-project")
                             .ghost()
+                            .small()
                             .icon(IconName::Plus)
-                            .tooltip("Save Current Project")
-                            .when_some(path, |button, path| {
-                                button.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.save_project(path.clone(), cx)
-                                }))
-                            }),
+                            .tooltip("Add Folder as Project…")
+                            .accessibility_label("Add Folder as Project")
+                            .on_click(cx.listener(|this, _, window, cx| this.add_project(window, cx))),
                     )
                     .child(
-                        Button::new("projects-json")
+                        Button::new("projects-actions")
                             .ghost()
-                            .icon(IconName::File)
-                            .tooltip("Open Projects JSON")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_projects_json(window, cx)
-                            })),
+                            .small()
+                            .icon(IconName::Ellipsis)
+                            .tooltip("Projects actions")
+                            .accessibility_label("Projects actions")
+                            .dropdown_menu(move |menu, _, _| {
+                                let menu = menu.when_some(current.clone(), |menu, path| {
+                                    menu.item(crate::menu_item(&weak, "Save Current Project", move |this, _, cx| this.save_project(path.clone(), cx)))
+                                });
+                                menu.item(crate::menu_item(&weak, "Open Projects JSON", |this, window, cx| this.open_projects_json(window, cx)))
+                            }),
                     ),
             );
         v_flex()
@@ -254,6 +245,27 @@ impl Antler {
             })
             .child(v_flex().flex_1().overflow_y_scrollbar().children(rows))
             .into_any_element()
+    }
+
+    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add Project".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = picked.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(Ok(Some(mut paths))) => {
+                    if let Some(path) = paths.pop() {
+                        this.save_project(path, cx);
+                    }
+                }
+                Ok(Ok(None)) => {},
+                error => window.push_notification(Notification::error(format!("Could not choose a project folder: {error:?}")).title("Projects"), cx),
+            }).ok();
+        }).detach();
     }
 
     pub(crate) fn save_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
