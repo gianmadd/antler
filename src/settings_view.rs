@@ -29,10 +29,11 @@ fn choice(title: &'static str, description: &'static str, key: &'static str, opt
     SettingItem::new(title, field).description(description).keywords([key])
 }
 
+/// Under the description, full width: side by side the stock 256 px input overflows the page.
 fn text(title: &'static str, description: &'static str, key: &'static str, get: Get<String>, to_json: fn(&str) -> serde_json::Value) -> SettingItem {
     let field = SettingField::input(move |cx| get(&cx.global::<Current>().0).into(), move |v: SharedString, cx| put(cx, key, to_json(&v)))
         .default_value(get(&Values::default()));
-    SettingItem::new(title, field).description(description).keywords([key])
+    SettingItem::new(title, field).description(description).keywords([key]).layout(Axis::Vertical)
 }
 
 /// `files.exclude` from the comma-separated patterns typed: those on, and VS Code's defaults not typed off.
