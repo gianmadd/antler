@@ -40,7 +40,7 @@ impl Antler {
         let generation = self.project_picker_generation;
         let _projects_sub = cx.observe_in(&self.projects.clone(), window, |this, _, window, cx| {
             if let Some(popup) = this.project_picker.as_mut() {
-                popup.loading = false;
+                if popup.path_query.is_none() { popup.loading = false; }
                 popup.error = this.projects.read(cx).error.clone();
                 if let Some(error) = popup.error.clone() {
                     window.push_notification(Notification::error(error).title("Projects"), cx);
@@ -70,6 +70,10 @@ impl Antler {
         cx.notify();
     }
 
+    pub(crate) fn project_path_completion_active(&self) -> bool {
+        self.project_picker.as_ref().is_some_and(|popup| popup.path_query.is_some())
+    }
+
     pub(crate) fn open_project_new(&mut self, _: &OpenProjectNewWindow, window: &mut Window, cx: &mut Context<Self>) {
         let Some(popup) = &self.project_picker else { return };
         let Some(index) = popup.state.read(cx).selected_index() else { return };
@@ -84,7 +88,7 @@ impl Antler {
         popup.state.update(cx, |state, cx| state.set_query(format!("{}{separator}", path.display()), window, cx));
     }
 
-    fn save_project_path(&mut self, _: &SaveProjectPath, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_project_path(&mut self, _: &SaveProjectPath, _: &mut Window, cx: &mut Context<Self>) {
         let Some(popup) = &self.project_picker else { return };
         let Some(index) = popup.state.read(cx).selected_index() else { return };
         let Some(path) = path_target(popup.completion.as_ref(), index.row).cloned() else { return };
@@ -111,44 +115,50 @@ impl Antler {
     }
 
     pub(crate) fn refresh_project_picker(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(popup) = self.project_picker.as_mut() {
-            let query = popup.state.read(cx).query(cx).to_string();
-            if projects::is_path_query(&query) {
-                if popup.path_query.as_deref() != Some(&query) {
-                    self.project_picker_generation += 1;
-                    let request = self.project_picker_generation;
-                    popup.path_query = Some(query.clone());
-                    popup.path_generation = request;
-                    popup.completion = None;
-                    popup.completion_error = None;
-                    popup.loading = true;
-                    let popup_generation = popup.generation;
-                    let home = crate::paths::home();
-                    let state = popup.state.clone();
-                    let query_for_work = query.clone();
-                    cx.spawn_in(_window, async move |this, cx| {
-                        let result = cx.background_spawn(async move { projects::complete(&query_for_work, home.as_deref()) }).await;
-                        this.update_in(cx, |this, _window, cx| {
-                            if let Some(popup) = this.project_picker.as_mut().filter(|p| projects::completion_is_current(popup_generation, p.generation, request, p.path_generation, &query, p.state.read(cx).query(cx).as_ref()) && p.state == state) {
-                                popup.loading = false;
-                                match result { Ok(completion) => popup.completion = Some(completion), Err(error) => popup.completion_error = Some(error) }
-                                this.refresh_project_picker(_window, cx);
-                            }
-                        }).ok();
-                    }).detach();
-                }
-                popup.rows.clear();
-            } else {
-                if popup.path_query.take().is_some() {
-                    self.project_picker_generation += 1;
-                    popup.path_generation = self.project_picker_generation;
-                    popup.completion = None;
-                    popup.completion_error = None;
-                }
-                popup.rows = projects::picker_rows(&self.projects.read(cx).rows, &popup.recent, &query);
+        let Some(popup) = self.project_picker.as_ref() else { return };
+        let query = popup.state.read(cx).query(cx).to_string();
+        if projects::is_path_query(&query) {
+            if popup.path_query.as_deref() != Some(&query) {
+                self.complete_project_path(query.clone(), _window, cx);
             }
-            cx.notify();
+            if let Some(popup) = self.project_picker.as_mut() { popup.rows.clear(); }
+        } else if let Some(popup) = self.project_picker.as_mut() {
+            if popup.path_query.take().is_some() {
+                self.project_picker_generation += 1;
+                popup.path_generation = self.project_picker_generation;
+                popup.completion = None;
+                popup.completion_error = None;
+                popup.loading = false;
+            }
+            popup.rows = projects::picker_rows(&self.projects.read(cx).rows, &popup.recent, &query);
         }
+        cx.notify();
+    }
+
+    fn complete_project_path(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_picker_generation += 1;
+        let request = self.project_picker_generation;
+        let Some(popup) = self.project_picker.as_mut() else { return };
+        popup.path_query = Some(query.clone());
+        popup.path_generation = request;
+        popup.completion = None;
+        popup.completion_error = None;
+        popup.rows.clear();
+        popup.loading = true;
+        let popup_generation = popup.generation;
+        let state = popup.state.clone();
+        let home = crate::paths::home();
+        let work_query = query.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_spawn(async move { projects::complete(&work_query, home.as_deref()) }).await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(popup) = this.project_picker.as_mut().filter(|p| projects::completion_is_current(popup_generation, p.generation, request, p.path_generation, &query, p.state.read(cx).query(cx).as_ref()) && p.state == state) {
+                    popup.loading = false;
+                    match result { Ok(completion) => popup.completion = Some(completion), Err(error) => popup.completion_error = Some(error) }
+                    this.refresh_project_picker(window, cx);
+                }
+            }).ok();
+        }).detach();
     }
 
     pub(crate) fn projects_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
