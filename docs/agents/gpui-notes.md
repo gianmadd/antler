@@ -399,3 +399,7 @@ window.open_alert_dialog(cx, move |alert, _, _| {
 - `std::fs::canonicalize` gives `\\?\C:\...`: use `host::canonical` for anything compared with watcher events, git output or shown to the user.
 - A release exe is a `windows_subsystem = "windows"` program; every console program it starts (git, ssh, curl, PowerShell) needs `host::no_console` (`CREATE_NO_WINDOW`) or a console window flashes up.
 - Screenshots: `PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT)` from Windows PowerShell captures the GPUI window (DirectComposition) without the desktop around it; `PostMessage` of WM_LBUTTONDOWN/UP at client coordinates clicks without moving the mouse.
+
+## Keyboard-reachable hover actions
+
+For an opacity-hidden Button, put opacity on the Button itself and reveal it on `.focus(...)`; `.focus_visible(...)` did not activate during real Tab navigation in Antler. `DropdownButton::new(...).menu_accessibility_label(...).dropdown_menu(...)` keeps its default caret keyboard-operable; overriding `.button(...)` with an inert click handler leaves that custom button inert while the caret still opens the menu.
