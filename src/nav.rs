@@ -2,9 +2,26 @@ use gpui_kit::*;
 
 use crate::{Antler, workspace::history::Place};
 
-actions!(antler, [GoBack, GoForward]);
+actions!(antler, [GoBack, GoForward, FindReferences]);
 
 impl Antler {
+    pub(crate) fn find_references(&mut self, _: &FindReferences, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((handle, text, line, column)) = self.cursor_request(cx) else { return };
+        self.ws.references = Some(crate::lsp::References::default());
+        self.ws.view = Some(crate::workspace::View::References);
+        self.reference_generation = self.reference_generation.wrapping_add(1);
+        let generation = self.reference_generation;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let references = cx.background_spawn(async move { handle.references(&text, line, column) }).await;
+            this.update(cx, |this, cx| {
+                if this.reference_generation == generation {
+                    this.ws.references = Some(references);
+                    cx.notify();
+                }
+            }).ok();
+        }).detach();
+    }
     pub(crate) fn current_place(&self, cx: &App) -> Option<Place> {
         let file = self.ws.tabs.get(self.ws.active?)?.file()?;
         let position = self.active_editor()?.0.read(cx).cursor_position();

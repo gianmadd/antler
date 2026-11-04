@@ -325,6 +325,14 @@ pub struct Target {
     pub end_line: usize,
     pub end_column: usize,
 }
+#[derive(Clone, Debug, Default)]
+pub struct References {
+    pub symbol: String,
+    pub files: Vec<(PathBuf, Vec<(Target, String)>)>,
+}
+impl References {
+    pub fn count(&self) -> usize { self.files.iter().map(|(_, rows)| rows.len()).sum() }
+}
 #[derive(Clone)]
 pub struct Handle {
     client: Arc<client::Client>,
@@ -338,6 +346,40 @@ impl Handle {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         self.client.request(method, params)
+    }
+
+    /// Blocking; callers run this on a background thread. Missing, invalid or unreadable results are omitted.
+    pub fn references(&self, text: &str, line: usize, column: usize) -> References {
+        use lsp_types::{Location, Position, ReferenceContext, TextDocumentPositionParams, Uri};
+        use std::str::FromStr;
+        let symbol = text.lines().nth(line).map(|s| {
+            let chars: Vec<_> = s.chars().collect();
+            let at = column.min(chars.len());
+            let mut start = at;
+            while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') { start -= 1; }
+            let mut end = at;
+            while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') { end += 1; }
+            chars[start..end].iter().collect()
+        }).unwrap_or_default();
+        let Ok(uri) = Uri::from_str(&uri(&self.path)) else { return References { symbol, ..Default::default() } };
+        let params = lsp_types::ReferenceParams {
+            text_document_position: TextDocumentPositionParams { text_document: lsp_types::TextDocumentIdentifier { uri }, position: Position::new(line as u32, char_to_utf16(text.lines().nth(line).unwrap_or(""), column) as u32) },
+            context: ReferenceContext { include_declaration: true },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let locations = self.request("textDocument/references", serde_json::to_value(params).unwrap_or_default())
+            .ok().and_then(|v| serde_json::from_value::<Option<Vec<Location>>>(v).ok().flatten()).unwrap_or_default();
+        let mut targets = super::targets_with_text(self.host.as_ref(), locations, &self.open_texts);
+        targets.sort_by(|a,b| (&a.path,a.line,a.column).cmp(&(&b.path,b.line,b.column)));
+        let mut files: Vec<(PathBuf, Vec<(Target, String)>)> = Vec::new();
+        for target in targets {
+            let line_text = self.open_texts.get(&target.path).cloned().or_else(|| self.host.read_to_string(&target.path).ok())
+                .and_then(|s| s.lines().nth(target.line).map(str::to_owned)).unwrap_or_default();
+            if files.last().is_none_or(|(path, _)| *path != target.path) { files.push((target.path.clone(), Vec::new())); }
+            files.last_mut().unwrap().1.push((target, line_text));
+        }
+        References { symbol, files }
     }
 }
 impl Servers {
@@ -387,5 +429,12 @@ mod pure_tests {
             "/r/venv/bin/python"
         );
         assert_eq!(interpreter(Path::new("/r"), |_| false), "python");
+    }
+
+    #[test]
+    fn references_count_is_the_number_of_locations() {
+        let target = Target { path: PathBuf::from("a.py"), line: 0, column: 0, end_line: 0, end_column: 1 };
+        let references = References { symbol: "x".into(), files: vec![(PathBuf::from("a.py"), vec![(target, "x".into())])] };
+        assert_eq!(references.count(), 1);
     }
 }

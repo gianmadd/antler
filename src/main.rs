@@ -35,6 +35,7 @@ mod search;
 mod search_view;
 mod recent;
 mod remote_view;
+mod references_view;
 mod settings;
 mod settings_view;
 mod ssh;
@@ -215,6 +216,7 @@ pub(crate) struct Antler {
     minimaps: HashMap<PathBuf, minimap_view::Minimap>,
     /// Last cursor (line, column) seen in an editor: the status bar redraws only when it moves.
     cursor: (u32, u32),
+    reference_generation: u64,
     /// Alt+Z: soft wrap in every editor (VS Code's `editor.wordWrap`, off by default).
     wrap: bool,
     /// Cmd+= / Cmd+-: the editors' font size; `None` is the theme's.
@@ -318,6 +320,7 @@ impl Antler {
             editors: HashMap::new(),
             minimaps: HashMap::new(),
             cursor: (0, 0),
+            reference_generation: 0,
             wrap: initial.editor_word_wrap == settings::WordWrap::On,
             font_size: Some(px(initial.editor_font_size)),
             cursors: vec![],
@@ -770,6 +773,7 @@ impl Render for Antler {
             Some(View::Search) => Some(self.search_view(cx).into_any_element()),
             Some(View::Projects) => Some(self.projects_view(cx).into_any_element()),
             Some(View::Ports) => Some(self.ports_view(cx).into_any_element()),
+            Some(View::References) => Some(self.render_references(window, cx).into_any_element()),
             None => None,
         };
         let content = match side {
@@ -812,6 +816,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::toggle_blame_editor_decoration))
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::show_search))
+            .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::show_projects))
             .on_action(cx.listener(Self::show_ports))
             .on_action(cx.listener(Self::forward_a_port))
