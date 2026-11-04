@@ -79,6 +79,7 @@ fn blame_line_map(old_text: &str, new_text: &str) -> Vec<Option<usize>> {
 }
 
 pub struct Workspace {
+    pub lsp: crate::lsp::Servers,
     /// Where the Root lives: this machine, or a Remote host. Jobs carry it to their background thread.
     pub host: Arc<dyn Host>,
     pub root: PathBuf,
@@ -208,8 +209,17 @@ impl View {
 }
 
 impl Workspace {
+    pub fn set_host(&mut self, host: Arc<dyn Host>) {
+        self.lsp = crate::lsp::Servers::new(host.clone(), self.root.clone(), Default::default());
+        self.host = host;
+    }
     /// Takes the settings the model reads; the view rescans when one that shapes the scan or the tree changed.
     pub fn apply_settings(&mut self, s: &crate::settings::Settings) {
+        self.lsp.set_settings(crate::lsp::LspSettings {
+            python_off: s.python_language_server == "None",
+            python_path: (!s.python_language_server_path.is_empty())
+                .then(|| s.python_language_server_path.clone()),
+        });
         self.depth = s.scan_depth;
         self.hide_clean = s.hide_clean_repos;
         self.auto_save = (s.auto_save == crate::settings::AutoSave::AfterDelay).then(|| Duration::from_millis(s.auto_save_delay));
@@ -223,11 +233,13 @@ impl Workspace {
 
     /// An empty workspace on `root`; nothing is loaded until `apply(scan(..))`.
     pub fn new(root: PathBuf) -> Self {
+        #[cfg(not(test))]
+        let host = crate::host::local();
+        #[cfg(test)]
+        let host = crate::testing::host();
         Workspace {
-            #[cfg(not(test))]
-            host: crate::host::local(),
-            #[cfg(test)]
-            host: crate::testing::host(),
+            lsp: crate::lsp::Servers::new(host.clone(), root.clone(), Default::default()),
+            host,
             root,
             history: history::History::default(),
             depth: DEFAULT_DEPTH,
@@ -282,6 +294,16 @@ impl Workspace {
             undo_ops: Vec::new(),
             redo_ops: Vec::new(),
         }
+    }
+
+    pub fn sync_documents(&mut self) {
+        self.lsp.sync(
+            self.tabs
+                .iter()
+                .filter_map(|t| t.file())
+                .filter(|f| !f.loading && !f.untitled && f.error.is_none())
+                .map(|f| (f.path.as_path(), f.text.as_str())),
+        );
     }
 
     /// Active file's owning repository, repo-relative path and current text.

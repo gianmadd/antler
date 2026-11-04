@@ -146,6 +146,19 @@ impl Antler {
     }
 
     pub(crate) fn sync_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ws.sync_documents();
+        for event in self.ws.lsp.take_events() {
+            match event {
+                crate::lsp::Event::NotFound { language: "python" } => window.push_notification(
+                    gpui_kit::component::notification::Notification::warning(
+                        "Python language server not found",
+                    )
+                    .title("Python"),
+                    cx,
+                ),
+                _ => {}
+            }
+        }
         self.load_blame(window, cx);
         if self.ws.groups().iter().any(|g| !self.group_ui.contains_key(g)) {
             self.sync_diff(cx);

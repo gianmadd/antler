@@ -36,7 +36,19 @@ pub type WatchGuard = Box<dyn std::any::Any + Send>;
 /// An environment variable for a git command (askpass wiring), as `git.rs` passes them.
 pub type Envs<'a> = &'a [(&'a str, &'a std::ffi::OsStr)];
 
+/// A child process owned by a host. The caller must kill it when its window closes.
+pub struct Process {
+    pub stdin: Box<dyn io::Write + Send>,
+    pub stdout: Box<dyn io::Read + Send>,
+    pub stderr: Box<dyn io::Read + Send>,
+    pub kill: Box<dyn FnMut() + Send>,
+}
+
 pub trait Host: Send + Sync {
+    fn supports_processes(&self) -> bool { false }
+    fn spawn(&self, _program: &str, _args: &[&str], _cwd: &Path) -> io::Result<Process> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
     /// The bytes of the file.
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
     /// The file's text; an error when it is not UTF-8.
@@ -252,6 +264,44 @@ pub fn remove_all(path: &Path) -> io::Result<()> {
 }
 
 impl Host for Local {
+    fn supports_processes(&self) -> bool { true }
+    fn spawn(&self, program: &str, args: &[&str], cwd: &Path) -> io::Result<Process> {
+        let mut command = std::process::Command::new(program);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        no_console(&mut command);
+        let child = command.spawn();
+        let mut child = match child {
+            Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::NotFound => {
+                // npm installs Windows launchers as .cmd files.
+                let mut fallback = std::process::Command::new(format!("{program}.cmd"));
+                fallback.args(args).current_dir(cwd).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+                no_console(&mut fallback);
+                fallback.spawn()?
+            }
+            result => result?,
+        };
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+        let owned = child.clone();
+        Ok(Process {
+            stdin: Box::new(stdin),
+            stdout: Box::new(stdout),
+            stderr: Box::new(stderr),
+            kill: Box::new(move || {
+                if let Ok(mut child) = owned.lock() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }),
+        })
+    }
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         std::fs::read(path)
     }
