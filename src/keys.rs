@@ -15,7 +15,7 @@ use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
 use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine, QuickSearchInSearchView, QuickTextSearch};
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
-use crate::projects_picker::{CloseProjects, OpenProjectNewWindow, OpenProjects};
+use crate::projects_picker::{AcceptProjectPath, CloseProjects, OpenProjectNewWindow, OpenProjects, SaveProjectPath};
 use crate::tabs::*;
 use crate::ports_view::{ForwardPort, ShowPorts, StopForwardingPort};
 use crate::projects_view::CancelProjectName;
@@ -265,6 +265,8 @@ cmds![
     ("antler.closeStashPicker", "Close Stash Picker", "escape", Stash, CloseStash),
     ("antler.closeProjectsPicker", "Close Projects Picker", "escape", ProjectsPicker, CloseProjects),
     ("antler.openProjectNewWindow", "Open Project in New Window", "cmd-enter", ProjectsPicker, OpenProjectNewWindow),
+    ("antler.acceptProjectPath", "Complete Folder Path", "tab", ProjectsPicker, AcceptProjectPath),
+    ("antler.saveProjectPath", "Save Folder as Project", "cmd-s", ProjectsPicker, SaveProjectPath),
 ];
 
 /// One key of one command in one context, as the user's keybindings.json leaves it.
@@ -872,6 +874,10 @@ mod tests {
         assert_eq!((close.key, close.ctx), ("escape", Ctx::ProjectsPicker));
         let new_window = COMMANDS.iter().find(|c| c.id == "antler.openProjectNewWindow").unwrap();
         assert_eq!((new_window.key, new_window.ctx), ("cmd-enter", Ctx::ProjectsPicker));
+        let complete = COMMANDS.iter().find(|c| c.id == "antler.acceptProjectPath").unwrap();
+        assert_eq!((complete.key, complete.ctx), ("tab", Ctx::ProjectsPicker));
+        let save = COMMANDS.iter().find(|c| c.id == "antler.saveProjectPath").unwrap();
+        assert_eq!((save.key, save.ctx), ("cmd-s", Ctx::ProjectsPicker));
         assert!(!Ctx::ProjectsPicker.editable());
         assert!(!palette_commands(false).iter().any(|command| command.ctx == Ctx::ProjectsPicker));
     }
