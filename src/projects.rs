@@ -435,7 +435,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(renamed[0].name, "Zed");
-        assert_eq!(renamed[0].path, fs::canonicalize(&folder).unwrap());
+        assert_eq!(renamed[0].path, crate::host::canonical(&folder).unwrap());
         assert_eq!(load(&file).unwrap()[0].name, "Zed");
         assert_eq!(fs::read(temp.path().join("project/keep")).unwrap(), b"contents");
 
@@ -468,7 +468,7 @@ mod tests {
         fs::create_dir_all(&right).unwrap();
         apply(&file, Change::Save(left.clone())).unwrap();
         apply(&file, Change::Save(right.clone())).unwrap();
-        let left_identity = fs::canonicalize(&left).unwrap();
+        let left_identity = crate::host::canonical(&left).unwrap();
 
         let projects = apply(&file, Change::Rename { path: right.clone(), name: "Second".into() }).unwrap();
         assert_eq!(projects.iter().map(|project| project.name.as_str()).collect::<Vec<_>>(), ["project", "Second"]);
