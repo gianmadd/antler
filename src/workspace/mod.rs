@@ -178,6 +178,7 @@ pub enum View {
     Explorer,
     Git,
     Search,
+    Projects,
     /// Forwarded ports: Remote windows only.
     Ports,
 }

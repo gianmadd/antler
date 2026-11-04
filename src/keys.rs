@@ -18,7 +18,7 @@ use crate::stash_view::CloseStash;
 use crate::tabs::*;
 use crate::ports_view::{ForwardPort, ShowPorts, StopForwardingPort};
 use crate::remote_view::{CloseRemoteConnection, ConnectToHost};
-use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ToggleBlameEditorDecoration, ToggleBlameStatusBar, ToggleSidebar, set_menus};
+use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ShowProjects, ToggleBlameEditorDecoration, ToggleBlameStatusBar, ToggleSidebar, set_menus};
 
 /// Where a binding applies: a GPUI key context, and the name `when` uses in keybindings.json.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -173,6 +173,7 @@ cmds![
     ("editor.action.previousMatchFindAction", "Find Previous", "shift-cmd-g", Editor, FindPreviousMatch),
     // the editor's own Replace key is cmd-shift-f: project search takes it (bound later, same context, wins)
     ("workbench.view.search", "Find in Files", "shift-cmd-f", Global, ShowSearch),
+    ("antler.showProjects", "Projects", "", Global, ShowProjects),
     ("workbench.view.search", "Find in Files", "shift-cmd-f", Input, ShowSearch),
     ("editor.action.commentLine", "Toggle Line Comment", "cmd-/", Editor, ToggleLineComment),
     ("editor.action.blockComment", "Toggle Block Comment", "alt-shift-a", Editor, ToggleBlockComment),

@@ -43,6 +43,10 @@ pub struct Entry<V> {
     pub view: V,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalOpen { Focus(u64), Replace, New }
+
+
 /// The open windows in the order they were opened; `V` is whatever the view needs to reach a window again.
 pub struct Registry<V>(Vec<Entry<V>>);
 
@@ -53,6 +57,13 @@ impl<V> Default for Registry<V> {
 }
 
 impl<V> Registry<V> {
+    pub(crate) fn local_open(&self, source_id: u64, root: &Path, new_window: bool) -> LocalOpen {
+        if let Some(entry) = self.with_folder(None, root) { return LocalOpen::Focus(entry.id); }
+        if new_window || self.0.iter().find(|entry| entry.id == source_id).is_some_and(|entry| entry.host.is_some()) {
+            LocalOpen::New
+        } else { LocalOpen::Replace }
+    }
+
     pub fn add(&mut self, id: u64, host: Option<String>, root: PathBuf, view: V) {
         self.remove(id);
         self.0.push(Entry { id, host, root, view });
@@ -232,6 +243,16 @@ mod tests {
         assert_eq!(r.with_folder(None, Path::new("/a")).map(|e| e.id), Some(1));
         let json = serde_json::to_string(&WindowSave::folder("/a".into())).unwrap();
         assert!(!json.contains("host"), "a local window saves as before");
+    }
+
+    #[test]
+    fn local_project_opening_prefers_existing_local_windows_and_never_replaces_a_remote_window() {
+        let mut r = registry(&["/local"]);
+        r.add(2, Some("dev".into()), "/remote".into(), ());
+        assert_eq!(r.local_open(1, Path::new("/local"), true), LocalOpen::Focus(1));
+        assert_eq!(r.local_open(2, Path::new("/new"), false), LocalOpen::New);
+        assert_eq!(r.local_open(1, Path::new("/new"), false), LocalOpen::Replace);
+        assert_eq!(r.local_open(1, Path::new("/new"), true), LocalOpen::New);
     }
 
     #[test]

@@ -29,13 +29,13 @@ zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2
 flate2 = "1.1.10"
 # already built (gpui's deps): the askpass broker's token
 getrandom = "0.3"
+tempfile = "3.27.0"
 
 # build.rs: the icon and version info of antler.exe (gpui-pre builds it already)
 [build-dependencies]
 embed-resource = "3.0.12"
 
 [dev-dependencies]
-tempfile = "3.27.0"
 # the model tests must not touch the real Trash
 antler-host = { path = "crates/antler-host", features = ["test-trash"] }
 
