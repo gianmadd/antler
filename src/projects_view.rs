@@ -96,11 +96,9 @@ impl Antler {
         cx.notify();
     }
 
-    pub(crate) fn projects_view(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn projects_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let list = self.projects.read(cx);
-        let root = (self.remote.is_none() && self.ws.has_folder()).then(|| {
-            crate::host::canonical(&self.ws.root).unwrap_or_else(|_| self.ws.root.clone())
-        });
+        let root = (self.remote.is_none() && self.ws.has_folder()).then(|| self.ws.root.clone());
         let rows = list.rows.iter().map(|row| {
             let path = row.project.path.clone();
             let active = row.available && root.as_ref() == Some(&path);
@@ -175,6 +173,7 @@ impl Antler {
                 )
             })
             .child(v_flex().flex_1().overflow_y_scrollbar().children(rows))
+            .into_any_element()
     }
 
     pub(crate) fn save_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -274,44 +273,28 @@ impl Antler {
             crate::windows::LocalOpen::Focus(id) => crate::focus_window(cx, Some(id)),
             crate::windows::LocalOpen::New => crate::open_folder_window(cx, path),
             crate::windows::LocalOpen::Replace => {
-                let source_id = self.id;
                 self.confirm_unsaved(
                     self.ws.dirty_tabs(),
                     window,
                     cx,
-                    move |_this, window, cx| {
-                        let path = path.clone();
-                        cx.spawn_in(window, async move |weak, cx| {
-                            let checked = cx
-                                .background_spawn(async move { crate::projects::directory(&path) })
-                                .await;
-                            weak.update_in(cx, |this, window, cx| match checked {
-                                Ok(path) => match cx
-                                    .global::<crate::Windows>()
-                                    .0
-                                    .local_open(source_id, &path, false)
-                                {
-                                    crate::windows::LocalOpen::Focus(id) => {
-                                        crate::focus_window(cx, Some(id))
-                                    }
-                                    crate::windows::LocalOpen::New => {
-                                        crate::open_folder_window(cx, path)
-                                    }
-                                    crate::windows::LocalOpen::Replace => {
-                                        this.replace_root(path, window, cx)
-                                    }
-                                },
-                                Err(error) => window.push_notification(
-                                    Notification::error(error).title("Projects"),
-                                    cx,
-                                ),
-                            })
-                            .ok();
-                        })
-                        .detach();
-                    },
+                    move |this, window, cx| this.commit_project(path.clone(), window, cx),
                 );
             }
         }
+    }
+
+    pub(crate) fn commit_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let source_id = self.id;
+        cx.spawn_in(window, async move |weak, cx| {
+            let checked = cx.background_spawn(async move { crate::projects::directory(&path) }).await;
+            weak.update_in(cx, |this, window, cx| match checked {
+                Ok(path) => match cx.global::<crate::Windows>().0.local_open(source_id, &path, false) {
+                    crate::windows::LocalOpen::Focus(id) => crate::focus_window(cx, Some(id)),
+                    crate::windows::LocalOpen::New => crate::open_folder_window(cx, path),
+                    crate::windows::LocalOpen::Replace => this.replace_root(path, window, cx),
+                },
+                Err(error) => window.push_notification(Notification::error(error).title("Projects"), cx),
+            }).ok();
+        }).detach();
     }
 }

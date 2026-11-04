@@ -27,6 +27,10 @@ fn identity(path: &Path) -> PathBuf {
     crate::host::canonical(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn local_directory(path: &Path) -> bool {
+    crate::host::local().metadata(path).is_ok_and(|metadata| metadata.is_dir)
+}
+
 fn validate(projects: Vec<Project>) -> Result<Vec<Project>, String> {
     let mut identities = HashSet::new();
     for project in &projects {
@@ -71,10 +75,12 @@ pub(crate) fn apply(file: &Path, change: Change) -> Result<Vec<Project>, String>
         Change::Save(path) => {
             let path = crate::host::canonical(&path)
                 .map_err(|error| format!("Could not open Project folder: {error}"))?;
-            if !path.is_dir() {
+            if !local_directory(&path) {
                 return Err(format!("{} is not a folder.", path.display()));
             }
-            if !projects.iter().any(|p| identity(&p.path) == path) {
+            if let Some(existing) = projects.iter_mut().find(|p| identity(&p.path) == path) {
+                existing.path = path;
+            } else {
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -93,7 +99,7 @@ pub(crate) fn rows(projects: Vec<Project>) -> Vec<Row> {
     sorted(projects)
         .into_iter()
         .map(|project| Row {
-            available: project.path.is_dir(),
+            available: local_directory(&project.path),
             project,
         })
         .collect()
@@ -102,7 +108,7 @@ pub(crate) fn rows(projects: Vec<Project>) -> Vec<Row> {
 pub(crate) fn directory(path: &Path) -> Result<PathBuf, String> {
     let path = crate::host::canonical(path)
         .map_err(|error| format!("Could not open Project folder: {error}"))?;
-    if path.is_dir() {
+    if local_directory(&path) {
         Ok(path)
     } else {
         Err(format!("{} is not a folder.", path.display()))
@@ -188,5 +194,44 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), b"broken");
         fs::write(&file, br#"[{"name":" ","path":"relative"}]"#).unwrap();
         assert!(load(&file).is_err());
+    }
+
+    #[test]
+    fn external_edits_and_folder_restoration_appear_on_the_next_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("projects.json");
+        assert!(load(&file).unwrap().is_empty());
+        let folder = temp.path().join("offline");
+        fs::write(&file, serde_json::to_vec(&[Project { name: "Offline".into(), path: folder.clone() }]).unwrap()).unwrap();
+        assert!(!rows(load(&file).unwrap()).pop().unwrap().available);
+        fs::create_dir(&folder).unwrap();
+        assert!(rows(load(&file).unwrap()).pop().unwrap().available);
+    }
+
+    #[test]
+    fn a_failed_replacement_keeps_the_existing_directory_and_its_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("projects.json");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("keep"), b"user data").unwrap();
+        assert!(write(&destination, &[]).is_err());
+        assert_eq!(fs::read(destination.join("keep")).unwrap(), b"user data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_canonical_alias_does_not_duplicate_a_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("projects.json");
+        let folder = temp.path().join("folder");
+        let alias = temp.path().join("alias");
+        fs::create_dir(&folder).unwrap();
+        std::os::unix::fs::symlink(&folder, &alias).unwrap();
+        let first = apply(&file, Change::Save(folder)).unwrap();
+        fs::write(&file, serde_json::to_vec(&[Project { name: "Named".into(), path: alias.clone() }]).unwrap()).unwrap();
+        let saved = apply(&file, Change::Save(alias)).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].name, "Named");
+        assert_eq!(first[0].path, saved[0].path);
     }
 }
