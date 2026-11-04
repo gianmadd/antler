@@ -1,6 +1,5 @@
 use gpui_kit::*;
 use gpui_kit::component::input::RopeExt;
-use ropey::LineType;
 use gpui_kit::component::input::{DefinitionProvider, EditorState, ShowDocumentHandler};
 use ropey::Rope;
 use std::{path::PathBuf, rc::Rc};
@@ -17,10 +16,10 @@ impl DefinitionProvider for EditorLsp {
         let Some(handle) = handle else { return Task::ready(Ok(vec![])) };
         let position = text.offset_to_position(offset.min(text.len_chars()));
         let line_ix = position.line as usize;
-        let line = text.line(line_ix, LineType::LF).to_string();
+        let source = text.to_string();
         let column = position.character as usize;
         cx.background_spawn(async move {
-            Ok(handle.jump(crate::lsp::Jump::Definition, &line, line_ix, column).into_iter().map(|target| {
+            Ok(handle.jump(crate::lsp::Jump::Definition, &source, line_ix, column).into_iter().map(|target| {
                 let uri = url::Url::from_file_path(&target.path).unwrap().as_str().parse().unwrap();
                 let target_text = handle.open_texts.get(&target.path).cloned().unwrap_or_else(|| handle.host.read_to_string(&target.path).unwrap_or_default());
                 let line = target_text.lines().nth(target.line).unwrap_or("");
@@ -47,7 +46,7 @@ pub(crate) fn attach_lsp(editor: &mut EditorState, antler: WeakEntity<Antler>, p
             let target = cx.background_spawn(async move { crate::lsp::targets_with_text(host.as_ref(), vec![loc], &open_texts).into_iter().next() }).await;
             if let Some(target) = target {
                 weak.update(cx, |this, cx| {
-                    if let Some(source) = source { this.ws.history.push(source); }
+                    if let Some(source) = source.clone() { this.ws.history.push(source); }
                     this.open_path(path, Some(target.line + 1), Some(target.column), true, cx);
                 }).ok();
             }
@@ -93,7 +92,10 @@ impl Antler {
         cx.spawn_in(window, async move |this, cx| {
             let targets = cx.background_spawn(async move { handle.jump(kind, &text, line, column) }).await;
             this.update_in(cx, |this, window, cx| match targets.as_slice() {
-                [target] => this.jump(crate::workspace::history::Place { path: target.path.clone(), line: target.line, column: target.column }, cx),
+                [target] => {
+                    if let Some(source) = source.clone() { this.ws.history.push(source); }
+                    this.open_path(target.path.clone(), Some(target.line + 1), Some(target.column), true, cx);
+                },
                 [] => {},
                 _ => crate::location_picker::open(this, targets, source, window, cx),
             }).ok();

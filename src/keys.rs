@@ -14,6 +14,8 @@ use crate::explorer::*;
 use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
 use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine, QuickSearchInSearchView, QuickTextSearch};
 use crate::nav::{FindReferences, GoBack, GoForward, GoToDefinition, GoToImplementation};
+use crate::nav::GoToTypeDefinition;
+use crate::location_picker::CloseLocationPicker;
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::projects_picker::{AcceptProjectPath, CloseProjects, OpenProjectNewWindow, OpenProjects, SaveProjectPath};
@@ -39,6 +41,7 @@ pub(crate) enum Ctx {
     Branch,
     Stash,
     ProjectsPicker,
+    LocationPicker,
     ExplorerName,
     ProjectName,
 }
@@ -57,6 +60,7 @@ impl Ctx {
             Ctx::Branch => "Branch > Command",
             Ctx::Stash => "Stash > Command",
             Ctx::ProjectsPicker => "ProjectsPicker > Command",
+            Ctx::LocationPicker => "LocationPicker > Command",
             Ctx::ExplorerName => "ExplorerName > Input",
             Ctx::ProjectName => "ProjectName > Input",
         })
@@ -228,6 +232,8 @@ cmds![
     ("references-view.findReferences", "Find All References", "shift-alt-f12", Editor, FindReferences),
     ("editor.action.revealDefinition", "Go to Definition", "f12", Editor, GoToDefinition),
     ("editor.action.goToImplementation", "Go to Implementation", "cmd-f12", Editor, GoToImplementation),
+    ("editor.action.goToTypeDefinition", "Go to Type Definition", "", Editor, GoToTypeDefinition),
+    ("workbench.action.closeQuickOpen", "Close Location Picker", "escape", LocationPicker, CloseLocationPicker),
     ("workbench.action.focusFirstEditorGroup", "Focus First Editor Group", "cmd-1", Global, FocusFirstGroup),
     ("workbench.action.focusSecondEditorGroup", "Focus Second Editor Group", "cmd-2", Global, FocusSecondGroup),
     ("workbench.action.focusThirdEditorGroup", "Focus Third Editor Group", "cmd-3", Global, FocusThirdGroup),
