@@ -15,6 +15,50 @@ pub(crate) struct Row {
     pub available: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Completion {
+    pub directory: PathBuf,
+    pub prefix: String,
+    pub folders: Vec<PathBuf>,
+}
+
+pub(crate) fn is_path_query(query: &str) -> bool {
+    query.starts_with('/') || query.starts_with('~') || {
+        #[cfg(windows)]
+        { query.as_bytes().get(1) == Some(&b':') && query.as_bytes()[0].is_ascii_alphabetic() && matches!(query.as_bytes().get(2), Some(b'/' | b'\\')) }
+        #[cfg(not(windows))]
+        { false }
+    }
+}
+
+pub(crate) fn completion_is_current(
+    popup: u64,
+    current_popup: u64,
+    request: u64,
+    current_request: u64,
+    query: &str,
+    current_query: &str,
+) -> bool {
+    popup == current_popup && request == current_request && query == current_query
+}
+
+pub(crate) fn complete(query: &str, home: Option<&Path>) -> Result<Completion, String> {
+    let expanded = if query == "~" { home.ok_or("Could not find the local home folder.")?.to_path_buf() }
+    else if let Some(rest) = query.strip_prefix("~/") {
+        home.ok_or("Could not find the local home folder.")?.join(rest)
+    } else { PathBuf::from(query) };
+    let trailing_separator = query.ends_with(std::path::MAIN_SEPARATOR) || query.ends_with('/') || query.ends_with('\\');
+    let (directory, prefix) = if expanded.is_dir() || trailing_separator {
+        (expanded, String::new())
+    } else {
+        (expanded.parent().ok_or("Enter an absolute folder path.")?.to_path_buf(), expanded.file_name().unwrap_or_default().to_string_lossy().into_owned())
+    };
+    let mut folders = crate::host::local_folders(&directory)
+        .map_err(|error| format!("Could not read {}: {error}", directory.display()))?;
+    folders.retain(|path| path.file_name().unwrap_or_default().to_string_lossy().starts_with(&prefix));
+    Ok(Completion { directory, prefix, folders })
+}
+
 pub(crate) enum Change {
     Save(PathBuf),
     Rename { path: PathBuf, name: String },
@@ -186,6 +230,44 @@ fn write(file: &Path, projects: &[Project]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_completion_is_shallow_and_returns_only_matching_folders() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        fs::create_dir_all(root.join("antler/nested")).unwrap();
+        fs::write(root.join("antler-file"), "file").unwrap();
+        fs::create_dir(root.join("other")).unwrap();
+        let result = complete(&format!("{}{}ant", root.display(), std::path::MAIN_SEPARATOR), None).unwrap();
+        assert_eq!(result.directory, root);
+        assert_eq!(result.prefix, "ant");
+        assert_eq!(result.folders, [root.join("antler")]);
+        assert!(complete(&format!("{}missing/", temp.path().display()), None).is_err());
+    }
+
+    #[test]
+    fn path_mode_expands_home_and_recognizes_absolute_forms() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("work")).unwrap();
+        let result = complete("~/work", Some(temp.path())).unwrap();
+        assert_eq!(result.directory, temp.path().join("work"));
+        assert_eq!(result.prefix, "");
+        assert!(complete("~", None).is_err());
+        assert!(is_path_query("/tmp"));
+        assert!(is_path_query("~/work"));
+        assert!(!is_path_query("project:one"));
+        #[cfg(windows)]
+        assert!(is_path_query(r"C:\Users\me"));
+        #[cfg(windows)]
+        assert!(!is_path_query("C:relative"));
+    }
+
+    #[test]
+    fn late_completion_results_are_rejected_after_query_or_popup_changes() {
+        assert!(!completion_is_current(1, 1, 1, 2, "/a", "/ab"));
+        assert!(!completion_is_current(1, 2, 1, 1, "/a", "/a"));
+        assert!(completion_is_current(2, 2, 3, 3, "/ab", "/ab"));
+    }
 
     #[test]
     fn picker_keeps_saved_projects_alphabetical_before_matching_recent_folders() {

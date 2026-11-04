@@ -173,6 +173,20 @@ pub fn canonical(path: &Path) -> io::Result<PathBuf> {
     std::fs::canonicalize(path).map(strip_verbatim)
 }
 
+/// Immediate local directory children for path completion; unlike `Host::list_dir`, this preserves read errors.
+pub fn local_folders(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut folders = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() { folders.push(path); }
+    }
+    folders.sort_by_cached_key(|path| (
+        path.file_name().unwrap_or_default().to_string_lossy().to_lowercase(),
+        path.clone(),
+    ));
+    Ok(folders)
+}
+
 /// A console program started by the app opens no console window of its own (Windows' `CREATE_NO_WINDOW`; the
 /// release app has no console to share). Nothing elsewhere.
 pub fn no_console(c: &mut std::process::Command) -> &mut std::process::Command {
@@ -467,6 +481,21 @@ mod tests {
         let c = canonical(tmp.path()).unwrap();
         assert!(c.is_absolute() && !c.to_string_lossy().starts_with(r"\\?\"), "{c:?}");
         assert_eq!(std::fs::canonicalize(&c).unwrap(), std::fs::canonicalize(tmp.path()).unwrap());
+    }
+
+    #[test]
+    fn local_folders_is_shallow_includes_directory_links_and_reports_read_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(tmp.path().join("file"), b"file").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&folder, tmp.path().join("alias")).unwrap();
+        let folders = local_folders(tmp.path()).unwrap();
+        assert!(folders.contains(&folder));
+        #[cfg(unix)]
+        assert!(folders.contains(&tmp.path().join("alias")));
+        assert!(local_folders(&tmp.path().join("missing")).is_err());
     }
 
     #[test]
