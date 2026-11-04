@@ -828,6 +828,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::go_to_definition_action))
             .on_action(cx.listener(Self::go_to_type_definition_action))
             .on_action(cx.listener(Self::go_to_implementation_action))
+            .on_action(cx.listener(Self::close_location_picker))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::select_icon_theme))
             .on_action(cx.listener(Self::install_theme))
