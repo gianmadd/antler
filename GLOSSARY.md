@@ -43,6 +43,16 @@ _Avoid_: Worktree (alone), copy, clone
 The collapsible block of the Git view dedicated to one Nested repository, with its own commit message, branch and change groups.
 _Avoid_: Tab, repo tab
 
+## Code navigation
+
+**Language server**:
+An external program that answers, for one language, where a symbol is defined, where it is used and what it is; Antler only navigates code with it, it does not complete or check it.
+_Avoid_: LSP (for the program), extension, language service
+
+**Source folder**:
+The folder a Language server takes as its root: the nearest folder above a file that marks a code base of that language (for Python one with `pyproject.toml`, `setup.py` or `.venv`), or the Root when there is none. A Root may hold several.
+_Avoid_: Project, workspace folder
+
 ## Interface
 
 **Activity bar**:
