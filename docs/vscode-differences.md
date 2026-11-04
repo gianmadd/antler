@@ -4,6 +4,7 @@ Antler copies VS Code's Explorer and Source Control; for git, ADR 0003 applies (
 
 | Area | VS Code | Antler |
 |---|---|---|
+| Activity bar | pinned view containers are kept in internal storage; hiding the active container opens the default if pinned, otherwise the first visible container; containers can be moved between the Activity bar and other locations | `antler.activityBar.views` in `settings.json` controls the shown views and order; Explorer cannot be hidden; hiding the active view returns to Explorer; views cannot move between containers |
 | Git Blame editor decoration | fixed end-of-line and status-bar templates; hover shows commit details and clicking opens the commit | fixed templates; no hover with commit details or click to open the commit |
 | Nested repositories | scan up to `git.repositoryScanMaxDepth` | same limit (default 3), plus: repos inside folders ignored by the parent repo, Linked worktrees labelled "worktree of …", `.venv*` folders skipped |
 | Section header | name; branch in the status bar or in the Repositories view | name + branch in grey next to it; no Repositories view |

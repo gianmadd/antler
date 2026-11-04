@@ -418,6 +418,9 @@ impl Antler {
         let new = cx.global::<settings::Current>().0.clone();
         let old = std::mem::replace(&mut self.applied, new.clone());
         self.ws.apply_settings(&new);
+        if old.activity_bar_views != new.activity_bar_views {
+            cx.notify();
+        }
         if (old.git_blame_status_bar_enabled, old.git_blame_editor_decoration_enabled) != (new.git_blame_status_bar_enabled, new.git_blame_editor_decoration_enabled) {
             if !new.git_blame_status_bar_enabled && !new.git_blame_editor_decoration_enabled { self.ws.clear_blame(); }
             cx.notify();
@@ -959,6 +962,7 @@ fn main() {
     let file = settings::default_path().unwrap_or_default(); // no HOME: an empty path reads as a missing file
     settings::migrate(&file); // keys of an older version get the new names
     let (root, s, error) = settings::startup(std::env::args().skip(1), &file);
+    let activity_bar_warnings = crate::workspace::activity_bar::parse(&s.activity_bar_views).1;
     // no folder (Finder, Dock, Spotlight give no args and a cwd of `/`): window.restoreWindows decides what opens; the `antler` command passes `$PWD`
     let root = root.map(|root| crate::host::canonical(&root).unwrap_or(root));
     if let Some(root) = &root {
@@ -1042,6 +1046,7 @@ fn main() {
         for save in first_windows.by_ref() {
             new_window(cx, save, error.take());
         }
+        keys::notify(cx, activity_bar_warnings);
         keys::notify(cx, warnings);
         cx.activate(true);
         cx.spawn(async move |cx| {
