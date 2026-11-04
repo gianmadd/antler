@@ -25,6 +25,14 @@ while True:
         send({{"jsonrpc":"2.0", "id":0, "method":"workspace/configuration", "params":{{"items":[{{"section":"python"}},{{"section":"basedpyright"}}]}}}})
         send({{"jsonrpc":"2.0", "id":999, "method":"standin/unknown", "params":{{}}}})
     elif method == "textDocument/references": send({{"jsonrpc":"2.0", "id":msg["id"], "result":[{{"uri":"file://" + os.getcwd() + "/b.py", "range":{{"start":{{"line":1,"character":2}},"end":{{"line":1,"character":5}}}}}},{{"uri":"file://" + os.getcwd() + "/a.py", "range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":3}}}}}},{{"uri":"file://" + os.getcwd() + "/b.py", "range":{{"start":{{"line":0,"character":1}},"end":{{"line":0,"character":4}}}}}}]}})
+    elif method in ("textDocument/definition", "textDocument/typeDefinition", "textDocument/implementation"):
+        line = msg["params"]["position"]["line"]
+        uri = msg["params"]["textDocument"]["uri"]
+        rng = {{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":1}}}}
+        loc = {{"uri":uri,"range":rng}}
+        link = {{"targetUri":uri,"targetRange":rng,"targetSelectionRange":rng}}
+        result = loc if line == 0 else [loc,loc] if line == 1 else [link,link] if line == 2 else None
+        send({{"jsonrpc":"2.0", "id":msg["id"], "result":result}})
     elif method == "shutdown": send({{"jsonrpc":"2.0", "id":msg["id"], "result":None}})
     elif method == "exit": sys.exit(0)
 "##,
@@ -68,6 +76,29 @@ fn wait_trace(
         "stand-in trace did not reach the expected state: {:?}",
         trace(dir)
     )
+}
+
+#[test]
+fn jump_maps_every_lsp_location_shape_and_uses_utf16_columns() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let program = server_script(root);
+    let source = root.join("source.py");
+    let text = "first\né😀value\nthird\nfourth".to_string();
+    let open = vec![(source.clone(), text.clone())];
+    let mut servers = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings { python_path: Some(program.to_string_lossy().into_owned()), ..Default::default() });
+    wait_for(&mut servers, &open);
+    let handle = servers.handle(&source).unwrap();
+    let one = handle.jump(Jump::Definition, &text, 0, 0);
+    assert_eq!(one.len(), 1);
+    let many = handle.jump(Jump::TypeDefinition, &text, 1, 2);
+    assert_eq!(many.len(), 2);
+    let links = handle.jump(Jump::Implementation, &text, 2, 0);
+    assert_eq!(links.len(), 2);
+    assert!(handle.jump(Jump::Definition, &text, 3, 0).is_empty());
+    let requests = wait_trace(root, |messages| messages.iter().filter(|v| v.pointer("/msg/method").and_then(|m| m.as_str()).is_some_and(|m| m.starts_with("textDocument/"))).count() >= 4);
+    assert!(requests.iter().any(|v| v.pointer("/msg/params/position/character").and_then(|v| v.as_u64()) == Some(3)));
+    servers.shutdown();
 }
 
 #[test]
@@ -211,29 +242,6 @@ fn servers_follow_open_documents_and_answer_server_requests() {
 }
 
 #[test]
-fn references_are_grouped_by_path_with_source_line_text() {
-    let temp = tempdir().unwrap();
-    let root = temp.path();
-    let program = server_script(root);
-    fs::write(root.join("a.py"), "alpha ref\n").unwrap();
-    fs::write(root.join("b.py"), "beta ref\nsecond ref\n").unwrap();
-    let a = root.join("a.py");
-    let open = vec![(a.clone(), "alpha".into())];
-    let mut servers = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings {
-        python_off: false, python_path: Some(program.to_string_lossy().into_owned()),
-    });
-    wait_for(&mut servers, &open);
-    let result = servers.handle(&a).unwrap().references("alpha", 0, 0);
-    assert_eq!(result.symbol, "alpha");
-    assert_eq!(result.count(), 3);
-    assert_eq!(result.files.len(), 2);
-    assert_eq!(result.files[0].0, a);
-    assert_eq!(result.files[0].1[0].1, "alpha ref");
-    assert_eq!(result.files[1].0, root.join("b.py"));
-    assert_eq!(result.files[1].1.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>(), ["beta ref", "second ref"]);
-}
-
-#[test]
 fn disabled_missing_and_remote_hosts_do_not_start_servers() {
     let temp = tempdir().unwrap();
     let root = temp.path();
@@ -280,3 +288,26 @@ fn disabled_missing_and_remote_hosts_do_not_start_servers() {
     assert!(remote_servers.handle(&file).is_none());
     remote.close();
 }
+#[test]
+fn references_are_grouped_by_path_with_source_line_text() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let program = server_script(root);
+    fs::write(root.join("a.py"), "alpha ref\n").unwrap();
+    fs::write(root.join("b.py"), "beta ref\nsecond ref\n").unwrap();
+    let a = root.join("a.py");
+    let open = vec![(a.clone(), "alpha".into())];
+    let mut servers = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings {
+        python_off: false, python_path: Some(program.to_string_lossy().into_owned()),
+    });
+    wait_for(&mut servers, &open);
+    let result = servers.handle(&a).unwrap().references("alpha", 0, 0);
+    assert_eq!(result.symbol, "alpha");
+    assert_eq!(result.count(), 3);
+    assert_eq!(result.files.len(), 2);
+    assert_eq!(result.files[0].0.canonicalize().unwrap(), a.canonicalize().unwrap());
+    assert_eq!(result.files[0].1[0].1, "alpha ref");
+    assert_eq!(result.files[1].0.canonicalize().unwrap(), root.join("b.py").canonicalize().unwrap());
+    assert_eq!(result.files[1].1.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>(), ["beta ref", "second ref"]);
+}
+

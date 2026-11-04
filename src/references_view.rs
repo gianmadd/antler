@@ -10,19 +10,22 @@ impl Antler {
         let files = references.files.len();
         let header = h_flex().px_3().py_2().text_size(px(12.)).child(format!("{count} results in {files} files"));
         let empty = references.files.is_empty();
-        let groups = references.files.iter().enumerate().flat_map(|(group, (path, rows))| {
+        let hover = cx.theme().list_hover;
+        let mut groups = Vec::new();
+        for (group, (path, rows)) in references.files.iter().enumerate() {
             let title = path.to_string_lossy().to_string();
             let head = div().id(("reference-file", group)).px_2().py_1().text_size(px(12.)).text_color(cx.theme().muted_foreground).child(title);
-            std::iter::once(head).chain(rows.iter().enumerate().map(move |(row, (target, line))| {
+            groups.push(head);
+            for (row, (target, line)) in rows.iter().enumerate() {
                 let target = target.clone();
                 let line = line.clone();
                 let label = format!("{}:{}  {}", target.line + 1, target.column + 1, line.trim());
-                div().id(("reference", group, row)).px_2().py_1().text_size(px(12.)).truncate()
-                    .hover(|s| s.bg(cx.theme().list_hover))
+                groups.push(div().id(format!("reference-{group}-{row}")).px_2().py_1().text_size(px(12.)).truncate()
+                    .hover(|s| s.bg(hover))
                     .on_click(cx.listener(move |this, _, _, cx| this.jump(Place { path: target.path.clone(), line: target.line, column: target.column }, cx)))
-                    .child(label)
-            }))
-        });
+                    .child(label));
+            }
+        }
         v_flex().size_full().child(header).when(empty, |el| el.child(div().px_3().py_2().text_color(cx.theme().muted_foreground).child("No references found")))
             .when(!empty, |el| el.child(div().flex_1().overflow_y_scrollbar().children(groups))).into_any_element()
     }
