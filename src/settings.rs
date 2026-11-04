@@ -10,6 +10,10 @@ use serde::Deserialize;
 /// The VS Code default of `files.exclude`.
 const DEFAULT_EXCLUDE: &[&str] = &["**/.git", "**/.svn", "**/.hg", "**/CVS", "**/.DS_Store", "**/Thumbs.db"];
 
+fn default_activity_bar_views() -> serde_json::Value {
+    crate::workspace::activity_bar::to_json(&crate::workspace::View::ALL)
+}
+
 /// Settings keys of an older version, read once and rewritten with the new names by [`migrate`].
 const OLD_KEYS: &[(&str, &str)] = &[
     ("scan_depth", "antler.scanDepth"),
@@ -33,6 +37,9 @@ pub struct Settings {
     pub scan_depth: usize,
     #[serde(rename = "antler.hideCleanRepos")]
     pub hide_clean_repos: bool,
+    /// Raw: read through workspace::activity_bar::parse so wrong values warn without rejecting the file.
+    #[serde(rename = "antler.activityBar.views", default = "default_activity_bar_views")]
+    pub activity_bar_views: serde_json::Value,
     #[serde(rename = "files.autoSave")]
     pub auto_save: AutoSave,
     /// Milliseconds after the last edit.
@@ -180,6 +187,7 @@ impl Default for Settings {
         Settings {
             scan_depth: crate::workspace::DEFAULT_DEPTH,
             hide_clean_repos: false,
+            activity_bar_views: crate::workspace::activity_bar::to_json(&crate::workspace::View::ALL),
             auto_save: AutoSave::AfterDelay,
             auto_save_delay: 0,
             git_enable_smart_commit: false,
@@ -257,7 +265,13 @@ pub fn migrate(file: &Path) {
 /// Reads the file into [`Current`] (a window's `apply_settings` follows); a broken file is reported and the old settings stay.
 pub fn reload(cx: &mut App, file: &Path) {
     match load(file) {
-        Ok(s) if cx.try_global::<Current>().is_none_or(|c| c.0 != s) => cx.set_global(Current(s)),
+        Ok(s) if cx.try_global::<Current>().is_none_or(|c| c.0 != s) => {
+            // warn only when the value itself changed, not on every other setting's reload
+            let changed = cx.try_global::<Current>().is_none_or(|c| c.0.activity_bar_views != s.activity_bar_views);
+            let (_, warnings) = crate::workspace::activity_bar::parse(&s.activity_bar_views);
+            cx.set_global(Current(s));
+            if changed { crate::keys::notify(cx, warnings); }
+        }
         Ok(_) => {}
         Err(e) => {
             if let Some(window) = cx.windows().into_iter().next() {
@@ -376,6 +390,14 @@ mod tests {
         assert_eq!((s.editor_font_size, s.editor_tab_size, s.editor_insert_spaces, s.editor_word_wrap), (13., 4, true, WordWrap::Off));
         assert_eq!((s.trim_trailing_whitespace, s.insert_final_newline, s.git_autofetch, s.explorer_exclude_git_ignore), (false, false, false, false));
         assert_eq!((s.git_autofetch_period, &s.restore_windows), (180, &RestoreWindows::All), "VS Code's defaults");
+    }
+
+    #[test]
+    fn invalid_activity_bar_setting_does_not_reject_other_settings() {
+        let (_, s, error) = run(&[], Some(r#"{"antler.activityBar.views": 3, "antler.hideCleanRepos": true}"#));
+        assert!(error.is_none());
+        assert!(s.hide_clean_repos);
+        assert_eq!(s.activity_bar_views, serde_json::json!(3));
     }
 
     #[test]

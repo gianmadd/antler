@@ -457,8 +457,9 @@ pub(crate) fn load(cx: &mut App, file: Option<&Path>) -> Vec<String> {
 /// Shows `warnings` in the first window.
 pub(crate) fn notify(cx: &mut App, warnings: Vec<String>) {
     let Some(window) = cx.windows().into_iter().next() else { return };
+    let title = if warnings.first().is_some_and(|w| w.starts_with("antler.activityBar.views:")) { "Activity bar" } else { "Keybindings" };
     for w in warnings {
-        window.update(cx, |_, window, cx| window.push_notification(Notification::warning(w).title("Keybindings").autohide(false), cx)).ok();
+        window.update(cx, |_, window, cx| window.push_notification(Notification::warning(w).title(title).autohide(false), cx)).ok();
     }
 }
 

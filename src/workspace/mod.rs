@@ -11,6 +11,7 @@ use crate::graph;
 use crate::host::{self, Host};
 use crate::search::{self, Query, Results, SearchJob};
 
+pub mod activity_bar;
 mod groups;
 mod ops;
 mod scan;
@@ -173,7 +174,7 @@ pub struct Workspace {
 }
 
 /// A view of the Activity bar.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Explorer,
     Git,
@@ -181,6 +182,27 @@ pub enum View {
     Projects,
     /// Forwarded ports: Remote windows only.
     Ports,
+}
+
+impl View {
+    /// Default Activity bar order.
+    pub const ALL: [View; 5] = [View::Explorer, View::Git, View::Search, View::Projects, View::Ports];
+
+    /// The setting id for this view.
+    pub fn id(self) -> &'static str {
+        match self {
+            View::Explorer => "explorer",
+            View::Git => "git",
+            View::Search => "search",
+            View::Projects => "projects",
+            View::Ports => "ports",
+        }
+    }
+
+    /// Finds the view with this setting id.
+    pub fn from_id(id: &str) -> Option<View> {
+        Self::ALL.into_iter().find(|view| view.id() == id)
+    }
 }
 
 impl Workspace {

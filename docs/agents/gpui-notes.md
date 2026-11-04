@@ -252,6 +252,7 @@ window.open_alert_dialog(cx, move |alert, _, _| {
   - Icons in the default bundle: `IconName::Folder/FolderOpen/FolderClosed/File/Github/Copy/ExternalLink/Search` (`Github`, not `GitHub`; there is no git-branch icon without `icon_assets!`).
   - `Button::selected(bool)` needs `use gpui_kit::base::Selectable as _;` (not re-exported by gpui-component).
   - Right-click menu: `use gpui_kit::component::menu::ContextMenuExt as _;` then `elem.id(..).context_menu(|menu, _, _| menu.item(PopupMenuItem::new("..").on_click(|_, _, cx| ..)))`; the element needs a stable id. Finder: `cx.reveal_path(&path)`. Clipboard: `cx.write_to_clipboard(ClipboardItem::new_string(s))`.
+  - `PopupMenuItem::checked(bool)` and `.disabled(bool)` both work on ordinary items, including together for a checked, disabled item such as Explorer in the Activity bar menu. They also work on `ElementItem`; checked is ignored for submenus.
   - Virtualized list: `uniform_list("tree", n, cx.processor(|this, range: Range<usize>, _, cx| -> Vec<_>))` then `.flex_1().min_h_0()`; compiles and runs. Rows are rebuilt from `ws.tree_rows()` per frame.
   - Layout: root is `h_flex` (activity bar, then `flex_1` content); with `view == None` the content is the editor area alone (no `h_resizable`).
 
