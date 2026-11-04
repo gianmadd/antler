@@ -54,6 +54,23 @@ pub fn to_json(list: &[View]) -> Value {
     json!(list.iter().map(|view| view.id()).collect::<Vec<_>>())
 }
 
+/// `list` without `view`; Explorer is never removed.
+pub fn hide(list: &[View], view: View) -> Vec<View> {
+    if view == View::Explorer {
+        return list.to_vec();
+    }
+    list.iter().copied().filter(|item| *item != view).collect()
+}
+
+/// `list` with `view` appended at the end; unchanged if already there.
+pub fn show(list: &[View], view: View) -> Vec<View> {
+    let mut list = list.to_vec();
+    if !list.contains(&view) {
+        list.push(view);
+    }
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +133,25 @@ mod tests {
     fn setting_round_trips_view_ids() {
         let list = vec![View::Explorer, View::Projects];
         assert_eq!(to_json(&list), json!(["explorer", "projects"]));
+    }
+
+    #[test]
+    fn hide_removes_view_but_keeps_explorer() {
+        let list = View::ALL.to_vec();
+        assert_eq!(
+            hide(&list, View::Git),
+            vec![View::Explorer, View::Search, View::Projects, View::Ports]
+        );
+        assert_eq!(hide(&list, View::Explorer), list);
+    }
+
+    #[test]
+    fn show_appends_view_only_when_hidden() {
+        let list = vec![View::Explorer, View::Git];
+        assert_eq!(
+            show(&list, View::Search),
+            vec![View::Explorer, View::Git, View::Search]
+        );
+        assert_eq!(show(&list, View::Git), list);
     }
 }

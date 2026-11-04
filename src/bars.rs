@@ -1,5 +1,5 @@
 //! The Activity bar on the left and the status bar at the bottom.
-use gpui_kit::component::{Icon, IconName, button::{Button, ButtonVariants as _}, h_flex, menu::{DropdownMenu as _, PopupMenuItem}, v_flex};
+use gpui_kit::component::{Icon, IconName, button::{Button, ButtonVariants as _}, h_flex, menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem}, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -22,11 +22,14 @@ impl Antler {
     /// the Git view icon carries the count of changed files.
     pub(crate) fn activity_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let count = self.ws.changed_count();
-        let (views, _) = activity_bar::parse(&cx.global::<crate::settings::Current>().0.activity_bar_views);
-        let views = activity_bar::shown(&views, self.remote.is_some(), self.ws.view);
+        let (list, _) = activity_bar::parse(&cx.global::<crate::settings::Current>().0.activity_bar_views);
+        let remote = self.remote.is_some();
+        let views = activity_bar::shown(&list, remote, self.ws.view);
         let item = |view: View, icon: Icon, label: &'static str, id: &str, badge: usize| {
             let text = crate::keys::label(cx, label, id);
             let on = self.ws.view == Some(view);
+            let weak = cx.entity().downgrade();
+            let list = list.clone();
             div()
                 .id(label)
                 .relative()
@@ -43,6 +46,7 @@ impl Antler {
                     if view == View::Projects { this.projects.update(cx, |list, cx| list.request(None, cx)); }
                     cx.notify();
                 }))
+                .context_menu(move |menu, _, _| activity_bar_menu(menu, &weak, Some(view), remote, &list))
                 .child(icon.size(px(22.)))
                 .when(on, |el| el.child(div().absolute().left_0().top(px(10.)).bottom(px(10.)).w(px(2.)).rounded_r(px(2.)).bg(c(ACCENT))))
                 .when(badge > 0, |el| {
@@ -66,7 +70,10 @@ impl Antler {
                     )
                 })
         };
+        let weak = cx.entity().downgrade();
+        let list = list.clone();
         v_flex()
+            .id("activity-bar")
             .h_full()
             .w(px(48.))
             .flex_none()
@@ -81,6 +88,7 @@ impl Antler {
             }))
             .child(div().flex_1())
             .child(self.manage_button(cx))
+            .context_menu(move |menu, _, _| activity_bar_menu(menu, &weak, None, remote, &list))
     }
 
     /// The gear at the bottom of the Activity bar: VS Code's Manage menu with the commands Antler has, each with its key.
@@ -197,6 +205,39 @@ impl Antler {
             })
             .child(div().flex_1())
             .children(right.into_iter().map(|t| div().flex_none().child(t)))
+    }
+}
+
+fn activity_bar_menu(menu: PopupMenu, this: &WeakEntity<Antler>, on: Option<View>, remote: bool, list: &[View]) -> PopupMenu {
+    let menu = if let Some(view) = on.filter(|view| *view != View::Explorer) {
+        let weak = this.clone();
+        menu.item(PopupMenuItem::new(format!("Hide '{}'", Antler::view_icon(view).1)).on_click(move |_, _, cx| {
+            weak.update(cx, |this, cx| this.toggle_view(view, cx)).ok();
+        })).separator()
+    } else { menu };
+    View::ALL.into_iter().filter(|view| remote || *view != View::Ports).fold(menu, |menu, view| {
+        let weak = this.clone();
+        menu.item(PopupMenuItem::new(Antler::view_icon(view).1)
+            .checked(list.contains(&view))
+            .disabled(view == View::Explorer)
+            .on_click(move |_, _, cx| {
+                weak.update(cx, |this, cx| this.toggle_view(view, cx)).ok();
+            }))
+    })
+}
+
+fn set_views(cx: &mut App, list: &[View]) {
+    crate::settings::put(cx, "antler.activityBar.views", activity_bar::to_json(list));
+}
+
+impl Antler {
+    /// Shows or hides `view` in every Window; hiding the active view switches to Explorer.
+    pub(crate) fn toggle_view(&mut self, view: View, cx: &mut Context<Self>) {
+        let (list, _) = activity_bar::parse(&cx.global::<crate::settings::Current>().0.activity_bar_views);
+        let new = if list.contains(&view) { activity_bar::hide(&list, view) } else { activity_bar::show(&list, view) };
+        if new == list { return; }
+        if !new.contains(&view) && self.ws.view == Some(view) { self.ws.view = Some(View::Explorer); }
+        set_views(cx, &new);
     }
 }
 
