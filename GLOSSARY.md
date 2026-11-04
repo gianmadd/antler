@@ -46,7 +46,7 @@ _Avoid_: Tab, repo tab
 ## Interface
 
 **Activity bar**:
-The vertical column of icons on the left used to choose which view the side panel shows.
+The vertical column of icons on the left used to choose which view the side panel shows. The Explorer view is always there; the user chooses which other views it shows and in what order, the same in every Window.
 _Avoid_: Sidebar
 
 **Explorer view**:
