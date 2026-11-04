@@ -165,18 +165,6 @@ impl Antler {
                 )
                 .child(
                     DropdownButton::new(format!("project-actions-{}", path.to_string_lossy()))
-                        .button(
-                            Button::new(format!("project-actions-button-{}", path.to_string_lossy()))
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Ellipsis)
-                                .tooltip("Project Actions")
-                                .accessibility_label("Project Actions")
-                                .opacity(0.)
-                                .group_hover(group.clone(), |s| s.opacity(1.))
-                                .focus(|s| s.opacity(1.).border_1().border_color(c(ACCENT)))
-                                .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation())),
-                        )
                         .menu_accessibility_label("Project actions")
                         .dropdown_menu({
                             let weak = weak.clone();
