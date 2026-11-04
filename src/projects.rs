@@ -13,6 +13,7 @@ pub(crate) struct Project {
 pub(crate) struct Row {
     pub project: Project,
     pub available: bool,
+    pub identity: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +65,13 @@ pub(crate) fn complete(query: &str, home: Option<&Path>) -> Result<Completion, S
     };
     let mut folders = crate::host::local_folders(&directory)
         .map_err(|error| format!("Could not read {}: {error}", directory.display()))?;
-    folders.retain(|path| path.file_name().unwrap_or_default().to_string_lossy().starts_with(&prefix));
+    folders.retain(|path| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        #[cfg(windows)]
+        { name.to_lowercase().starts_with(&prefix.to_lowercase()) }
+        #[cfg(not(windows))]
+        { name.starts_with(&prefix) }
+    });
     Ok(Completion { directory, prefix, folders })
 }
 
@@ -168,6 +175,7 @@ pub(crate) fn rows(projects: Vec<Project>) -> Vec<Row> {
         .into_iter()
         .map(|project| Row {
             available: local_directory(&project.path),
+            identity: identity(&project.path),
             project,
         })
         .collect()
@@ -176,17 +184,11 @@ pub(crate) fn rows(projects: Vec<Project>) -> Vec<Row> {
 pub(crate) fn picker_rows(saved: &[Row], recent: &[PathBuf], query: &str) -> Vec<Row> {
     let query: Vec<char> = query.to_lowercase().chars().collect();
     let matches = |name: &str| query.is_empty() || crate::goto::fuzzy(&query, name).is_some();
-    let mut saved = saved.to_vec();
-    saved.sort_by(|a, b| {
-        a.project.name.to_lowercase().cmp(&b.project.name.to_lowercase())
-            .then_with(|| a.project.name.cmp(&b.project.name))
-            .then_with(|| a.project.path.cmp(&b.project.path))
-    });
     let mut rows: Vec<Row> = saved.iter().filter(|row| matches(&row.project.name)).cloned().collect();
     rows.extend(recent.iter().filter_map(|path| {
         if saved.iter().any(|row| identity(&row.project.path) == identity(path)) { return None; }
         let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
-        matches(&name).then(|| Row { project: Project { name, path: path.clone() }, available: true })
+        matches(&name).then(|| Row { project: Project { name, path: path.clone() }, available: true, identity: identity(path) })
     }));
     rows
 }
@@ -255,6 +257,33 @@ mod tests {
     }
 
     #[test]
+    fn path_completion_matches_directory_prefix_case_insensitively_on_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("Documents");
+        fs::create_dir(&folder).unwrap();
+        let result = complete(&format!("{}{}doc", temp.path().display(), std::path::MAIN_SEPARATOR), None).unwrap();
+        #[cfg(windows)]
+        assert_eq!(result.folders, [folder]);
+        #[cfg(not(windows))]
+        assert!(result.folders.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loaded_alias_paths_match_the_current_folder_by_canonical_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("projects.json");
+        let folder = temp.path().join("folder");
+        let alias = temp.path().join("alias");
+        fs::create_dir(&folder).unwrap();
+        std::os::unix::fs::symlink(&folder, &alias).unwrap();
+        fs::write(&file, serde_json::to_vec(&[Project { name: "Custom".into(), path: alias.clone() }]).unwrap()).unwrap();
+        let row = rows(load(&file).unwrap()).pop().unwrap();
+        assert_eq!(row.identity, fs::canonicalize(&folder).unwrap());
+        assert!(alias.is_symlink());
+    }
+
+    #[test]
     fn path_mode_expands_home_and_recognizes_absolute_forms() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join("work")).unwrap();
@@ -297,10 +326,10 @@ mod tests {
 
     #[test]
     fn picker_keeps_saved_projects_alphabetical_before_matching_recent_folders() {
-        let saved = vec![
-            Row { project: Project { name: "Zebra".into(), path: "/saved/z".into() }, available: false },
-            Row { project: Project { name: "Alpha".into(), path: "/saved/a".into() }, available: true },
-        ];
+        let saved = rows(vec![
+            Project { name: "Zebra".into(), path: "/saved/z".into() },
+            Project { name: "Alpha".into(), path: "/saved/a".into() },
+        ]);
         let recent = vec![PathBuf::from("/recent/alpha"), PathBuf::from("/recent/alpine"), PathBuf::from("/saved/a")];
         let picked = picker_rows(&saved, &recent, "alp");
         let names: Vec<_> = picked.iter().map(|row| row.project.name.as_str()).collect();

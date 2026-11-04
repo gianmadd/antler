@@ -108,7 +108,7 @@ impl Antler {
         let rows = list.rows.iter().map(|row| {
             let path = row.project.path.clone();
             let display_path = path.display().to_string();
-            let active = row.available && root.as_ref() == Some(&path);
+            let active = row.available && root.as_ref() == Some(&row.identity);
             let renaming = self
                 .projects_view
                 .name
@@ -280,7 +280,7 @@ impl Antler {
             |this, input, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                     let name = input.read(cx).value().to_string();
-                    this.finish_project_name(&name, window, cx);
+                    this.finish_project_name(&name, matches!(event, InputEvent::PressEnter { .. }), window, cx);
                 }
             },
         );
@@ -289,7 +289,7 @@ impl Antler {
         cx.notify();
     }
 
-    fn finish_project_name(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_project_name(&mut self, name: &str, return_focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some((path, _, _)) = self.projects_view.name.take() else { return; };
         if name.trim().is_empty() {
             window.push_notification(Notification::error("Project name cannot be blank.").title("Projects"), cx);
@@ -304,7 +304,7 @@ impl Antler {
                 )
             });
         }
-        self.projects_view.focus.focus(window, cx);
+        if return_focus { self.projects_view.focus.focus(window, cx); }
         cx.notify();
     }
 
