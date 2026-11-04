@@ -28,6 +28,7 @@ impl Antler {
                 .tooltip(tip(text))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.ws.show_view(view);
+                    if view == View::Projects { this.projects.update(cx, |list, cx| list.request(None, cx)); }
                     cx.notify();
                 }))
                 .child(icon.size(px(22.)))
@@ -65,6 +66,7 @@ impl Antler {
             .child(item(View::Explorer, style::files_icon(), "Explorer", "workbench.view.explorer", 0))
             .child(item(View::Git, style::git_icon(), "Git", "workbench.view.scm", count))
             .child(item(View::Search, Icon::new(IconName::Search), "Search", "workbench.view.search", 0))
+            .child(item(View::Projects, Icon::new(IconName::Folder), "Projects", "antler.showProjects", 0))
             .when(self.remote.is_some(), |el| el.child(item(View::Ports, Icon::new(IconName::Globe), "Ports", "~remote.forwardedPorts.focus", 0)))
             .child(div().flex_1())
             .child(self.manage_button(cx))
