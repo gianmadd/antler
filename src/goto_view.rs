@@ -255,6 +255,7 @@ impl Antler {
             Mode::Line(rest) => {
                 let Some((editor, current, total)) = self.line_info(cx) else { return };
                 let Some(line) = palette::line_hint(rest, current, total).1 else { return };
+                self.record_jump(cx);
                 self.close_go_to_file(&CloseGoToFile, window, cx);
                 editor.update(cx, |e, cx| {
                     e.set_cursor_position(Position::new(line as u32 - 1, 0), window, cx);
@@ -271,6 +272,7 @@ impl Antler {
 
     fn open_match(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.goto.as_ref().and_then(|p| p.matches.get(row)).map(|m| m.path.clone()) else { return };
+        self.record_jump(cx);
         self.close_go_to_file(&CloseGoToFile, window, cx);
         self.open_path(path, None, None, true, cx);
     }
