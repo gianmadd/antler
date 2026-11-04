@@ -154,7 +154,7 @@ impl Antler {
                         .accessibility_label("Remove Project")
                         .opacity(0.)
                         .group_hover(group.clone(), |s| s.opacity(1.))
-                        .focus_visible(|s| s.opacity(1.).border_1().border_color(c(ACCENT)))
+                        .focus(|s| s.opacity(1.).border_1().border_color(c(ACCENT)))
                         .on_click(cx.listener({
                             let path = remove_path.clone();
                             move |this, _, _, cx| {
@@ -174,7 +174,7 @@ impl Antler {
                                 .accessibility_label("Project Actions")
                                 .opacity(0.)
                                 .group_hover(group.clone(), |s| s.opacity(1.))
-                                .focus_visible(|s| s.opacity(1.).border_1().border_color(c(ACCENT)))
+                                .focus(|s| s.opacity(1.).border_1().border_color(c(ACCENT)))
                                 .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation())),
                         )
                         .menu_accessibility_label("Project actions")
