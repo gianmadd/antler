@@ -1,6 +1,7 @@
 //! Shared Projects list and its Activity bar view.
 use std::path::PathBuf;
 
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::{
     IconName, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -188,7 +189,6 @@ impl Antler {
                         .item(PopupMenuItem::new("Copy Path").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.display().to_string()))))
                 })
         });
-        let weak = cx.entity().downgrade();
         let current = root.clone();
         let header = h_flex()
             .justify_between()
@@ -214,18 +214,25 @@ impl Antler {
                             .on_click(cx.listener(|this, _, window, cx| this.add_project(window, cx))),
                     )
                     .child(
-                        Button::new("projects-actions")
+                        Button::new("save-project")
                             .ghost()
                             .small()
-                            .icon(IconName::Ellipsis)
-                            .tooltip("Projects actions")
-                            .accessibility_label("Projects actions")
-                            .dropdown_menu(move |menu, _, _| {
-                                let menu = menu.when_some(current.clone(), |menu, path| {
-                                    menu.item(crate::menu_item(&weak, "Save Current Project", move |this, _, cx| this.save_project(path.clone(), cx)))
-                                });
-                                menu.item(crate::menu_item(&weak, "Open Projects JSON", |this, window, cx| this.open_projects_json(window, cx)))
+                            .icon(IconName::Check)
+                            .tooltip("Save Current Project")
+                            .accessibility_label("Save Current Project")
+                            .disabled(current.is_none())
+                            .when_some(current, |button, path| {
+                                button.on_click(cx.listener(move |this, _, _, cx| this.save_project(path.clone(), cx)))
                             }),
+                    )
+                    .child(
+                        Button::new("projects-json")
+                            .ghost()
+                            .small()
+                            .icon(IconName::File)
+                            .tooltip("Open Projects JSON")
+                            .accessibility_label("Open Projects JSON")
+                            .on_click(cx.listener(|this, _, window, cx| this.open_projects_json(window, cx))),
                     ),
             );
         v_flex()
