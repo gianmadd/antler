@@ -17,6 +17,9 @@ mod palette;
 mod paths;
 mod platform;
 mod ports_view;
+mod projects;
+mod projects_view;
+mod projects_picker;
 mod graph;
 mod graph_view;
 mod icon_themes;
@@ -70,15 +73,10 @@ use style::{ACT, FG, FG_DIM, LINE_SOFT, MAIN, SIDE, c};
 use windows::{Registry, WindowSave};
 use workspace::{GitRow, Op, View, Workspace};
 
-actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch]);
-actions!(antler, [ClearRecent, CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts, ToggleBlameStatusBar, ToggleBlameEditorDecoration]);
+actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch, ShowProjects]);
+actions!(antler, [CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts, ToggleBlameStatusBar, ToggleBlameEditorDecoration]);
 actions!(antler, [NewWindow, CloseWindow, MinimizeWindow, FocusNextWindow]);
 use remote_view::{CloseRemoteConnection, ConnectToHost, RemoteWin};
-
-/// File → Open Recent → a folder.
-#[derive(Clone, PartialEq, Action)]
-#[action(namespace = antler, no_json)]
-struct OpenRecent(PathBuf);
 
 /// Window menu → a window.
 #[derive(Clone, PartialEq, Action)]
@@ -87,7 +85,7 @@ struct FocusWindow(u64);
 
 /// The open windows: their handles and views, in the order they opened (see `windows::Registry`).
 #[derive(Default)]
-struct Windows(Registry<(AnyWindowHandle, WeakEntity<Antler>)>);
+pub(crate) struct Windows(pub(crate) Registry<(AnyWindowHandle, WeakEntity<Antler>)>);
 impl Global for Windows {}
 
 /// What the last window to close held: the next start brings it back if the app quits with no window open.
@@ -95,18 +93,15 @@ impl Global for Windows {}
 struct LastClosed(Option<WindowSave>);
 impl Global for LastClosed {}
 
-/// The app menu; rebuilt when the recent folders or the open windows change.
+/// The app menu; rebuilt when the open windows change.
 fn set_menus(cx: &mut App) {
-    let home = std::env::home_dir();
-    let recent = recent::list(&recent::default_path()).into_iter().map(|p| MenuItem::action(recent::display(&p, home.as_deref()), OpenRecent(p)));
-    let open_recent = Menu::new("Open Recent").items(recent.chain([MenuItem::separator(), MenuItem::action("Clear Recently Opened", ClearRecent)]));
     let minimap = Menu::new("Minimap").items([
         keys::checked_item("antler.toggleMinimap", cx.global::<minimap_view::Enabled>().0),
         keys::checked_item("antler.toggleMinimapCharacters", cx.global::<minimap_view::RenderCharacters>().0),
     ]);
     let layout = Menu::new("Editor Layout").items([keys::item("workbench.action.splitEditor"), keys::item("workbench.action.splitEditorDown")]);
     let mut windows: Vec<MenuItem> = cx.global::<Windows>().0.iter().map(|e| MenuItem::action(windows::title(e.host.as_deref(), &e.root), FocusWindow(e.id))).collect();
-    let (mut recent, mut minimap, mut layout) = (Some(open_recent), Some(minimap), Some(layout));
+    let (mut minimap, mut layout) = (Some(minimap), Some(layout));
     // the macOS app menu, by command id ("-" is a separator)
     let app: Vec<&str> = cx.global::<update::Enabled>().0.then_some("antler.checkForUpdates").into_iter().chain(["workbench.action.openSettings", "workbench.action.openGlobalKeybindings", "-", "workbench.action.quit"]).collect();
     let app_item = |id: &str| if id == "-" { MenuItem::separator() } else { keys::item(id) };
@@ -115,7 +110,6 @@ fn set_menus(cx: &mut App) {
         .map(|(name, ids)| {
             Menu::new(*name).items(ids.iter().flat_map(|id| match *id {
                 "-" => vec![MenuItem::separator()],
-                "@recent" => recent.take().map(MenuItem::submenu).into_iter().collect(),
                 "@minimap" => minimap.take().map(MenuItem::submenu).into_iter().collect(),
                 "@layout" => layout.take().map(MenuItem::submenu).into_iter().collect(),
                 "@windows" => std::mem::take(&mut windows),
@@ -190,12 +184,12 @@ fn copy_item(label: &'static str, text: String) -> PopupMenuItem {
 }
 
 /// Thin view: draws the Workspace model and forwards events to it.
-struct Antler {
+pub(crate) struct Antler {
     /// The window's id in `Windows`.
-    id: u64,
-    ws: Workspace,
+    pub(crate) id: u64,
+    pub(crate) ws: Workspace,
     /// A Remote window: its host and connection (the Workspace's host is the same connection).
-    remote: Option<RemoteWin>,
+    pub(crate) remote: Option<RemoteWin>,
     /// The Connect to Host… popup while it is open.
     picker: Option<remote_view::Picker>,
     loading: bool,
@@ -231,6 +225,11 @@ struct Antler {
     watcher: Option<host::WatchGuard>,
     /// Search view: the query field (its text becomes `ws.search.query.text`).
     query: (Entity<InputState>, Subscription),
+    projects: Entity<projects_view::List>,
+    projects_view: projects_view::State,
+    _projects_sub: Subscription,
+    project_picker: Option<projects_picker::Popup>,
+    project_picker_generation: u64,
     /// Search view: the Replace, "files to include" and "files to exclude" fields.
     search_fields: search_view::SearchFields,
     /// Git view: a virtual list (rows differ in height), its lines, and whether they need rebuilding.
@@ -290,6 +289,11 @@ impl Antler {
             }
         });
         let ws_recent = ws.state_file.as_deref().map(state::recent_commands).unwrap_or_default();
+        let projects = cx.global::<projects_view::Current>().0.clone();
+        let projects_view = projects_view::State::new(cx);
+        let projects_sub = cx.observe_in(&projects, window, |this, _, _, cx| {
+            if this.ws.view == Some(View::Projects) { cx.notify(); }
+        });
         let initial = cx.global::<settings::Current>().0.clone();
         let id = window.window_handle().window_id().as_u64();
         let me = (window.window_handle(), cx.entity().downgrade());
@@ -317,6 +321,11 @@ impl Antler {
             cursors: vec![],
             cursors_word: false,
             query: (input, sub),
+            projects,
+            projects_view,
+            _projects_sub: projects_sub,
+            project_picker: None,
+            project_picker_generation: 0,
             search_fields: search_view::SearchFields::new(window, cx),
             git_list: ListState::new(0, ListAlignment::Top, px(200.)),
             git_rows: Vec::new(),
@@ -629,10 +638,6 @@ impl Antler {
         .detach();
     }
 
-    fn open_recent(&mut self, action: &OpenRecent, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_root(action.0.clone(), window, cx);
-    }
-
     /// Replaces the Root with `root` (asking about unsaved tabs first) and puts it on top of the recent folders.
     fn open_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // a folder shown by another window is focused there, like VS Code
@@ -641,19 +646,21 @@ impl Antler {
             return;
         }
         self.confirm_unsaved(self.ws.dirty_tabs(), window, cx, move |this, window, cx| {
-            this.ws.set_root(root.clone());
-            if this.remote.is_none() {
-                recent::add(&recent::default_path(), &root); // shortcut: no recent folders on a host
-            }
-            cx.global_mut::<Windows>().0.set_root(this.id, root.clone());
-            set_menus(cx);
-            this.watch(window, cx);
-            this.queue.clear();
-            this.messages.clear();
-            this.run_search(window, cx);
-            this.sync_diff(cx);
-            this.refresh(window, cx);
+            this.replace_root(root.clone(), window, cx);
         });
+    }
+
+    pub(crate) fn replace_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.ws.set_root(root.clone());
+        if self.remote.is_none() { recent::add(&recent::default_path(), &root); }
+        cx.global_mut::<Windows>().0.set_root(self.id, root);
+        set_menus(cx);
+        self.watch(window, cx);
+        self.queue.clear();
+        self.messages.clear();
+        self.run_search(window, cx);
+        self.sync_diff(cx);
+        self.refresh(window, cx);
     }
 
     /// Cmd+K F / File → Close Folder: back to the no-folder window, after asking about unsaved tabs.
@@ -725,6 +732,7 @@ impl Antler {
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.ws.toggle_sidebar();
+        if self.ws.view == Some(View::Projects) { self.projects.update(cx, |list, cx| list.request(None, cx)); }
         cx.notify();
     }
 
@@ -754,6 +762,7 @@ impl Render for Antler {
             }
             Some(View::Explorer) => Some(self.explorer(cx).into_any_element()),
             Some(View::Search) => Some(self.search_view(cx).into_any_element()),
+            Some(View::Projects) => Some(self.projects_view(cx).into_any_element()),
             Some(View::Ports) => Some(self.ports_view(cx).into_any_element()),
             None => None,
         };
@@ -783,7 +792,9 @@ impl Render for Antler {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_keyboard_shortcuts))
             .on_action(cx.listener(Self::open_folder))
-            .on_action(cx.listener(Self::open_recent))
+            .on_action(cx.listener(Self::open_projects))
+            .on_action(cx.listener(Self::close_projects))
+            .on_action(cx.listener(Self::open_project_new))
             .on_action(cx.listener(Self::connect_to_host))
             .on_action(cx.listener(Self::close_remote_connection))
             // only with a folder open: File → Close Folder is greyed out otherwise (the menu asks if the action is available)
@@ -795,6 +806,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::toggle_blame_editor_decoration))
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::show_search))
+            .on_action(cx.listener(Self::show_projects))
             .on_action(cx.listener(Self::show_ports))
             .on_action(cx.listener(Self::forward_a_port))
             .on_action(cx.listener(Self::stop_forwarding_port))
@@ -827,6 +839,7 @@ impl Render for Antler {
             })
             .child(status)
             .children(self.go_to_popup(cx))
+            .children(self.projects_popup(cx))
             .children(self.picker_popup(cx))
             .children(self.theme_popup(cx))
             .children(self.icon_popup(cx))
@@ -838,7 +851,7 @@ impl Render for Antler {
 
 /// Opens a window for `save`: a workspace with the settings, the saved Untitled files and editor groups, the graph's
 /// branch choices. Each new window is offset from the last, like VS Code's.
-fn new_window(cx: &mut App, save: WindowSave, error: Option<String>) {
+pub(crate) fn new_window(cx: &mut App, save: WindowSave, error: Option<String>) {
     open_window(cx, save, error, None);
 }
 
@@ -911,7 +924,7 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
 
 /// `antler <folder>` and Finder's "Open With": the window that shows `root` comes to the front, or a new one opens.
 /// Anything that is not a folder is ignored.
-fn open_folder_window(cx: &mut App, root: PathBuf) {
+pub(crate) fn open_folder_window(cx: &mut App, root: PathBuf) {
     let Ok(root) = crate::host::canonical(&root) else { return };
     if !root.is_dir() {
         return;
@@ -931,7 +944,7 @@ fn open_folder_window(cx: &mut App, root: PathBuf) {
 }
 
 /// Brings the window with `id` to the front.
-fn focus_window(cx: &mut App, id: Option<u64>) {
+pub(crate) fn focus_window(cx: &mut App, id: Option<u64>) {
     let handle = id.and_then(|id| cx.global::<Windows>().0.iter().find(|e| e.id == id).map(|e| e.view.0));
     if let Some(handle) = handle {
         handle.update(cx, |_, window, _| window.activate_window()).ok();
@@ -973,6 +986,8 @@ fn main() {
     });
     app.run(move |cx| {
         gpui_kit::init(cx);
+        let projects = cx.new(|_| projects_view::List::new(projects::default_path()));
+        cx.set_global(projects_view::Current(projects));
         cx.set_global(settings::Current(s));
         themes::reload_installed();
         style::apply(cx.window_appearance() == WindowAppearance::Dark, cx);
@@ -989,10 +1004,6 @@ fn main() {
         }
         // the view's own Quit asks about unsaved tabs first; this one runs when no window has focus
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_action(|_: &ClearRecent, cx| {
-            recent::clear(&recent::default_path());
-            set_menus(cx);
-        });
         cx.on_action(|_: &NewWindow, cx| new_window(cx, WindowSave::default(), None));
         cx.on_action(|a: &FocusWindow, cx| focus_window(cx, Some(a.0)));
         cx.on_action(|_: &FocusNextWindow, cx| {

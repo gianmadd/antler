@@ -1,7 +1,7 @@
 //! The Settings tab: gpui-component's settings editor (search, categories, one control per setting) over `settings::Current`.
 //! Every change is written to settings.json at once; `settings::put` reloads it and the window applies it.
 use gpui_kit::component::setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings};
-use gpui_kit::component::{button::{Button, ButtonVariants as _}, h_flex, v_flex};
+use gpui_kit::component::{button::{Button, ButtonVariants as _}, h_flex, v_flex, IconName, Sizable as _};
 use gpui_kit::*;
 use serde_json::json;
 
@@ -148,7 +148,7 @@ fn pages() -> Vec<SettingPage> {
 impl Antler {
     /// Cmd+, : the tab with the editor, and a link to the file it writes.
     pub(crate) fn settings_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let link = Button::new("edit-settings-json").link().label("Edit in settings.json").on_click(cx.listener(|this, _, _, cx| {
+        let open_json = Button::new("edit-settings-json").ghost().xsmall().icon(IconName::FileText).tooltip("Open Settings (JSON)").on_click(cx.listener(|this, _, _, cx| {
             let Some(file) = settings::default_path() else { return };
             if !file.exists() {
                 std::fs::create_dir_all(file.parent().unwrap_or(&file)).ok();
@@ -156,8 +156,6 @@ impl Antler {
             }
             this.open_path(file, None, None, true, cx);
         }));
-        let more = Button::new("more-themes").link().label("Get more themes").on_click(|_, _, cx| cx.open_url("https://open-vsx.org/?category=Themes"));
-        let install = Button::new("install-vsix").link().label("Install Theme from VSIX…").on_click(cx.listener(|this, _, window, cx| this.install_theme(&crate::theme_view::InstallThemeFromVsix, window, cx)));
-        v_flex().size_full().child(h_flex().px_4().py_2().gap_4().child(link).child(more).child(install)).child(div().flex_1().min_h_0().child(Settings::new("settings").pages(pages()))).into_any_element()
+        v_flex().size_full().child(h_flex().w_full().justify_end().px_4().py_2().child(open_json)).child(div().flex_1().min_h_0().child(Settings::new("settings").pages(pages()))).into_any_element()
     }
 }

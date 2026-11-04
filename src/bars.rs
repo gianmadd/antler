@@ -28,6 +28,7 @@ impl Antler {
                 .tooltip(tip(text))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.ws.show_view(view);
+                    if view == View::Projects { this.projects.update(cx, |list, cx| list.request(None, cx)); }
                     cx.notify();
                 }))
                 .child(icon.size(px(22.)))
@@ -65,6 +66,7 @@ impl Antler {
             .child(item(View::Explorer, style::files_icon(), "Explorer", "workbench.view.explorer", 0))
             .child(item(View::Git, style::git_icon(), "Git", "workbench.view.scm", count))
             .child(item(View::Search, Icon::new(IconName::Search), "Search", "workbench.view.search", 0))
+            .child(item(View::Projects, Icon::new(IconName::Folder), "Projects", "antler.showProjects", 0))
             .when(self.remote.is_some(), |el| el.child(item(View::Ports, Icon::new(IconName::Globe), "Ports", "~remote.forwardedPorts.focus", 0)))
             .child(div().flex_1())
             .child(self.manage_button(cx))
@@ -75,7 +77,6 @@ impl Antler {
         let this = cx.entity().downgrade();
         let updates = cx.global::<crate::update::Enabled>().0;
         let palette = crate::keys::label(cx, "Command Palette", "workbench.action.showCommands");
-        let connect = crate::keys::label(cx, "Connect to Host…", "remote.ssh.connect");
         let (settings, check) = (crate::keys::label(cx, "Settings", "workbench.action.openSettings"), "Check for Updates…");
         let shortcuts = crate::keys::label(cx, "Keyboard Shortcuts", "workbench.action.openGlobalKeybindings");
         let theme = crate::keys::label(cx, "Color Theme", "workbench.action.selectTheme");
@@ -86,32 +87,34 @@ impl Antler {
                 .ghost()
                 .icon(IconName::Settings)
                 .tooltip("Manage")
-                .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, cx| {
                     let (a, b, p, k, th) = (this.clone(), this.clone(), this.clone(), this.clone(), this.clone());
-                    let (ic, vs, cn) = (this.clone(), this.clone(), this.clone());
+                    let (ic, vs) = (this.clone(), this.clone());
                     let menu = menu.item(PopupMenuItem::new(palette.clone()).on_click(move |_, window, cx| {
                         p.update(cx, |t, cx| t.command_palette(&crate::goto_view::CommandPalette, window, cx)).ok();
                     }));
-                    let menu = menu.item(PopupMenuItem::new(connect.clone()).on_click(move |_, window, cx| {
-                        cn.update(cx, |t, cx| t.connect_to_host(&crate::ConnectToHost, window, cx)).ok();
-                    }));
-                    let menu = menu.item(PopupMenuItem::new(settings.clone()).on_click(move |_, window, cx| {
+                    let menu = menu.separator().item(PopupMenuItem::new(settings.clone()).on_click(move |_, window, cx| {
                         a.update(cx, |t, cx| t.open_settings(&crate::OpenSettings, window, cx)).ok();
                     }));
                     let menu = menu.item(PopupMenuItem::new(shortcuts.clone()).on_click(move |_, window, cx| {
                         k.update(cx, |t, cx| t.open_keyboard_shortcuts(&crate::OpenKeyboardShortcuts, window, cx)).ok();
                     }));
-                    let menu = menu.item(PopupMenuItem::new(theme.clone()).on_click(move |_, window, cx| {
-                        th.update(cx, |t, cx| t.select_theme(&crate::theme_view::SelectTheme, window, cx)).ok();
-                    }));
-                    let menu = menu.item(PopupMenuItem::new(icon_theme.clone()).on_click(move |_, window, cx| {
-                        ic.update(cx, |t, cx| t.select_icon_theme(&crate::theme_view::SelectIconTheme, window, cx)).ok();
-                    }));
-                    let menu = menu.item(PopupMenuItem::new(install.clone()).on_click(move |_, window, cx| {
-                        vs.update(cx, |t, cx| t.install_theme(&crate::theme_view::InstallThemeFromVsix, window, cx)).ok();
-                    }));
+                    let (theme_label, icon_theme_label, install_label) = (theme.clone(), icon_theme.clone(), install.clone());
+                    let (th, ic, vs) = (th.clone(), ic.clone(), vs.clone());
+                    let menu = menu.separator().submenu("Themes", window, cx, move |menu, _, _| {
+                        let (th, ic, vs) = (th.clone(), ic.clone(), vs.clone());
+                        menu.item(PopupMenuItem::new(theme_label.clone()).on_click(move |_, window, cx| {
+                            th.update(cx, |t, cx| t.select_theme(&crate::theme_view::SelectTheme, window, cx)).ok();
+                        }))
+                        .item(PopupMenuItem::new(icon_theme_label.clone()).on_click(move |_, window, cx| {
+                            ic.update(cx, |t, cx| t.select_icon_theme(&crate::theme_view::SelectIconTheme, window, cx)).ok();
+                        }))
+                        .item(PopupMenuItem::new(install_label.clone()).on_click(move |_, window, cx| {
+                            vs.update(cx, |t, cx| t.install_theme(&crate::theme_view::InstallThemeFromVsix, window, cx)).ok();
+                        }))
+                    });
                     menu.when(updates, |menu| {
-                        menu.item(PopupMenuItem::new(check).on_click(move |_, window, cx| {
+                        menu.separator().item(PopupMenuItem::new(check).on_click(move |_, window, cx| {
                             b.update(cx, |t, cx| t.check_for_updates(true, window, cx)).ok();
                         }))
                     })

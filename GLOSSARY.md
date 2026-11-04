@@ -6,7 +6,11 @@ A minimal, fast IDE for macOS: explorer, editor, git and remote over SSH. Nested
 
 **Root**:
 The folder open in a window; everything Antler shows lives under it.
-_Avoid_: Workspace, project
+_Avoid_: Workspace
+
+**Project**:
+A folder saved in the project list to switch to it quickly; opening it makes it the Root of a Window.
+_Avoid_: Favorite, bookmark, saved folder
 
 **Window**:
 One of the windows of the single Antler process. Each has its own Root (or none), tabs, editor groups and git queue; settings and keybindings are shared. A folder has at most one Window.

@@ -43,11 +43,6 @@ pub fn display(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
-/// File → Open Recent → Clear Recently Opened.
-pub fn clear(file: &Path) {
-    write(file, &[]);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,10 +114,4 @@ mod tests {
         assert_eq!(display(Path::new("/Users/me/x"), None), "/Users/me/x");
     }
 
-    #[test]
-    fn clear_empties_the_list() {
-        let (_tmp, file) = opened(&["a", "b"]);
-        clear(&file);
-        assert!(list(&file).is_empty());
-    }
 }
