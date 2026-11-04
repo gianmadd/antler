@@ -69,16 +69,14 @@ impl Antler {
     pub(crate) fn open_project_new(&mut self, _: &OpenProjectNewWindow, window: &mut Window, cx: &mut Context<Self>) {
         let Some(popup) = &self.project_picker else { return };
         let Some(index) = popup.state.read(cx).selected_index() else { return };
-        let Some(row) = popup.rows.get(index.row).cloned() else { return };
-        self.close_projects(&CloseProjects, window, cx);
-        self.open_project(row.project.path, true, window, cx);
+        self.confirm_project(index.row, true, window, cx);
     }
 
-    fn confirm_project_picker(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_project(&mut self, row: usize, new_window: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(popup) = &self.project_picker else { return };
         let Some(row) = popup.rows.get(row).cloned() else { return };
         self.close_projects(&CloseProjects, window, cx);
-        self.open_project(row.project.path, false, window, cx);
+        self.open_project(row.project.path, new_window, window, cx);
     }
 
     fn close_other_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -115,7 +113,7 @@ impl Antler {
             .max_h(px(420.))
             .items(items)
             .on_query(move |_, _, cx| { this.update_in(cx, |this, window, cx| this.refresh_project_picker(window, cx)).ok(); })
-            .on_confirm(move |ix, window, cx| { confirm.update(cx, |t, cx| t.confirm_project_picker(ix.row, window, cx)).ok(); });
+            .on_confirm(move |ix, window, cx| { confirm.update(cx, |t, cx| t.confirm_project(ix.row, false, window, cx)).ok(); });
         let status = if popup.loading { Some("Refreshing Projects…") } else { popup.error.as_deref() };
         Some(deferred(div().absolute().top(px(44.)).left_0().right_0().flex().justify_center().child(
             div().key_context("ProjectsPicker").w(px(600.)).shadow_lg().occlude()
