@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use gpui_kit::component::{
     IconName, WindowExt as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariants as _, DropdownButton},
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt as _, PopupMenuItem},
@@ -15,7 +15,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::style::{FG_DIM, FG_FAINT, HOVER, SIDE, c};
+use crate::style::{ACCENT, FG_DIM, FG_FAINT, HOVER, SIDE, c};
 use crate::workspace::View;
 use crate::{Antler, ShowProjects};
 actions!(antler, [CancelProjectName]);
@@ -145,13 +145,16 @@ impl Antler {
                         .text_color(c(FG_DIM))
                         .child(display_path),
                 ))
-                .child(h_flex().opacity(0.).group_hover(group, |s| s.opacity(1.)).child(
+                .child(
                     Button::new(format!("remove-project-{}", path.to_string_lossy()))
                         .ghost()
                         .xsmall()
                         .icon(IconName::Close)
                         .tooltip("Remove Project")
                         .accessibility_label("Remove Project")
+                        .opacity(0.)
+                        .group_hover(group.clone(), |s| s.opacity(1.))
+                        .focus_visible(|s| s.opacity(1.).border_1().border_color(c(ACCENT)))
                         .on_click(cx.listener({
                             let path = remove_path.clone();
                             move |this, _, _, cx| {
@@ -159,7 +162,39 @@ impl Antler {
                                 this.remove_project(path.clone(), cx)
                             }
                         })),
-                ))
+                )
+                .child(
+                    DropdownButton::new(format!("project-actions-{}", path.to_string_lossy()))
+                        .button(
+                            Button::new(format!("project-actions-button-{}", path.to_string_lossy()))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Ellipsis)
+                                .tooltip("Project Actions")
+                                .accessibility_label("Project Actions")
+                                .opacity(0.)
+                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                .focus_visible(|s| s.opacity(1.).border_1().border_color(c(ACCENT)))
+                                .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation())),
+                        )
+                        .menu_accessibility_label("Project actions")
+                        .dropdown_menu({
+                            let weak = weak.clone();
+                            let (open, rename, remove, copy) = (
+                                new_window_path.clone(),
+                                rename_path.clone(),
+                                remove_path.clone(),
+                                copy_path.clone(),
+                            );
+                            move |menu, _, _| {
+                                let (open, rename, remove, copy) = (open.clone(), rename.clone(), remove.clone(), copy.clone());
+                                menu.item(crate::menu_item(&weak, "Open in New Window", move |this, window, cx| this.open_project(open.clone(), true, window, cx)))
+                                    .item(crate::menu_item(&weak, "Rename", move |this, window, cx| this.rename_project(rename.clone(), window, cx)))
+                                    .item(crate::menu_item(&weak, "Remove", move |this, _, cx| this.remove_project(remove.clone(), cx)))
+                                    .item(PopupMenuItem::new("Copy Path").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.display().to_string()))))
+                            }
+                        }),
+                )
                 .when(!renaming, |el| el.on_click(cx.listener(move |this, _, window, cx| {
                     this.open_project(path.clone(), false, window, cx)
                 })))
