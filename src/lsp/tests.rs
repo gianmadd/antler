@@ -2,6 +2,65 @@ use super::*;
 use std::{fs, os::unix::fs::PermissionsExt, thread, time::Duration};
 use tempfile::tempdir;
 
+struct BlockingExistsHost {
+    caller: thread::ThreadId,
+    called_on_caller: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: std::sync::Arc<std::sync::Barrier>,
+}
+
+impl crate::host::Host for BlockingExistsHost {
+    fn supports_processes(&self) -> bool { true }
+    fn read(&self, _: &Path) -> std::io::Result<Vec<u8>> { unreachable!() }
+    fn write(&self, _: &Path, _: &[u8]) -> std::io::Result<()> { unreachable!() }
+    fn create(&self, _: &Path, _: bool) -> std::io::Result<PathBuf> { unreachable!() }
+    fn rename(&self, _: &Path, _: &Path) -> std::io::Result<()> { unreachable!() }
+    fn copy(&self, _: &Path, _: &Path) -> std::io::Result<()> { unreachable!() }
+    fn trash(&self, _: &Path) -> Result<Option<PathBuf>, String> { unreachable!() }
+    fn remove_file(&self, _: &Path) -> std::io::Result<()> { unreachable!() }
+    fn metadata(&self, _: &Path) -> std::io::Result<crate::host::Meta> { unreachable!() }
+    fn exists(&self, _: &Path) -> bool {
+        if thread::current().id() == self.caller {
+            self.called_on_caller.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+            self.release.wait();
+        }
+        false
+    }
+    fn list_dir(&self, _: &Path) -> Vec<(PathBuf, bool)> { unreachable!() }
+    fn discover(&self, _: &Path, _: usize) -> Vec<crate::discovery::Repo> { unreachable!() }
+    fn files_chunked(&self, _: &Path, _: &[PathBuf], _: &std::sync::atomic::AtomicBool, _: &mut dyn FnMut(Vec<PathBuf>)) -> bool { unreachable!() }
+    fn search_chunked(&self, _: &Path, _: &[PathBuf], _: &crate::search::Query, _: usize, _: &std::sync::atomic::AtomicBool, _: &mut dyn FnMut(Vec<crate::search::FileMatches>)) -> crate::search::Results { unreachable!() }
+    fn watch(&self, _: &Path, _: Box<dyn Fn(PathBuf) + Send>) -> Result<crate::host::WatchGuard, String> { unreachable!() }
+    fn git(&self, _: &Path, _: &[&str], _: Option<&str>, _: crate::host::Envs<'_>) -> Result<String, String> { unreachable!() }
+}
+
+#[test]
+fn sync_resolves_source_folder_off_the_calling_thread() {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let called_on_caller = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_release = release.clone();
+    let worker_called_on_caller = called_on_caller.clone();
+    let caller = thread::spawn(move || {
+        let host = std::sync::Arc::new(BlockingExistsHost {
+            caller: thread::current().id(),
+            called_on_caller: worker_called_on_caller,
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            release: worker_release,
+        });
+        let mut servers = Servers::new(host, PathBuf::from("/root"), LspSettings::default());
+        let path = PathBuf::from("/root/file.py");
+        servers.sync(std::iter::once((path.as_path(), "text")));
+    });
+    entered_rx.recv_timeout(Duration::from_secs(1)).expect("source folder lookup started");
+    release.wait();
+    caller.join().unwrap();
+    assert!(!called_on_caller.load(std::sync::atomic::Ordering::SeqCst));
+}
+
 fn server_script(path: &Path) -> PathBuf {
     let script = path.join("standin.py");
     let body = format!(
@@ -294,6 +353,7 @@ fn cancelling_a_hung_initialize_kills_the_process_tree_promptly() {
     });
     servers.sync(std::iter::once((path.as_path(), "x")));
     for _ in 0..100 {
+        servers.sync(std::iter::once((path.as_path(), "x")));
         if pid_file.exists() { break; }
         thread::sleep(Duration::from_millis(10));
     }

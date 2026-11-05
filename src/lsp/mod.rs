@@ -92,11 +92,17 @@ struct Starting {
     result: std::sync::mpsc::Receiver<(Option<Server>, bool)>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
+struct OpenDocument {
+    text: String,
+    key: ServerKey,
+    version: i32,
+}
 pub struct Servers {
     host: Arc<dyn Host>,
     root: PathBuf,
     settings: LspSettings,
-    docs: HashMap<PathBuf, (String, ServerKey, i32)>,
+    docs: HashMap<PathBuf, OpenDocument>,
+    resolving: HashMap<PathBuf, std::sync::mpsc::Receiver<ServerKey>>,
     servers: HashMap<ServerKey, Server>,
     starting: HashMap<ServerKey, Starting>,
     notified: HashSet<&'static str>,
@@ -114,6 +120,7 @@ impl Servers {
             root,
             settings,
             docs: HashMap::new(),
+            resolving: HashMap::new(),
             servers: HashMap::new(),
             starting: HashMap::new(),
             notified: HashSet::new(),
@@ -157,20 +164,41 @@ impl Servers {
             }
         }
         self.handle_exits();
-        let mut now = HashMap::new();
-        for (path, text) in open
+        let open = open
             .filter(|(p, _)| matches!(p.extension().and_then(|s| s.to_str()), Some("py" | "pyi")))
-        {
-            let Some(def) = language(path) else { continue };
-            let key = ServerKey {
-                language: def.language,
-                folder: self
-                    .docs
-                    .get(path)
-                    .map(|(_, key, _)| key.folder.clone())
-                    .unwrap_or_else(|| {
-                        source_folder(&self.root, path, def.markers, |p| self.host.exists(p))
-                    }),
+            .map(|(path, text)| (path.to_path_buf(), text.to_string()))
+            .collect::<HashMap<_, _>>();
+        self.resolving.retain(|path, _| open.contains_key(path));
+        let resolved = self
+            .resolving
+            .iter()
+            .filter_map(|(path, result)| result.try_recv().ok().map(|key| (path.clone(), key)))
+            .collect::<HashMap<_, _>>();
+        for path in resolved.keys() {
+            self.resolving.remove(path);
+        }
+        let mut now = HashMap::new();
+        for (path, text) in open {
+            let Some(def) = language(&path) else { continue };
+            let key = self
+                .docs
+                .get(&path)
+                .map(|doc| doc.key.clone())
+                .or_else(|| resolved.get(&path).cloned());
+            let Some(key) = key else {
+                if !self.resolving.contains_key(&path) {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let host = self.host.clone();
+                    let root = self.root.clone();
+                    let path_for_thread = path.clone();
+                    let markers = def.markers;
+                    std::thread::spawn(move || {
+                        let folder = source_folder(&root, &path_for_thread, markers, |p| host.exists(p));
+                        let _ = tx.send(ServerKey { language: def.language, folder });
+                    });
+                    self.resolving.insert(path, rx);
+                }
+                continue;
             };
             if !self.servers.contains_key(&key)
                 && !self.starting.contains_key(&key)
@@ -179,7 +207,7 @@ impl Servers {
             {
                 self.start(&key);
             }
-            now.insert(path.to_path_buf(), (text.to_string(), key, 0));
+            now.insert(path, OpenDocument { text, key, version: 0 });
         }
         let gone = self
             .docs
@@ -189,7 +217,7 @@ impl Servers {
             .collect::<Vec<_>>();
         let active_keys = now
             .values()
-            .map(|(_, key, _)| key.clone())
+            .map(|doc| doc.key.clone())
             .collect::<HashSet<_>>();
         let unused = self
             .starting
@@ -205,7 +233,8 @@ impl Servers {
             }
         }
         for p in gone {
-            if let Some((_, k, _)) = self.docs.remove(&p) {
+            if let Some(doc) = self.docs.remove(&p) {
+                let k = doc.key;
                 if let Some(s) = self.servers.get_mut(&k) {
                     if s.opened.remove(&p) {
                         s.client.notify(
@@ -216,21 +245,21 @@ impl Servers {
                 }
             }
         }
-        for (p, (text, k, v)) in &mut now {
-            let changed = self.docs.get(p).is_some_and(|(old, _, _)| old != text);
+        for (p, doc) in &mut now {
+            let changed = self.docs.get(p).is_some_and(|old| old.text != doc.text);
             let version = self
                 .docs
                 .get(p)
-                .map_or(1, |(_, _, v)| v + i32::from(changed));
-            if let Some(s) = self.servers.get_mut(k) {
+                .map_or(1, |old| old.version + i32::from(changed));
+            if let Some(s) = self.servers.get_mut(&doc.key) {
                 if !s.opened.contains(p) {
-                    s.client.notify("textDocument/didOpen",serde_json::json!({"textDocument":{"uri":uri(p),"languageId":"python","version":version,"text":text}}));
+                    s.client.notify("textDocument/didOpen",serde_json::json!({"textDocument":{"uri":uri(p),"languageId":"python","version":version,"text":doc.text}}));
                     s.opened.insert(p.clone());
                 } else if changed {
-                    s.client.notify("textDocument/didChange",serde_json::json!({"textDocument":{"uri":uri(p),"version":version},"contentChanges":[{"text":text}]}));
+                    s.client.notify("textDocument/didChange",serde_json::json!({"textDocument":{"uri":uri(p),"version":version},"contentChanges":[{"text":doc.text}]}));
                 }
             }
-            *v = version;
+            doc.version = version;
         }
         self.docs = now;
     }
@@ -372,6 +401,7 @@ impl Servers {
         }
         let clients = self.servers.drain().map(|(_, server)| server.client).collect();
         self.docs.clear();
+        self.resolving.clear();
         clients
     }
     pub fn shutdown_now(&mut self) {
@@ -383,10 +413,12 @@ impl Servers {
             server.client.kill_now();
         }
         self.docs.clear();
+        self.resolving.clear();
     }
     fn stop(&mut self) {
         self.stop_preserving_documents();
         self.docs.clear();
+        self.resolving.clear();
         self.crash_exits.clear();
         self.stopped.clear();
     }
@@ -563,18 +595,18 @@ pub(crate) fn targets_with_text(host: &dyn Host, locations: Vec<lsp_types::Locat
 }
 impl Servers {
     pub fn handle(&self, path: &Path) -> Option<Handle> {
-        let (_, key, _) = self.docs.get(path)?;
-        let client = self.servers.get(key)?.client.clone();
+        let doc = self.docs.get(path)?;
+        let client = self.servers.get(&doc.key)?.client.clone();
         (client.is_alive()
             && self
                 .servers
-                .get(key)
+                .get(&doc.key)
                 .is_some_and(|s| s.opened.contains(path)))
         .then(|| Handle {
             client,
             path: path.to_path_buf(),
             host: self.host.clone(),
-            open_texts: Arc::new(self.docs.iter().map(|(path, (text, _, _))| (path.clone(), text.clone())).collect()),
+            open_texts: Arc::new(self.docs.iter().map(|(path, doc)| (path.clone(), doc.text.clone())).collect()),
         })
     }
 }
