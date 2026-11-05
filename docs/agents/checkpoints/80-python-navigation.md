@@ -45,3 +45,10 @@ Rust is available through `PATH=/opt/homebrew/opt/rustup/bin:$PATH` on this mach
 ## Temporary UI fixtures
 
 The session used `/tmp/AntlerNavigationCheck.app` with its own bundle identifier, `/tmp/antler-navigation-ui` (local function, `attrs` in `.venv`, builtin and abstract-class examples), and `/tmp/antler-lsp-check/bin/basedpyright-langserver`. These paths are temporary and may need recreation. The test app was quit at the checkpoint. No worker should continue implementation until the user resumes.
+
+## Status 2026-11-05
+
+- #84, #85 and #86 are merged into `feat/80-python-navigation` (`7d396fc`). Restart/quit recheck found no bugs; added the two-group Workspace test and a portable interpreter test.
+- Final reviews done. code-review: Standards found a blocking `Host::exists` on the UI thread in `Servers::sync` (fixed: source folder resolved on a background thread) and a document tuple (now `OpenDocument`); Spec and ponytail-review had no findings.
+- `cargo test --workspace` passes (471 app tests, 1 ignored; host, daemon, ports, reconnect, remote, stream). `cargo check -p antler-host --target x86_64-pc-windows-msvc` passes.
+- Pending: the running-app check with a real basedpyright (fixtures recreated under `/tmp`; started only when the user says so), the #2 CodeLens limitation note (tracker edit was blocked by permissions), then closing #82–#87 and #80 and removing worktrees.
