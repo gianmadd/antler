@@ -341,6 +341,23 @@ impl Handle {
         self.client.request(method, params)
     }
 
+    /// Request hover information. None on no result, error or timeout.
+    pub fn hover(&self, text: &str, line: usize, column: usize) -> Option<lsp_types::Hover> {
+        use lsp_types::{HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams};
+        let uri = url::Url::from_file_path(&self.path).ok()?.as_str().parse().ok()?;
+        let source_line = text.lines().nth(line).unwrap_or("");
+        let position = Position::new(line as u32, char_to_utf16(source_line, column) as u32);
+        let params = HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        };
+        let value = self.request("textDocument/hover", serde_json::to_value(params).ok()?).ok()?;
+        serde_json::from_value(value).ok().flatten()
+    }
+
     /// Request a navigation destination. Columns from the editor are Unicode scalar offsets.
     pub fn jump(&self, kind: Jump, text: &str, line: usize, column: usize) -> Vec<Target> {
         use lsp_types::{Position, TextDocumentIdentifier};
@@ -380,6 +397,18 @@ pub(crate) fn utf16_to_char(text: &str, column: usize) -> usize {
         if units == column { return text[..ix + ch.len_utf8()].chars().count(); }
     }
     text.chars().count()
+}
+
+pub(crate) fn hover_to_char_range(text: &str, range: lsp_types::Range) -> lsp_types::Range {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut range = range;
+    for position in [&mut range.start, &mut range.end] {
+        position.character = utf16_to_char(
+            lines.get(position.line as usize).copied().unwrap_or(""),
+            position.character as usize,
+        ) as u32;
+    }
+    range
 }
 
 pub(crate) fn targets(host: &dyn Host, locations: Vec<lsp_types::Location>) -> Vec<Target> {
@@ -454,6 +483,12 @@ mod pure_tests {
         assert_eq!(char_to_utf16(line, 3), 4);
         assert_eq!(utf16_to_char(line, 4), 3);
         assert_eq!(utf16_to_char(line, 2), 2);
+    }
+
+    #[test]
+    fn hover_ranges_convert_utf16_columns_to_editor_columns() {
+        let range = lsp_types::Range::new(lsp_types::Position::new(0, 4), lsp_types::Position::new(0, 6));
+        assert_eq!(hover_to_char_range("aé😀z", range), lsp_types::Range::new(lsp_types::Position::new(0, 3), lsp_types::Position::new(0, 4)));
     }
 
     #[test]

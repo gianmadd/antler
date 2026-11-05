@@ -1,6 +1,6 @@
 use gpui_kit::*;
 use gpui_kit::component::input::RopeExt;
-use gpui_kit::component::input::{DefinitionProvider, EditorState, ShowDocumentHandler};
+use gpui_kit::component::input::{DefinitionProvider, EditorState, HoverProvider, ShowDocumentHandler};
 use ropey::Rope;
 use std::{path::PathBuf, rc::Rc};
 
@@ -32,10 +32,29 @@ impl DefinitionProvider for EditorLsp {
     }
 }
 
+impl HoverProvider for EditorLsp {
+    fn hover(&self, text: &Rope, offset: usize, _window: &mut Window, cx: &mut App) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
+        let handle = self.antler.update(cx, |this, _| this.ws.lsp.handle(&self.path)).ok().flatten();
+        let Some(handle) = handle else { return Task::ready(Ok(None)) };
+        let position = text.offset_to_position(offset.min(text.len_chars()));
+        let line = position.line as usize;
+        let column = position.character as usize;
+        let source = text.to_string();
+        cx.background_spawn(async move {
+            let Some(mut hover) = handle.hover(&source, line, column) else { return Ok(None) };
+            if let Some(range) = &mut hover.range {
+                *range = crate::lsp::hover_to_char_range(&source, *range);
+            }
+            Ok(Some(hover))
+        })
+    }
+}
+
 pub(crate) fn attach_lsp(editor: &mut EditorState, antler: WeakEntity<Antler>, path: PathBuf) {
     let source_path = path.clone();
     let provider = Rc::new(EditorLsp { antler: antler.clone(), path });
     editor.lsp_mut().definition_provider = Some(provider.clone());
+    editor.lsp_mut().hover_provider = Some(provider);
     let show: ShowDocumentHandler = Rc::new(move |params, _window, cx| {
         let Some(path) = url::Url::parse(params.uri.as_str()).ok().and_then(|url| url.to_file_path().ok()) else { return false };
         let loc = lsp_types::Location { uri: params.uri.clone(), range: params.selection.unwrap_or_default() };

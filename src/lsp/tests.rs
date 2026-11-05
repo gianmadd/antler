@@ -32,6 +32,9 @@ while True:
         link = {{"targetUri":uri,"targetRange":rng,"targetSelectionRange":rng}}
         result = loc if line == 0 else [loc,loc] if line == 1 else [link,link] if line == 2 else None
         send({{"jsonrpc":"2.0", "id":msg["id"], "result":result}})
+    elif method == "textDocument/hover":
+        result = {{"contents":{{"kind":"markdown", "value":"```python\ndef f(x: int) -> str: ...\n```\nDocs"}}, "range":{{"start":{{"line":0,"character":4}},"end":{{"line":0,"character":6}}}}}} if msg["params"]["position"]["line"] == 0 else None
+        send({{"jsonrpc":"2.0", "id":msg["id"], "result":result}})
     elif method == "shutdown": send({{"jsonrpc":"2.0", "id":msg["id"], "result":None}})
     elif method == "exit": sys.exit(0)
 "##,
@@ -97,6 +100,27 @@ fn jump_maps_every_lsp_location_shape_and_uses_utf16_columns() {
     assert!(handle.jump(Jump::Definition, &text, 3, 0).is_empty());
     let requests = wait_trace(root, |messages| messages.iter().filter(|v| v.pointer("/msg/method").and_then(|m| m.as_str()).is_some_and(|m| m.starts_with("textDocument/"))).count() >= 4);
     assert!(requests.iter().any(|v| v.pointer("/msg/params/position/character").and_then(|v| v.as_u64()) == Some(3)));
+    servers.shutdown();
+}
+
+#[test]
+fn hover_returns_markdown_and_none_when_server_has_no_answer() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let program = server_script(root);
+    let source = root.join("source.py");
+    let text = "aé😀z\nmissing".to_string();
+    let open = vec![(source.clone(), text.clone())];
+    let mut servers = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings { python_path: Some(program.to_string_lossy().into_owned()), ..Default::default() });
+    wait_for(&mut servers, &open);
+    let handle = servers.handle(&source).unwrap();
+    let hover = handle.hover(&text, 0, 3).unwrap();
+    assert_eq!(hover.contents, lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+        kind: lsp_types::MarkupKind::Markdown,
+        value: "```python\ndef f(x: int) -> str: ...\n```\nDocs".into(),
+    }));
+    assert_eq!(hover.range.unwrap().start.character, 4);
+    assert!(handle.hover(&text, 1, 0).is_none());
     servers.shutdown();
 }
 
