@@ -11,6 +11,11 @@ repository = "https://github.com/gianmadd/antler"
 members = [".", "crates/antler-host", "crates/antler-server"]
 
 [dependencies]
+# Already built by gpui-component: editor providers and file URI conversion.
+lsp-types = "0.97.0"
+anyhow = "1"
+ropey = "=2.0.0-beta.1"
+url = "2.5"
 antler-host = { path = "crates/antler-host" }
 gpui-kit = { version = "=0.8.1", features = [
     # every grammar of "tree-sitter-languages" except sql: tree-sitter-sequel pins cc ~1.2, which conflicts with the locked cc

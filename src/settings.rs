@@ -65,6 +65,10 @@ pub struct Settings {
     /// "default" or "none" only: with "none" no automatic check and no Check for Updates… in the menu (read at startup).
     #[serde(rename = "update.mode")]
     pub update_mode: UpdateMode,
+    #[serde(rename = "python.languageServer")]
+    pub python_language_server: String,
+    #[serde(rename = "antler.python.languageServerPath")]
+    pub python_language_server_path: String,
     /// "" is the theme's monospace font.
     #[serde(rename = "editor.fontFamily")]
     pub editor_font_family: String,
@@ -197,6 +201,8 @@ impl Default for Settings {
             editor_minimap_enabled: true,
             editor_minimap_render_characters: true,
             update_mode: UpdateMode::Default,
+            python_language_server: "Default".into(),
+            python_language_server_path: String::new(),
             editor_font_family: String::new(),
             editor_font_size: 13.,
             editor_tab_size: 4,

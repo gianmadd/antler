@@ -26,13 +26,17 @@ mod icon_themes;
 mod icons;
 mod keybindings_view;
 mod keys;
+mod lsp;
 mod minimap;
+mod location_picker;
 mod minimap_view;
+mod nav;
 mod quick_diff;
 mod search;
 mod search_view;
 mod recent;
 mod remote_view;
+mod references_view;
 mod settings;
 mod settings_view;
 mod ssh;
@@ -73,7 +77,7 @@ use style::{ACT, FG, FG_DIM, LINE_SOFT, MAIN, SIDE, c};
 use windows::{Registry, WindowSave};
 use workspace::{GitRow, Op, View, Workspace};
 
-actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch, ShowProjects]);
+actions!(antler, [CloseTab, Commit, OpenFolder, Save, Quit, ShowExplorer, ShowGit, ShowSearch, ShowProjects, RestartLanguageServer]);
 actions!(antler, [CloseFolder, CheckForUpdates, SaveAll, ToggleSidebar, OpenSettings, OpenKeyboardShortcuts, ToggleBlameStatusBar, ToggleBlameEditorDecoration]);
 actions!(antler, [NewWindow, CloseWindow, MinimizeWindow, FocusNextWindow]);
 use remote_view::{CloseRemoteConnection, ConnectToHost, RemoteWin};
@@ -213,6 +217,7 @@ pub(crate) struct Antler {
     minimaps: HashMap<PathBuf, minimap_view::Minimap>,
     /// Last cursor (line, column) seen in an editor: the status bar redraws only when it moves.
     cursor: (u32, u32),
+    reference_generation: u64,
     /// Alt+Z: soft wrap in every editor (VS Code's `editor.wordWrap`, off by default).
     wrap: bool,
     /// Cmd+= / Cmd+-: the editors' font size; `None` is the theme's.
@@ -229,6 +234,7 @@ pub(crate) struct Antler {
     projects_view: projects_view::State,
     _projects_sub: Subscription,
     project_picker: Option<projects_picker::Popup>,
+    location_picker: Option<location_picker::Popup>,
     project_picker_generation: u64,
     /// Search view: the Replace, "files to include" and "files to exclude" fields.
     search_fields: search_view::SearchFields,
@@ -316,6 +322,7 @@ impl Antler {
             editors: HashMap::new(),
             minimaps: HashMap::new(),
             cursor: (0, 0),
+            reference_generation: 0,
             wrap: initial.editor_word_wrap == settings::WordWrap::On,
             font_size: Some(px(initial.editor_font_size)),
             cursors: vec![],
@@ -325,6 +332,7 @@ impl Antler {
             projects_view,
             _projects_sub: projects_sub,
             project_picker: None,
+            location_picker: None,
             project_picker_generation: 0,
             search_fields: search_view::SearchFields::new(window, cx),
             git_list: ListState::new(0, ListAlignment::Top, px(200.)),
@@ -399,7 +407,8 @@ impl Antler {
     }
 
     /// The last window to close is what the next start restores, if the app quits with none open.
-    fn leaving(&self, cx: &mut Context<Self>) {
+    fn leaving(&mut self, cx: &mut Context<Self>) {
+        self.ws.lsp.shutdown();
         // the window is going: its connection ends now (docs/agents/remote.md), even if a job still holds the Remote
         self.remote.iter().for_each(|r| r.remote.close());
         if cx.global::<Windows>().0.len() == 1 {
@@ -767,6 +776,7 @@ impl Render for Antler {
             Some(View::Search) => Some(self.search_view(cx).into_any_element()),
             Some(View::Projects) => Some(self.projects_view(cx).into_any_element()),
             Some(View::Ports) => Some(self.ports_view(cx).into_any_element()),
+            Some(View::References) => Some(self.render_references(window, cx).into_any_element()),
             None => None,
         };
         let content = match side {
@@ -788,6 +798,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::restart_language_server))
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| window.minimize_window()))
@@ -809,6 +820,7 @@ impl Render for Antler {
             .on_action(cx.listener(Self::toggle_blame_editor_decoration))
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::show_search))
+            .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::show_projects))
             .on_action(cx.listener(Self::show_ports))
             .on_action(cx.listener(Self::forward_a_port))
@@ -817,6 +829,12 @@ impl Render for Antler {
             .on_action(cx.listener(Self::quick_text_search))
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::go_to_line))
+            .on_action(cx.listener(Self::go_back))
+            .on_action(cx.listener(Self::go_forward))
+            .on_action(cx.listener(Self::go_to_definition_action))
+            .on_action(cx.listener(Self::go_to_type_definition_action))
+            .on_action(cx.listener(Self::go_to_implementation_action))
+            .on_action(cx.listener(Self::close_location_picker))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::select_icon_theme))
             .on_action(cx.listener(Self::install_theme))
@@ -842,6 +860,7 @@ impl Render for Antler {
             })
             .child(status)
             .children(self.go_to_popup(cx))
+            .children(self.location_picker_popup(cx))
             .children(self.projects_popup(cx))
             .children(self.picker_popup(cx))
             .children(self.theme_popup(cx))
@@ -886,7 +905,7 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
     }
     let mut ws = Workspace::new(root);
     if let Some(l) = &link {
-        ws.host = l.remote.clone();
+        ws.set_host(l.remote.clone());
     }
     let mut restored = Vec::new(); // the tabs of a split layout, to read once there is a window
     ws.apply_settings(&s);
@@ -919,6 +938,17 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
             for path in bench_open.split(':').filter(|p| !p.is_empty()) {
                 antler.open_path(PathBuf::from(path), None, None, true, cx);
             }
+            let this = cx.entity().downgrade();
+            cx.spawn_in(window, async move |_, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                    if this.update_in(cx, |this, _, cx| {
+                        if this.ws.lsp.busy() { cx.notify(); }
+                    }).is_err() {
+                        return;
+                    }
+                }
+            }).detach();
             antler
         })
     })
@@ -1026,7 +1056,11 @@ fn main() {
         // hot exit: every window's folder, editor groups and Untitled files go into the state file on quit and come back at the next start
         cx.on_app_quit(|cx| {
             // close first: a supervisor would answer the loss of a swept master by starting a new one
-            cx.global::<Windows>().0.iter().filter_map(|e| e.view.1.upgrade()).for_each(|v| v.read(cx).remote.iter().for_each(|r| r.remote.close()));
+            let views: Vec<_> = cx.global::<Windows>().0.iter().filter_map(|e| e.view.1.upgrade()).collect();
+            for view in &views {
+                let _ = view.update(cx, |this, _| this.ws.lsp.shutdown_now());
+                view.read(cx).remote.iter().for_each(|r| r.remote.close());
+            }
             ssh::sweep_own();
             if let Some(f) = state::default_path() {
                 let mut list: Vec<WindowSave> = cx.global::<Windows>().0.iter().filter_map(|e| e.view.1.upgrade()).map(|v| v.read(cx).window_save()).collect();

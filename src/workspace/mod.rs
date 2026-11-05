@@ -12,6 +12,7 @@ use crate::host::{self, Host};
 use crate::search::{self, Query, Results, SearchJob};
 
 pub mod activity_bar;
+pub mod history;
 mod groups;
 mod ops;
 mod scan;
@@ -78,9 +79,11 @@ fn blame_line_map(old_text: &str, new_text: &str) -> Vec<Option<usize>> {
 }
 
 pub struct Workspace {
+    pub lsp: crate::lsp::Servers,
     /// Where the Root lives: this machine, or a Remote host. Jobs carry it to their background thread.
     pub host: Arc<dyn Host>,
     pub root: PathBuf,
+    pub history: history::History,
     pub depth: usize,
     pub sections: Vec<Section>,
     /// "nascondi repo puliti": leave Sections without changes out of the panel.
@@ -148,6 +151,7 @@ pub struct Workspace {
     changed: HashSet<PathBuf>,
     pub search: Search,
     pub quick_search: QuickSearch,
+    pub references: Option<crate::lsp::References>,
     /// Cmd+P "Go to File".
     pub goto: crate::goto::GoTo,
     /// The last clicked row of any list (Explorer, Git, Ricerca, Grafo), as a key the view builds; drawn with `--sel`.
@@ -182,11 +186,12 @@ pub enum View {
     Projects,
     /// Forwarded ports: Remote windows only.
     Ports,
+    References,
 }
 
 impl View {
     /// Default Activity bar order.
-    pub const ALL: [View; 5] = [View::Explorer, View::Git, View::Search, View::Projects, View::Ports];
+    pub const ALL: [View; 6] = [View::Explorer, View::Git, View::Search, View::Projects, View::Ports, View::References];
 
     /// The setting id for this view.
     pub fn id(self) -> &'static str {
@@ -196,6 +201,7 @@ impl View {
             View::Search => "search",
             View::Projects => "projects",
             View::Ports => "ports",
+            View::References => "references",
         }
     }
 
@@ -206,8 +212,17 @@ impl View {
 }
 
 impl Workspace {
+    pub fn set_host(&mut self, host: Arc<dyn Host>) {
+        self.lsp = crate::lsp::Servers::new(host.clone(), self.root.clone(), Default::default());
+        self.host = host;
+    }
     /// Takes the settings the model reads; the view rescans when one that shapes the scan or the tree changed.
     pub fn apply_settings(&mut self, s: &crate::settings::Settings) {
+        self.lsp.set_settings(crate::lsp::LspSettings {
+            python_off: s.python_language_server == "None",
+            python_path: (!s.python_language_server_path.is_empty())
+                .then(|| s.python_language_server_path.clone()),
+        });
         self.depth = s.scan_depth;
         self.hide_clean = s.hide_clean_repos;
         self.auto_save = (s.auto_save == crate::settings::AutoSave::AfterDelay).then(|| Duration::from_millis(s.auto_save_delay));
@@ -221,12 +236,15 @@ impl Workspace {
 
     /// An empty workspace on `root`; nothing is loaded until `apply(scan(..))`.
     pub fn new(root: PathBuf) -> Self {
+        #[cfg(not(test))]
+        let host = crate::host::local();
+        #[cfg(test)]
+        let host = crate::testing::host();
         Workspace {
-            #[cfg(not(test))]
-            host: crate::host::local(),
-            #[cfg(test)]
-            host: crate::testing::host(),
+            lsp: crate::lsp::Servers::new(host.clone(), root.clone(), Default::default()),
+            host,
             root,
+            history: history::History::default(),
             depth: DEFAULT_DEPTH,
             sections: Vec::new(),
             hide_clean: false,
@@ -266,6 +284,7 @@ impl Workspace {
             changed: HashSet::new(),
             search: Search::default(),
             quick_search: QuickSearch::default(),
+            references: None,
             goto: Default::default(),
             selected: None,
             also_selected: Vec::new(),
@@ -279,6 +298,16 @@ impl Workspace {
             undo_ops: Vec::new(),
             redo_ops: Vec::new(),
         }
+    }
+
+    pub fn sync_documents(&mut self) {
+        self.lsp.sync(
+            self.tabs
+                .iter()
+                .filter_map(|t| t.file())
+                .filter(|f| !f.loading && !f.untitled && f.error.is_none())
+                .map(|f| (f.path.as_path(), f.text.as_str())),
+        );
     }
 
     /// Active file's owning repository, repo-relative path and current text.

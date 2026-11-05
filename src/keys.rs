@@ -13,6 +13,9 @@ use crate::branch_view::CloseBranch;
 use crate::explorer::*;
 use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
 use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine, QuickSearchInSearchView, QuickTextSearch};
+use crate::nav::{FindReferences, GoBack, GoForward, GoToDefinition, GoToImplementation};
+use crate::nav::GoToTypeDefinition;
+use crate::location_picker::CloseLocationPicker;
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
 use crate::projects_picker::{AcceptProjectPath, CloseProjects, OpenProjectNewWindow, OpenProjects, SaveProjectPath};
@@ -20,7 +23,7 @@ use crate::tabs::*;
 use crate::ports_view::{ForwardPort, ShowPorts, StopForwardingPort};
 use crate::projects_view::CancelProjectName;
 use crate::remote_view::{CloseRemoteConnection, ConnectToHost};
-use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ShowProjects, ToggleBlameEditorDecoration, ToggleBlameStatusBar, ToggleSidebar, set_menus};
+use crate::{CheckForUpdates, CloseFolder, CloseTab, CloseWindow, Commit, FocusNextWindow, MinimizeWindow, NewWindow, OpenFolder, OpenKeyboardShortcuts, OpenSettings, Quit, RestartLanguageServer, Save, SaveAll, ShowExplorer, ShowGit, ShowSearch, ShowProjects, ToggleBlameEditorDecoration, ToggleBlameStatusBar, ToggleSidebar, set_menus};
 
 /// Where a binding applies: a GPUI key context, and the name `when` uses in keybindings.json.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -38,6 +41,7 @@ pub(crate) enum Ctx {
     Branch,
     Stash,
     ProjectsPicker,
+    LocationPicker,
     ExplorerName,
     ProjectName,
 }
@@ -56,6 +60,7 @@ impl Ctx {
             Ctx::Branch => "Branch > Command",
             Ctx::Stash => "Stash > Command",
             Ctx::ProjectsPicker => "ProjectsPicker > Command",
+            Ctx::LocationPicker => "LocationPicker > Command",
             Ctx::ExplorerName => "ExplorerName > Input",
             Ctx::ProjectName => "ProjectName > Input",
         })
@@ -135,6 +140,7 @@ macro_rules! cmds {
 // A key bound twice, in the same context, to two commands is a test failure. Several rows with one id are
 // several keys (or contexts) of one command. Rows with no key are bound by gpui-component itself or by nothing.
 cmds![
+    ("python.analysis.restartLanguageServer", "Python: Restart Language Server", "", Global, RestartLanguageServer),
     // File
     ("workbench.action.files.newUntitledFile", "New File", "cmd-n", Global, NewUntitledFile),
     ("workbench.action.newWindow", "New Window", "shift-cmd-n", Global, NewWindow),
@@ -221,6 +227,14 @@ cmds![
     ("workbench.action.quickTextSearch", "Quick Text Search", "", Global, QuickTextSearch),
     ("antler.quickSearchInSearchView", "Open in Search View", "shift-cmd-f", GoTo, QuickSearchInSearchView),
     ("workbench.action.gotoLine", "Go to Line…", "ctrl-g", Global, GoToLine),
+    ("workbench.action.navigateBack", "Go Back", "ctrl--", Global, GoBack),
+    ("workbench.action.navigateForward", "Go Forward", "ctrl-shift--", Global, GoForward),
+    ("editor.action.goToReferences", "Find All References", "shift-f12", Editor, FindReferences),
+    ("references-view.findReferences", "Find All References", "shift-alt-f12", Editor, FindReferences),
+    ("editor.action.revealDefinition", "Go to Definition", "f12", Editor, GoToDefinition),
+    ("editor.action.goToImplementation", "Go to Implementation", "cmd-f12", Editor, GoToImplementation),
+    ("editor.action.goToTypeDefinition", "Go to Type Definition", "", Editor, GoToTypeDefinition),
+    ("workbench.action.closeQuickOpen", "Close Location Picker", "escape", LocationPicker, CloseLocationPicker),
     ("workbench.action.focusFirstEditorGroup", "Focus First Editor Group", "cmd-1", Global, FocusFirstGroup),
     ("workbench.action.focusSecondEditorGroup", "Focus Second Editor Group", "cmd-2", Global, FocusSecondGroup),
     ("workbench.action.focusThirdEditorGroup", "Focus Third Editor Group", "cmd-3", Global, FocusThirdGroup),
@@ -785,6 +799,8 @@ pub(crate) const MENUS: &[(&str, &[&str])] = &[
         &[
             "workbench.action.quickOpen",
             "workbench.action.gotoLine",
+            "workbench.action.navigateBack",
+            "workbench.action.navigateForward",
             "-",
             "workbench.action.nextEditor",
             "workbench.action.previousEditor",
@@ -822,6 +838,19 @@ mod tests {
         assert_eq!(command.key, "");
         assert!(palette_commands(true).iter().any(|c| c.id == command.id));
         assert_eq!(keys_of(&defaults(false), "antler.quickSearchInSearchView"), [("cmd-shift-f", Ctx::GoTo)]);
+    }
+
+    #[test]
+    fn navigation_history_commands_are_available_in_the_palette_with_default_keys() {
+        for (id, title, key) in [
+            ("workbench.action.navigateBack", "Go Back", "ctrl--"),
+            ("workbench.action.navigateForward", "Go Forward", "ctrl-shift--"),
+        ] {
+            let command = COMMANDS.iter().find(|command| command.id == id).unwrap();
+            assert_eq!(command.title, title);
+            assert_eq!(command.key, key);
+            assert!(palette_commands(true).iter().any(|candidate| candidate.id == id));
+        }
     }
 
     fn default_key(windows: bool, id: &str) -> Vec<String> {

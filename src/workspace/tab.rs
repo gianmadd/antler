@@ -364,6 +364,7 @@ impl FileTab {
         let ext = self.path.extension().or(self.path.file_name()).and_then(|e| e.to_str()).unwrap_or_default();
         let ext = ext.to_lowercase();
         match ext.as_str() {
+            "pyi" | "pyw" => "python",
             "h" => "c",
             "cc" | "cxx" | "hpp" | "hh" => "cpp",
             "jsx" | "mjs" | "cjs" => "javascript",
@@ -1649,6 +1650,8 @@ mod tests {
         assert_eq!(lang("/r/x.H"), "c");
         assert_eq!(lang("/r/App.jsx"), "javascript");
         assert_eq!(lang("/r/Makefile"), "makefile");
+        assert_eq!(lang("/r/stubs.pyi"), "python");
+        assert_eq!(lang("/r/window.pyw"), "python");
     }
 
     #[test]

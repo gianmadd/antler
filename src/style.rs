@@ -154,6 +154,10 @@ pub fn files_icon() -> Icon {
     Icon::empty().data(include_bytes!("../assets/icons/files.svg"))
 }
 
+pub fn text_search_icon() -> Icon {
+    Icon::empty().data(include_bytes!("../assets/icons/text-search.svg"))
+}
+
 /// Status-bar name of an editor language (as `FileTab::language` gives it).
 pub fn language_name(lang: &str) -> &str {
     match lang {

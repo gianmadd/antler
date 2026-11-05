@@ -36,10 +36,14 @@ pub fn parse(value: &Value) -> (Vec<View>, Vec<String>) {
 
 /// The icons to draw, in order: Ports only remotely; append a hidden active view.
 pub fn shown(list: &[View], remote: bool, active: Option<View>) -> Vec<View> {
+    shown_with_references(list, remote, active, active == Some(View::References))
+}
+
+pub fn shown_with_references(list: &[View], remote: bool, active: Option<View>, has_references: bool) -> Vec<View> {
     let mut shown: Vec<_> = list
         .iter()
         .copied()
-        .filter(|view| remote || *view != View::Ports)
+        .filter(|view| (remote || *view != View::Ports) && (*view != View::References || has_references))
         .collect();
     if let Some(active) = active.filter(|view| remote || *view != View::Ports)
         && !shown.contains(&active)
@@ -142,6 +146,13 @@ mod tests {
     }
 
     #[test]
+    fn references_icon_is_hidden_until_a_search_has_finished() {
+        let list = View::ALL.to_vec();
+        assert!(!shown_with_references(&list, false, Some(View::Git), false).contains(&View::References));
+        assert!(shown_with_references(&list, false, Some(View::Git), true).contains(&View::References));
+    }
+
+    #[test]
     fn hidden_active_view_is_appended_until_another_view_is_active() {
         let list = vec![View::Explorer, View::Git];
         assert_eq!(
@@ -160,8 +171,8 @@ mod tests {
     #[test]
     fn moves_views_to_the_target_position() {
         let list = View::ALL.to_vec();
-        assert_eq!(move_to(&list, View::Projects, View::Explorer), vec![View::Projects, View::Explorer, View::Git, View::Search, View::Ports]);
-        assert_eq!(move_to(&list, View::Git, View::Ports), vec![View::Explorer, View::Search, View::Projects, View::Ports, View::Git]);
+        assert_eq!(move_to(&list, View::Projects, View::Explorer), vec![View::Projects, View::Explorer, View::Git, View::Search, View::Ports, View::References]);
+        assert_eq!(move_to(&list, View::Git, View::Ports), vec![View::Explorer, View::Search, View::Projects, View::Ports, View::Git, View::References]);
     }
 
     #[test]
@@ -187,7 +198,7 @@ mod tests {
         let list = View::ALL.to_vec();
         assert_eq!(
             hide(&list, View::Git),
-            vec![View::Explorer, View::Search, View::Projects, View::Ports]
+            vec![View::Explorer, View::Search, View::Projects, View::Ports, View::References]
         );
         assert_eq!(hide(&list, View::Explorer), list);
     }
