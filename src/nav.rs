@@ -92,9 +92,11 @@ pub(crate) fn attach_lsp(editor: &mut EditorState, antler: WeakEntity<Antler>, p
         let Some(path) = url::Url::parse(params.uri.as_str()).ok().and_then(|url| url.to_file_path().ok()) else { return false };
         let loc = lsp_types::Location { uri: params.uri.clone(), range: params.selection.unwrap_or_default() };
         let weak = antler.clone();
-        let Some((host, open_texts, source)) = antler.update(cx, |this, cx| (this.ws.host.clone(), this.ws.lsp.handle(&source_path).map(|handle| handle.open_texts.clone()), this.current_place(cx))).ok() else { return false };
-        let open_texts = open_texts.unwrap_or_default();
+        let source_path = source_path.clone();
+        // Called while gpui-component updates the clicked editor: reading it now (current_place) panics, so defer.
         cx.spawn(async move |cx| {
+            let Some((host, open_texts, source)) = weak.update(cx, |this, cx| (this.ws.host.clone(), this.ws.lsp.handle(&source_path).map(|handle| handle.open_texts.clone()), this.current_place(cx))).ok() else { return };
+            let open_texts = open_texts.unwrap_or_default();
             let target = cx.background_spawn(async move { crate::lsp::targets_with_text(host.as_ref(), vec![loc], &open_texts).into_iter().next() }).await;
             if let Some(target) = target {
                 weak.update(cx, |this, cx| {
