@@ -604,9 +604,14 @@ mod pure_tests {
     }
     #[test]
     fn interpreter_uses_venv_then_python_path() {
+        let expected = if cfg!(windows) {
+            "Scripts/python.exe"
+        } else {
+            "bin/python"
+        };
         assert_eq!(
-            interpreter(Path::new("/r"), |p| p.ends_with("venv/bin/python")),
-            "/r/venv/bin/python"
+            interpreter(Path::new("/r"), |p| p.ends_with(format!("venv/{expected}"))),
+            Path::new("/r").join("venv").join(expected).to_string_lossy()
         );
         assert_eq!(interpreter(Path::new("/r"), |_| false), "python");
     }

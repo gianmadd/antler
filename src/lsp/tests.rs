@@ -91,6 +91,47 @@ fn wait_trace(
 }
 
 #[test]
+fn workspace_keeps_one_document_open_across_editor_groups() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let script = server_script(root);
+
+    let path = root.join("shared.py");
+    fs::write(&path, "initial\n").unwrap();
+    let mut ws = crate::workspace::Workspace::new(root.to_path_buf());
+    ws.lsp = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings {
+        python_path: Some(script.to_string_lossy().into_owned()),
+        ..Default::default()
+    });
+    let first = ws.open_path_now(&path, None, true);
+    let second = ws.split_group(false).unwrap();
+    for _ in 0..150 {
+        ws.sync_documents();
+        if ws.lsp.handle(&path).is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(ws.lsp.handle(&path).is_some(), "Workspace starts its language server");
+    ws.edit(second, "edit from second group\n".into());
+    ws.sync_documents();
+    ws.edit(first, "edit from first group\n".into());
+    ws.sync_documents();
+
+    wait_trace(root, |messages| messages.iter().filter(|m| m.pointer("/msg/method").and_then(|v| v.as_str()) == Some("textDocument/didChange")).count() >= 2);
+    ws.close_tab(second);
+    ws.sync_documents();
+    thread::sleep(Duration::from_millis(100));
+    let messages = trace(root);
+    let changes = messages.iter().filter(|m| m.pointer("/msg/method").and_then(|v| v.as_str()) == Some("textDocument/didChange")).collect::<Vec<_>>();
+    assert!(changes.iter().any(|m| m.pointer("/msg/params/contentChanges/0/text").and_then(|v| v.as_str()) == Some("edit from second group\n")));
+    assert!(changes.iter().any(|m| m.pointer("/msg/params/contentChanges/0/text").and_then(|v| v.as_str()) == Some("edit from first group\n")));
+    assert!(!messages.iter().any(|m| m.pointer("/msg/method").and_then(|v| v.as_str()) == Some("textDocument/didClose")));
+    assert!(ws.lsp.handle(&path).is_some(), "remaining editor group keeps the document available");
+    ws.lsp.shutdown();
+}
+
+#[test]
 fn jump_maps_every_lsp_location_shape_and_uses_utf16_columns() {
     let temp = tempdir().unwrap();
     let root = temp.path();
