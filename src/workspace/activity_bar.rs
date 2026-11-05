@@ -34,12 +34,8 @@ pub fn parse(value: &Value) -> (Vec<View>, Vec<String>) {
     (list, warnings)
 }
 
-/// The icons to draw, in order: Ports only remotely; append a hidden active view.
-pub fn shown(list: &[View], remote: bool, active: Option<View>) -> Vec<View> {
-    shown_with_references(list, remote, active, active == Some(View::References))
-}
-
-pub fn shown_with_references(list: &[View], remote: bool, active: Option<View>, has_references: bool) -> Vec<View> {
+/// The icons to draw, in order: Ports only remotely, References only once a search has results; append a hidden active view.
+pub fn shown(list: &[View], remote: bool, active: Option<View>, has_references: bool) -> Vec<View> {
     let mut shown: Vec<_> = list
         .iter()
         .copied()
@@ -141,25 +137,25 @@ mod tests {
     #[test]
     fn ports_are_only_shown_remotely() {
         let list = View::ALL.to_vec();
-        assert!(!shown(&list, false, None).contains(&View::Ports));
-        assert!(shown(&list, true, None).contains(&View::Ports));
+        assert!(!shown(&list, false, None, false).contains(&View::Ports));
+        assert!(shown(&list, true, None, false).contains(&View::Ports));
     }
 
     #[test]
     fn references_icon_is_hidden_until_a_search_has_finished() {
         let list = View::ALL.to_vec();
-        assert!(!shown_with_references(&list, false, Some(View::Git), false).contains(&View::References));
-        assert!(shown_with_references(&list, false, Some(View::Git), true).contains(&View::References));
+        assert!(!shown(&list, false, Some(View::Git), false).contains(&View::References));
+        assert!(shown(&list, false, Some(View::Git), true).contains(&View::References));
     }
 
     #[test]
     fn hidden_active_view_is_appended_until_another_view_is_active() {
         let list = vec![View::Explorer, View::Git];
         assert_eq!(
-            shown(&list, false, Some(View::Search)),
+            shown(&list, false, Some(View::Search), false),
             vec![View::Explorer, View::Git, View::Search]
         );
-        assert_eq!(shown(&list, false, Some(View::Git)), list);
+        assert_eq!(shown(&list, false, Some(View::Git), false), list);
     }
 
     #[test]
@@ -190,7 +186,7 @@ mod tests {
     #[test]
     fn reordering_in_local_window_keeps_hidden_ports_in_the_list() {
         let list = View::ALL.to_vec();
-        assert_eq!(shown(&move_to(&list, View::Projects, View::Explorer), false, None), vec![View::Projects, View::Explorer, View::Git, View::Search]);
+        assert_eq!(shown(&move_to(&list, View::Projects, View::Explorer), false, None, false), vec![View::Projects, View::Explorer, View::Git, View::Search]);
     }
 
     #[test]

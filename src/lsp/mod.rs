@@ -456,7 +456,6 @@ pub struct Target {
 }
 #[derive(Clone, Debug, Default)]
 pub struct References {
-    pub symbol: String,
     pub files: Vec<(PathBuf, Vec<(Target, String)>)>,
 }
 impl References {
@@ -499,16 +498,7 @@ impl Handle {
     pub fn references(&self, text: &str, line: usize, column: usize) -> References {
         use lsp_types::{Location, Position, ReferenceContext, TextDocumentPositionParams, Uri};
         use std::str::FromStr;
-        let symbol = text.lines().nth(line).map(|s| {
-            let chars: Vec<_> = s.chars().collect();
-            let at = column.min(chars.len());
-            let mut start = at;
-            while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') { start -= 1; }
-            let mut end = at;
-            while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') { end += 1; }
-            chars[start..end].iter().collect()
-        }).unwrap_or_default();
-        let Ok(uri) = Uri::from_str(&uri(&self.path)) else { return References { symbol, ..Default::default() } };
+        let Ok(uri) = Uri::from_str(&uri(&self.path)) else { return References::default() };
         let params = lsp_types::ReferenceParams {
             text_document_position: TextDocumentPositionParams { text_document: lsp_types::TextDocumentIdentifier { uri }, position: Position::new(line as u32, char_to_utf16(text.lines().nth(line).unwrap_or(""), column) as u32) },
             context: ReferenceContext { include_declaration: true },
@@ -526,7 +516,7 @@ impl Handle {
             if files.last().is_none_or(|(path, _)| *path != target.path) { files.push((target.path.clone(), Vec::new())); }
             files.last_mut().unwrap().1.push((target, line_text));
         }
-        References { symbol, files }
+        References { files }
     }
 
     /// Request a navigation destination. Columns from the editor are Unicode scalar offsets.
@@ -580,10 +570,6 @@ pub(crate) fn hover_to_char_range(text: &str, range: lsp_types::Range) -> lsp_ty
         ) as u32;
     }
     range
-}
-
-pub(crate) fn targets(host: &dyn Host, locations: Vec<lsp_types::Location>) -> Vec<Target> {
-    targets_with_text(host, locations, &HashMap::new())
 }
 
 pub(crate) fn targets_with_text(host: &dyn Host, locations: Vec<lsp_types::Location>, open_texts: &HashMap<PathBuf, String>) -> Vec<Target> {

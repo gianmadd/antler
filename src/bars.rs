@@ -34,7 +34,7 @@ impl Antler {
         let count = self.ws.changed_count();
         let (list, _) = activity_bar::parse(&cx.global::<crate::settings::Current>().0.activity_bar_views);
         let remote = self.remote.is_some();
-        let views = activity_bar::shown_with_references(&list, remote, self.ws.view, self.ws.references.is_some());
+        let views = activity_bar::shown(&list, remote, self.ws.view, self.ws.references.is_some());
         let item = |view: View, icon: Icon, label: &'static str, id: &str, badge: usize| {
             let text = crate::keys::label(cx, label, id);
             let on = self.ws.view == Some(view);

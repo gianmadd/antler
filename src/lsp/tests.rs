@@ -600,7 +600,6 @@ fn references_are_grouped_by_path_with_source_line_text() {
     });
     wait_for(&mut servers, &open);
     let result = servers.handle(&a).unwrap().references("alpha", 0, 0);
-    assert_eq!(result.symbol, "alpha");
     assert_eq!(result.count(), 3);
     assert_eq!(result.files.len(), 2);
     assert_eq!(result.files[0].0.canonicalize().unwrap(), a.canonicalize().unwrap());
