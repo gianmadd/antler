@@ -405,3 +405,7 @@ window.open_alert_dialog(cx, move |alert, _, _| {
 ## Keyboard-reachable hover actions
 
 For an opacity-hidden Button, put opacity on the Button itself and reveal it on `.focus(...)`; `.focus_visible(...)` did not activate during real Tab navigation in Antler. `DropdownButton::new(...).menu_accessibility_label(...).dropdown_menu(...)` keeps its default caret keyboard-operable; overriding `.button(...)` with an inert click handler leaves that custom button inert while the caret still opens the menu.
+
+## Markdown hover code fences
+
+gpui-component 0.8.1's `input/popovers/render_markdown` uses `TextView::markdown` with the default code-block highlighter, but exposes no option to hide the fence language label. Removing the fence info string prevents that label while also disabling syntax highlighting for that hover block.

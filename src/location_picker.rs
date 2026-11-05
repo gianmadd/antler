@@ -1,4 +1,4 @@
-use crate::{lsp::Target, workspace::history::Place, Antler};
+use crate::{lsp::{Jump, Target}, workspace::history::Place, Antler};
 use gpui_kit::component::{
     command::{Command, CommandItem, CommandState},
     v_flex,
@@ -11,12 +11,14 @@ pub(crate) struct Popup {
     state: Entity<CommandState>,
     targets: Vec<Target>,
     source: Option<Place>,
+    kind: Jump,
 }
 
 pub(crate) fn open(
     this: &mut Antler,
     targets: Vec<Target>,
     source: Option<Place>,
+    kind: Jump,
     window: &mut Window,
     cx: &mut Context<Antler>,
 ) {
@@ -26,6 +28,7 @@ pub(crate) fn open(
         state,
         targets,
         source,
+        kind,
     });
     cx.notify();
 }
@@ -68,15 +71,21 @@ impl Antler {
             .targets
             .iter()
             .map(|target| {
+                let path = target.path.strip_prefix(&self.ws.root).unwrap_or(&target.path);
                 CommandItem::new().label(format!(
                     "{}:{}:{}",
-                    target.path.display(),
+                    path.display(),
                     target.line + 1,
                     target.column + 1
                 ))
             })
             .collect::<Vec<_>>();
         let weak = cx.entity().downgrade();
+        let title = match popup.kind {
+            Jump::Definition => "Go to Definition",
+            Jump::TypeDefinition => "Go to Type Definition",
+            Jump::Implementation => "Go to Implementation",
+        };
         Some(
             deferred(
                 div()
@@ -103,7 +112,7 @@ impl Antler {
                             .child(
                                 v_flex().child(
                                     Command::new(&popup.state)
-                                        .placeholder("Go to Definition")
+                                        .placeholder(title)
                                         .filterable(false)
                                         .items(items)
                                         .on_confirm(move |index, _, cx| {

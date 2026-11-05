@@ -24,7 +24,7 @@ impl Antler {
             View::Search => (Icon::new(IconName::Search), "Search", "workbench.view.search"),
             View::Projects => (Icon::new(IconName::Folder), "Projects", "antler.showProjects"),
             View::Ports => (Icon::new(IconName::Globe), "Ports", "~remote.forwardedPorts.focus"),
-            View::References => (Icon::new(IconName::Search), "References", "editor.action.goToReferences"),
+            View::References => (style::text_search_icon(), "References", "editor.action.goToReferences"),
         }
     }
 

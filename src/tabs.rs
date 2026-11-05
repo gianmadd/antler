@@ -170,7 +170,10 @@ impl Antler {
                             .action(move |_, _, _cx| {
                                 let (this, log) = (this.clone(), log.clone());
                                 Button::new("open-python-server-log").label("Open Log").on_click(move |_, _, cx| {
-                                    this.update(cx, |this, cx| this.open_path(log.clone(), None, None, true, cx));
+                                    this.update(cx, |this, cx| {
+                                        this.open_path(log.clone(), None, None, true, cx);
+                                        this.focus_editor = true;
+                                    });
                                 })
                             }),
                         cx,

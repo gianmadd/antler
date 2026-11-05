@@ -8,6 +8,23 @@ use crate::{Antler, workspace::history::Place};
 
 actions!(antler, [GoBack, GoForward, GoToDefinition, GoToTypeDefinition, GoToImplementation, FindReferences]);
 
+fn hide_hover_fence_languages(markdown: &str) -> String {
+    markdown
+        .split('\n')
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if (trimmed.starts_with("```") || trimmed.starts_with("~~~")) && trimmed.len() > 3 {
+                let fence = &trimmed[..3];
+                if !trimmed[3..].starts_with(fence) {
+                    return format!("{}{}", &line[..line.len() - trimmed.len()], fence);
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(crate) struct EditorLsp { antler: WeakEntity<Antler>, path: PathBuf }
 
 impl DefinitionProvider for EditorLsp {
@@ -42,11 +59,27 @@ impl HoverProvider for EditorLsp {
         let source = text.to_string();
         cx.background_spawn(async move {
             let Some(mut hover) = handle.hover(&source, line, column) else { return Ok(None) };
+            if let lsp_types::HoverContents::Markup(markup) = &mut hover.contents {
+                markup.value = hide_hover_fence_languages(&markup.value);
+            }
             if let Some(range) = &mut hover.range {
                 *range = crate::lsp::hover_to_char_range(&source, *range);
             }
             Ok(Some(hover))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hide_hover_fence_languages;
+
+    #[test]
+    fn hover_fence_languages_are_removed_without_changing_code_or_other_markdown() {
+        assert_eq!(
+            hide_hover_fence_languages("```python\ndef f(): pass\n```\ntext\n~~~rust\nlet x = 1;\n~~~"),
+            "```\ndef f(): pass\n```\ntext\n~~~\nlet x = 1;\n~~~"
+        );
     }
 }
 
@@ -108,6 +141,7 @@ impl Antler {
     pub(crate) fn go_to(&mut self, kind: crate::lsp::Jump, window: &mut Window, cx: &mut Context<Self>) {
         let Some((handle, text, line, column)) = self.cursor_request(cx) else { return };
         let source = self.current_place(cx);
+        let picker_kind = kind;
         cx.spawn_in(window, async move |this, cx| {
             let targets = cx.background_spawn(async move { handle.jump(kind, &text, line, column) }).await;
             this.update_in(cx, |this, window, cx| match targets.as_slice() {
@@ -116,7 +150,7 @@ impl Antler {
                     this.open_path(target.path.clone(), Some(target.line + 1), Some(target.column), true, cx);
                 },
                 [] => {},
-                _ => crate::location_picker::open(this, targets, source, window, cx),
+                _ => crate::location_picker::open(this, targets, source, picker_kind, window, cx),
             }).ok();
         }).detach();
     }
