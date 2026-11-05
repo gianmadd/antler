@@ -6,7 +6,7 @@ use std::{path::PathBuf, rc::Rc};
 
 use crate::{Antler, workspace::history::Place};
 
-actions!(antler, [GoBack, GoForward, GoToDefinition, GoToTypeDefinition, GoToImplementation]);
+actions!(antler, [GoBack, GoForward, GoToDefinition, GoToTypeDefinition, GoToImplementation, FindReferences]);
 
 pub(crate) struct EditorLsp { antler: WeakEntity<Antler>, path: PathBuf }
 
@@ -76,6 +76,23 @@ pub(crate) fn attach_lsp(editor: &mut EditorState, antler: WeakEntity<Antler>, p
 }
 
 impl Antler {
+    pub(crate) fn find_references(&mut self, _: &FindReferences, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((handle, text, line, column)) = self.cursor_request(cx) else { return };
+        self.ws.references = Some(crate::lsp::References::default());
+        self.ws.view = Some(crate::workspace::View::References);
+        self.reference_generation = self.reference_generation.wrapping_add(1);
+        let generation = self.reference_generation;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let references = cx.background_spawn(async move { handle.references(&text, line, column) }).await;
+            this.update(cx, |this, cx| {
+                if this.reference_generation == generation {
+                    this.ws.references = Some(references);
+                    cx.notify();
+                }
+            }).ok();
+        }).detach();
+    }
     pub(crate) fn go_to_definition_action(&mut self, _: &GoToDefinition, window: &mut Window, cx: &mut Context<Self>) { self.go_to(crate::lsp::Jump::Definition, window, cx); }
     pub(crate) fn go_to_type_definition_action(&mut self, _: &GoToTypeDefinition, window: &mut Window, cx: &mut Context<Self>) { self.go_to(crate::lsp::Jump::TypeDefinition, window, cx); }
     pub(crate) fn go_to_implementation_action(&mut self, _: &GoToImplementation, window: &mut Window, cx: &mut Context<Self>) { self.go_to(crate::lsp::Jump::Implementation, window, cx); }

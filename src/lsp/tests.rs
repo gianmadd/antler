@@ -24,6 +24,7 @@ while True:
     elif method == "initialized":
         send({{"jsonrpc":"2.0", "id":0, "method":"workspace/configuration", "params":{{"items":[{{"section":"python"}},{{"section":"basedpyright"}}]}}}})
         send({{"jsonrpc":"2.0", "id":999, "method":"standin/unknown", "params":{{}}}})
+    elif method == "textDocument/references": send({{"jsonrpc":"2.0", "id":msg["id"], "result":[{{"uri":"file://" + os.getcwd() + "/b.py", "range":{{"start":{{"line":1,"character":2}},"end":{{"line":1,"character":5}}}}}},{{"uri":"file://" + os.getcwd() + "/a.py", "range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":3}}}}}},{{"uri":"file://" + os.getcwd() + "/b.py", "range":{{"start":{{"line":0,"character":1}},"end":{{"line":0,"character":4}}}}}}]}})
     elif method in ("textDocument/definition", "textDocument/typeDefinition", "textDocument/implementation"):
         line = msg["params"]["position"]["line"]
         uri = msg["params"]["textDocument"]["uri"]
@@ -311,3 +312,26 @@ fn disabled_missing_and_remote_hosts_do_not_start_servers() {
     assert!(remote_servers.handle(&file).is_none());
     remote.close();
 }
+#[test]
+fn references_are_grouped_by_path_with_source_line_text() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let program = server_script(root);
+    fs::write(root.join("a.py"), "alpha ref\n").unwrap();
+    fs::write(root.join("b.py"), "beta ref\nsecond ref\n").unwrap();
+    let a = root.join("a.py");
+    let open = vec![(a.clone(), "alpha".into())];
+    let mut servers = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings {
+        python_off: false, python_path: Some(program.to_string_lossy().into_owned()),
+    });
+    wait_for(&mut servers, &open);
+    let result = servers.handle(&a).unwrap().references("alpha", 0, 0);
+    assert_eq!(result.symbol, "alpha");
+    assert_eq!(result.count(), 3);
+    assert_eq!(result.files.len(), 2);
+    assert_eq!(result.files[0].0.canonicalize().unwrap(), a.canonicalize().unwrap());
+    assert_eq!(result.files[0].1[0].1, "alpha ref");
+    assert_eq!(result.files[1].0.canonicalize().unwrap(), root.join("b.py").canonicalize().unwrap());
+    assert_eq!(result.files[1].1.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>(), ["beta ref", "second ref"]);
+}
+

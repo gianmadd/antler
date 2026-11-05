@@ -13,7 +13,8 @@ use crate::branch_view::CloseBranch;
 use crate::explorer::*;
 use crate::theme_view::{InstallThemeFromVsix, SelectIconTheme, SelectTheme};
 use crate::goto_view::{CloseGoToFile, CommandPalette, GoToFile, GoToLine, QuickSearchInSearchView, QuickTextSearch};
-use crate::nav::{GoBack, GoForward, GoToDefinition, GoToImplementation, GoToTypeDefinition};
+use crate::nav::{FindReferences, GoBack, GoForward, GoToDefinition, GoToImplementation};
+use crate::nav::GoToTypeDefinition;
 use crate::location_picker::CloseLocationPicker;
 use crate::minimap_view::{ToggleMinimap, ToggleRenderCharacters};
 use crate::stash_view::CloseStash;
@@ -227,6 +228,8 @@ cmds![
     ("workbench.action.gotoLine", "Go to Line…", "ctrl-g", Global, GoToLine),
     ("workbench.action.navigateBack", "Go Back", "ctrl--", Global, GoBack),
     ("workbench.action.navigateForward", "Go Forward", "ctrl-shift--", Global, GoForward),
+    ("editor.action.goToReferences", "Find All References", "shift-f12", Editor, FindReferences),
+    ("references-view.findReferences", "Find All References", "shift-alt-f12", Editor, FindReferences),
     ("editor.action.revealDefinition", "Go to Definition", "f12", Editor, GoToDefinition),
     ("editor.action.goToImplementation", "Go to Implementation", "cmd-f12", Editor, GoToImplementation),
     ("editor.action.goToTypeDefinition", "Go to Type Definition", "", Editor, GoToTypeDefinition),

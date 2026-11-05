@@ -151,6 +151,7 @@ pub struct Workspace {
     changed: HashSet<PathBuf>,
     pub search: Search,
     pub quick_search: QuickSearch,
+    pub references: Option<crate::lsp::References>,
     /// Cmd+P "Go to File".
     pub goto: crate::goto::GoTo,
     /// The last clicked row of any list (Explorer, Git, Ricerca, Grafo), as a key the view builds; drawn with `--sel`.
@@ -185,11 +186,12 @@ pub enum View {
     Projects,
     /// Forwarded ports: Remote windows only.
     Ports,
+    References,
 }
 
 impl View {
     /// Default Activity bar order.
-    pub const ALL: [View; 5] = [View::Explorer, View::Git, View::Search, View::Projects, View::Ports];
+    pub const ALL: [View; 6] = [View::Explorer, View::Git, View::Search, View::Projects, View::Ports, View::References];
 
     /// The setting id for this view.
     pub fn id(self) -> &'static str {
@@ -199,6 +201,7 @@ impl View {
             View::Search => "search",
             View::Projects => "projects",
             View::Ports => "ports",
+            View::References => "references",
         }
     }
 
@@ -281,6 +284,7 @@ impl Workspace {
             changed: HashSet::new(),
             search: Search::default(),
             quick_search: QuickSearch::default(),
+            references: None,
             goto: Default::default(),
             selected: None,
             also_selected: Vec::new(),
