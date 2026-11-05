@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, Instant},
 };
 static NEXT_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -71,13 +72,21 @@ pub fn language(path: &Path) -> Option<&'static ServerDef> {
         .iter()
         .find(|server| server.extensions.contains(&ext))
 }
+#[derive(Debug)]
 pub enum Event {
     NotFound { language: &'static str },
+    Stopped { language: &'static str, folder: PathBuf, log: PathBuf },
+}
+pub fn should_restart(exits: &mut Vec<Instant>, now: Instant) -> bool {
+    exits.retain(|exit| now.saturating_duration_since(*exit) < Duration::from_secs(180));
+    exits.push(now);
+    exits.len() < 5
 }
 struct Server {
     client: Arc<client::Client>,
     opened: HashSet<PathBuf>,
     log: PathBuf,
+    exits: Vec<Instant>,
 }
 struct Starting {
     result: std::sync::mpsc::Receiver<(Option<Server>, bool)>,
@@ -92,6 +101,11 @@ pub struct Servers {
     starting: HashMap<ServerKey, Starting>,
     notified: HashSet<&'static str>,
     events: Vec<Event>,
+    exited: Arc<std::sync::Mutex<Vec<ServerKey>>>,
+    crash_exits: HashMap<ServerKey, Vec<Instant>>,
+    stopped: HashSet<ServerKey>,
+    logs: HashMap<ServerKey, PathBuf>,
+    clock: Box<dyn Fn() -> Instant + Send>,
 }
 impl Servers {
     pub fn new(host: Arc<dyn Host>, root: PathBuf, settings: LspSettings) -> Self {
@@ -104,6 +118,11 @@ impl Servers {
             starting: HashMap::new(),
             notified: HashSet::new(),
             events: vec![],
+            exited: Arc::new(std::sync::Mutex::new(vec![])),
+            crash_exits: HashMap::new(),
+            stopped: HashSet::new(),
+            logs: HashMap::new(),
+            clock: Box::new(Instant::now),
         }
     }
     pub fn set_settings(&mut self, s: LspSettings) {
@@ -137,6 +156,7 @@ impl Servers {
                 }
             }
         }
+        self.handle_exits();
         let mut now = HashMap::new();
         for (path, text) in open
             .filter(|(p, _)| matches!(p.extension().and_then(|s| s.to_str()), Some("py" | "pyi")))
@@ -154,6 +174,7 @@ impl Servers {
             };
             if !self.servers.contains_key(&key)
                 && !self.starting.contains_key(&key)
+                && !self.stopped.contains(&key)
                 && !self.notified.contains("python")
             {
                 self.start(&key);
@@ -231,11 +252,17 @@ impl Servers {
             .find(|def| def.language == k.language)
             .copied()
             .unwrap();
+        let exited = self.exited.clone();
+        let exit_key = k.clone();
+        let exits = self.crash_exits.get(k).cloned().unwrap_or_default();
         let log = crate::paths::cache().join("logs").join(format!(
             "python-{}-{}.log",
             std::process::id(),
             NEXT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
+        self.logs.insert(k.clone(), log.clone());
+        let _ = std::fs::create_dir_all(log.parent().unwrap());
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open(&log);
         std::thread::spawn(move || {
             let names = custom
                 .as_deref()
@@ -265,7 +292,6 @@ impl Servers {
                 (process.kill)();
                 return;
             }
-            let _ = std::fs::create_dir_all(log.parent().unwrap());
             let python = interpreter(&key.folder, |p| host.exists(p));
             let result = client::Client::start(
                 process,
@@ -274,13 +300,15 @@ impl Servers {
                     python,
                 },
                 log.clone(),
-                Box::new(|| {}),
+                cancelled.clone(),
+                Box::new(move || exited.lock().unwrap().push(exit_key)),
             )
             .ok()
             .map(|client| Server {
                 client,
                 opened: HashSet::new(),
                 log,
+                exits,
             });
             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Some(server) = result {
@@ -296,10 +324,73 @@ impl Servers {
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
+    fn handle_exits(&mut self) {
+        let keys = std::mem::take(&mut *self.exited.lock().unwrap());
+        for key in keys {
+            let server = self.servers.remove(&key);
+            if server.is_none() && self.starting.contains_key(&key) {
+                self.exited.lock().unwrap().push(key);
+                continue;
+            }
+            let mut exits = server
+                .as_ref()
+                .map(|server| server.exits.clone())
+                .or_else(|| self.crash_exits.get(&key).cloned())
+                .unwrap_or_default();
+            let restart = should_restart(&mut exits, (self.clock)());
+            if restart {
+                self.crash_exits.insert(key.clone(), exits);
+                self.start(&key);
+            } else {
+                self.stopped.insert(key.clone());
+                let log = server.map(|server| server.log).or_else(|| self.logs.get(&key).cloned());
+                let Some(log) = log else { continue };
+                self.events.push(Event::Stopped {
+                    language: key.language,
+                    folder: key.folder,
+                    log,
+                });
+            }
+        }
+    }
+    pub fn restart(&mut self) {
+        self.stop_preserving_documents();
+        self.notified.clear();
+        self.crash_exits.clear();
+        self.stopped.clear();
+    }
+    #[cfg(test)]
+    pub fn set_clock(&mut self, clock: Box<dyn Fn() -> Instant + Send>) {
+        self.clock = clock;
+    }
     pub fn shutdown(&mut self) {
         self.stop();
     }
+    pub fn begin_shutdown(&mut self) -> Vec<Arc<client::Client>> {
+        for (_, starting) in self.starting.drain() {
+            starting.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        }
+        let clients = self.servers.drain().map(|(_, server)| server.client).collect();
+        self.docs.clear();
+        clients
+    }
+    pub fn shutdown_now(&mut self) {
+        for starting in self.starting.values() {
+            starting.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.starting.clear();
+        for (_, server) in self.servers.drain() {
+            server.client.kill_now();
+        }
+        self.docs.clear();
+    }
     fn stop(&mut self) {
+        self.stop_preserving_documents();
+        self.docs.clear();
+        self.crash_exits.clear();
+        self.stopped.clear();
+    }
+    fn stop_preserving_documents(&mut self) {
         for starting in self.starting.values() {
             starting
                 .cancelled
@@ -309,7 +400,7 @@ impl Servers {
         for (_, s) in self.servers.drain() {
             s.client.shutdown();
         }
-        self.docs.clear();
+        self.servers.clear();
     }
 }
 fn uri(p: &Path) -> String {
@@ -543,5 +634,16 @@ mod pure_tests {
         let open = HashMap::from([(path.clone(), "aé😀x".to_string())]);
         let result = targets_with_text(crate::host::local().as_ref(), vec![location], &open);
         assert_eq!((result[0].column, result[0].end_column), (3, 4));
+    }
+
+    #[test]
+    fn restart_limit_allows_five_starts_in_three_minutes() {
+        let start = std::time::Instant::now();
+        let mut exits = vec![];
+        for _ in 0..4 {
+            assert!(should_restart(&mut exits, start));
+        }
+        assert!(!should_restart(&mut exits, start));
+        assert!(should_restart(&mut exits, start + std::time::Duration::from_secs(180)));
     }
 }

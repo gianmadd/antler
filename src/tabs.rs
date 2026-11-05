@@ -125,6 +125,12 @@ impl Render for DraggedTab {
 }
 
 impl Antler {
+    pub(crate) fn restart_language_server(&mut self, _: &crate::RestartLanguageServer, _: &mut Window, cx: &mut Context<Self>) {
+        self.ws.lsp.restart();
+        self.ws.sync_documents();
+        cx.notify();
+    }
+
     /// Creates an editor for each new file tab, drops those of closed tabs, and pushes model-side changes
     /// (reload, "open at line") into them.
     fn load_blame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -156,6 +162,20 @@ impl Antler {
                     .title("Python"),
                     cx,
                 ),
+                crate::lsp::Event::Stopped { language: "python", folder, log } => {
+                    let this = cx.entity();
+                    window.push_notification(
+                        Notification::warning(format!("Python language server stopped in {}", folder.display()))
+                            .title("Python")
+                            .action(move |_, _, _cx| {
+                                let (this, log) = (this.clone(), log.clone());
+                                Button::new("open-python-server-log").label("Open Log").on_click(move |_, _, cx| {
+                                    this.update(cx, |this, cx| this.open_path(log.clone(), None, None, true, cx));
+                                })
+                            }),
+                        cx,
+                    );
+                }
                 _ => {}
             }
         }
@@ -559,7 +579,7 @@ impl Antler {
 
     /// Asks about this window's unsaved tabs, then moves on to the next window not in `done`, and quits after the last.
     fn quit_chain(&mut self, done: Vec<u64>, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_unsaved(self.ws.quit_dirty_tabs(), window, cx, move |this, _, cx| {
+        self.confirm_unsaved(self.ws.quit_dirty_tabs(), window, cx, move |this, window, cx| {
             let done: Vec<u64> = done.iter().copied().chain([this.id]).collect();
             let next = cx.global::<crate::Windows>().0.iter().find(|e| !done.contains(&e.id)).map(|e| e.view.clone());
             match next {
@@ -571,7 +591,32 @@ impl Antler {
                         })
                         .ok();
                 }
-                None => cx.quit(),
+                None => {
+                    let mut clients = Vec::new();
+                    let views: Vec<_> = cx.global::<crate::Windows>().0.iter().map(|e| (e.id, e.view.clone())).collect();
+                    for (id, (handle, view)) in views {
+                        if id == this.id {
+                            clients.extend(this.ws.lsp.begin_shutdown());
+                            this.remote.iter().for_each(|r| r.remote.close());
+                        } else {
+                            let _ = handle.update(cx, |_, _, cx| {
+                                let _ = view.update(cx, |t, _cx| {
+                                    clients.extend(t.ws.lsp.begin_shutdown());
+                                    t.remote.iter().for_each(|r| r.remote.close());
+                                });
+                            });
+                        }
+                    }
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_spawn(async move {
+                            std::thread::scope(|scope| {
+                                let jobs = clients.into_iter().map(|client| scope.spawn(move || client.shutdown_bounded())).collect::<Vec<_>>();
+                                for job in jobs { let _ = job.join(); }
+                            });
+                        }).await;
+                        this.update_in(cx, |_, _, cx| cx.quit()).ok();
+                    }).detach();
+                }
             }
         });
     }

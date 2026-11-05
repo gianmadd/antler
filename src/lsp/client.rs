@@ -27,6 +27,7 @@ pub struct Client {
     pending: Pending,
     next_id: AtomicU64,
     alive: Arc<AtomicBool>,
+    shutting_down: Arc<AtomicBool>,
     kill: Kill,
 }
 
@@ -36,6 +37,7 @@ impl Client {
         process: Process,
         init: Init,
         log: PathBuf,
+        cancelled: Arc<AtomicBool>,
         on_exit: Box<dyn FnOnce() + Send>,
     ) -> Result<Arc<Self>, String> {
         let Process {
@@ -47,15 +49,18 @@ impl Client {
         let kill = Arc::new(Mutex::new(kill));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
+        let shutting_down = Arc::new(AtomicBool::new(false));
         let (writer, incoming) = mpsc::channel::<Value>();
         let client = Arc::new(Self {
             writer: writer.clone(),
             pending: pending.clone(),
             next_id: AtomicU64::new(1),
             alive: alive.clone(),
+            shutting_down: shutting_down.clone(),
             kill: kill.clone(),
         });
         let stderr_log = log.clone();
+        let exit_expected = shutting_down.clone();
         std::thread::spawn(move || {
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
@@ -126,12 +131,14 @@ impl Client {
                 let _ = reply.send(Err("Language server exited".into()));
             }
             (kill.lock().unwrap())();
-            on_exit();
+            if !exit_expected.load(Ordering::Acquire) {
+                on_exit();
+            }
         });
         let root_uri = url::Url::from_directory_path(&init.root)
             .map_err(|_| "Invalid source folder")?
             .to_string();
-        let result = client.request("initialize", json!({
+        let result = client.request_cancelable("initialize", json!({
             "processId": std::process::id(), "rootUri":root_uri,
             "workspaceFolders":[{"uri":root_uri,"name":init.root.file_name().unwrap_or_default().to_string_lossy()}],
             "capabilities": {
@@ -143,7 +150,7 @@ impl Client {
                 },
                 "general":{"positionEncodings":["utf-16"]}
             }
-        }));
+        }), &cancelled);
         if let Err(error) = result {
             (client.kill.lock().unwrap())();
             return Err(error);
@@ -163,6 +170,10 @@ impl Client {
     }
 
     pub fn request(&self, method: &str, params: Value) -> Reply {
+        self.request_cancelable(method, params, &AtomicBool::new(false))
+    }
+
+    fn request_cancelable(&self, method: &str, params: Value, cancelled: &AtomicBool) -> Reply {
         if !self.is_alive() {
             return Err("Language server exited".into());
         }
@@ -177,15 +188,32 @@ impl Client {
             self.pending.lock().unwrap().remove(&id);
             return Err("Language server writer stopped".into());
         }
-        let result = receive
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| "Language server request timed out".to_string());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let result: Result<Reply, String> = loop {
+            if cancelled.load(Ordering::Acquire) {
+                self.shutting_down.store(true, Ordering::Release);
+                (self.kill.lock().unwrap())();
+                break Err("Language server startup cancelled".into());
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break Err("Language server request timed out".into());
+            }
+            match receive.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok(reply) => break Ok(reply),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err("Language server exited".into());
+                }
+            }
+        };
         self.pending.lock().unwrap().remove(&id);
         result?
     }
 
     /// The UI never waits for shutdown; kill bounds even a hung shutdown request.
     pub fn shutdown(self: &Arc<Self>) {
+        self.shutting_down.store(true, Ordering::Release);
         let client = self.clone();
         std::thread::spawn(move || {
             let _ = client.request("shutdown", Value::Null);
@@ -197,6 +225,20 @@ impl Client {
             std::thread::sleep(Duration::from_secs(2));
             (client.kill.lock().unwrap())();
         });
+    }
+
+    pub fn shutdown_bounded(self: &Arc<Self>) {
+        self.shutdown();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while self.is_alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        (self.kill.lock().unwrap())();
+    }
+
+    pub fn kill_now(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        (self.kill.lock().unwrap())();
     }
 }
 
