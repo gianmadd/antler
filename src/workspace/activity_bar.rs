@@ -171,8 +171,8 @@ mod tests {
     #[test]
     fn moves_views_to_the_target_position() {
         let list = View::ALL.to_vec();
-        assert_eq!(move_to(&list, View::Projects, View::Explorer), vec![View::Projects, View::Explorer, View::Git, View::Search, View::Ports]);
-        assert_eq!(move_to(&list, View::Git, View::Ports), vec![View::Explorer, View::Search, View::Projects, View::Ports, View::Git]);
+        assert_eq!(move_to(&list, View::Projects, View::Explorer), vec![View::Projects, View::Explorer, View::Git, View::Search, View::Ports, View::References]);
+        assert_eq!(move_to(&list, View::Git, View::Ports), vec![View::Explorer, View::Search, View::Projects, View::Ports, View::Git, View::References]);
     }
 
     #[test]
@@ -198,7 +198,7 @@ mod tests {
         let list = View::ALL.to_vec();
         assert_eq!(
             hide(&list, View::Git),
-            vec![View::Explorer, View::Search, View::Projects, View::Ports]
+            vec![View::Explorer, View::Search, View::Projects, View::Ports, View::References]
         );
         assert_eq!(hide(&list, View::Explorer), list);
     }
