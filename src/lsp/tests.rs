@@ -117,6 +117,35 @@ fn wait_for(server: &mut Servers, open: &[(PathBuf, String)]) {
     }
     panic!("stand-in language servers did not initialize");
 }
+
+#[test]
+fn busy_tracks_pending_and_exited_servers() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let script = server_script(root);
+    let path = root.join("x.py");
+    let open = [(path.clone(), "print(1)".to_string())];
+    let mut servers = Servers::new(crate::host::local(), root.to_path_buf(), LspSettings {
+        python_path: Some(script.to_string_lossy().into_owned()),
+        ..Default::default()
+    });
+
+    servers.sync(open.iter().map(|(p, t)| (p.as_path(), t.as_str())));
+    assert!(servers.busy(), "source folder resolution or server start is pending");
+    wait_for(&mut servers, &open);
+    assert!(!servers.busy(), "initialized server is idle");
+
+    servers.servers.values().next().unwrap().client.kill_now();
+    for _ in 0..100 {
+        if !servers.servers.values().next().unwrap().client.is_alive() { break; }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(servers.busy(), "an exited server needs sync handling");
+    servers.sync(open.iter().map(|(p, t)| (p.as_path(), t.as_str())));
+    assert!(servers.busy(), "restart work is pending after the exit is handled");
+    servers.shutdown();
+}
+
 fn trace(dir: &Path) -> Vec<serde_json::Value> {
     let text = fs::read_to_string(dir.join("trace.jsonl")).unwrap_or_default();
     text.lines()

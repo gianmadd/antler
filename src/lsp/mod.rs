@@ -144,6 +144,12 @@ impl Servers {
             self.stop();
         }
     }
+    pub fn busy(&self) -> bool {
+        !self.starting.is_empty()
+            || !self.resolving.is_empty()
+            || !self.exited.lock().unwrap().is_empty()
+            || self.servers.values().any(|server| !server.client.is_alive())
+    }
     pub fn sync<'a>(&mut self, open: impl Iterator<Item = (&'a Path, &'a str)>) {
         if self.settings.python_off || !self.host.supports_processes() {
             return;

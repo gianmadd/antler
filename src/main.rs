@@ -938,6 +938,17 @@ fn open_window(cx: &mut App, mut save: WindowSave, mut error: Option<String>, li
             for path in bench_open.split(':').filter(|p| !p.is_empty()) {
                 antler.open_path(PathBuf::from(path), None, None, true, cx);
             }
+            let this = cx.entity().downgrade();
+            cx.spawn_in(window, async move |_, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                    if this.update_in(cx, |this, _, cx| {
+                        if this.ws.lsp.busy() { cx.notify(); }
+                    }).is_err() {
+                        return;
+                    }
+                }
+            }).detach();
             antler
         })
     })
